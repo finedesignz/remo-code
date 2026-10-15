@@ -25,12 +25,18 @@ const mockState: {
   annotations: any[]
   dispatched: any[]
   broadcasts: any[]
+  mapping: any
+  statusWrites: any[]
+  mappingWrites: any[]
 } = {
   secret: TEST_SECRET,
   attempts: [],
   annotations: [],
   dispatched: [],
   broadcasts: [],
+  mapping: null,
+  statusWrites: [],
+  mappingWrites: [],
 }
 
 // Spread real shared modules so non-overridden exports stay resolvable for
@@ -56,8 +62,9 @@ mock.module('../src/db/revanote-dal.ts', () => ({
     mockState.annotations.push(row)
     return row
   },
-  updateAnnotationStatus: async () => {},
-  resolveRevanoteMappingForHost: async () => null,
+  updateAnnotationStatus: async (...a: any[]) => { mockState.statusWrites.push(a) },
+  setAnnotationMappingId: async (...a: any[]) => { mockState.mappingWrites.push(a) },
+  resolveRevanoteMappingForHost: async () => mockState.mapping,
 }))
 
 mock.module('../src/revanote/dispatcher.ts', () => ({
@@ -89,6 +96,9 @@ beforeEach(() => {
   mockState.annotations = []
   mockState.dispatched = []
   mockState.broadcasts = []
+  mockState.mapping = null
+  mockState.statusWrites = []
+  mockState.mappingWrites = []
 })
 
 const validBody = () => ({
@@ -209,5 +219,19 @@ describe('POST /api/revanote/webhook/:user_id/:token', () => {
     expect(r1.status).toBe(202)
     expect(r2.status).toBe(202)
     expect(mockState.annotations.length).toBe(1)
+  })
+})
+
+describe('webhook mapping pre-resolve (stale-snapshot class)', () => {
+  test('5: pre-resolve writes ONLY mapping_id, never a status from the insert-time snapshot', async () => {
+    mockState.mapping = { id: 'map-9' }
+    const res = await app.request(`/api/revanote/webhook/${TEST_USER_ID}/${TEST_SECRET}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(validBody()),
+    })
+    expect(res.status).toBe(202)
+    expect(mockState.statusWrites).toHaveLength(0)
+    expect(mockState.mappingWrites).toEqual([['ann-1', 'map-9']])
   })
 })

@@ -23,7 +23,7 @@
  */
 import { z } from 'zod'
 
-export const RevanoteResult = z.object({
+const RevanoteResultBase = z.object({
   resolved: z.boolean(),
   action_taken: z.string().default(''),
   // `.nullable()` alongside `.optional()`: an agent that made no assumption /
@@ -35,21 +35,52 @@ export const RevanoteResult = z.object({
   agent_reply: z.string().optional().nullable(),
   files_changed: z.array(z.string()).default([]),
   deployed: z.boolean().optional().nullable(),
+  // Gate for `resolved: true` (see commit-verify.ts) — the pushed commit SHA
+  // the agent claims made the fix. Required for resolved to be trusted;
+  // missing/unverifiable ⇒ finalizeAnnotationReply downgrades to resolved=false.
+  commit_sha: z.string().optional().nullable(),
+  // Advisory only (not gated) — the live URL the agent claims to have
+  // re-fetched to confirm the deploy. See prompt.ts.
+  deploy_url: z.string().optional().nullable(),
   needs_clarification: z.boolean().optional().nullable(),
   clarification_question: z.string().optional().nullable(),
   // Phase 5 — best-guess-default fix contract (additive).
   assumption: z.string().optional().nullable(),
   clarification_reason: z.string().optional().nullable(),
-  // fix/revanote-verify-pushed — the pushed commit (and branch) a resolved
-  // reply stands on. The hub verifies it on the remote before accepting
-  // `resolved: true` (see commit-verify.ts); the agent's word alone is not enough.
-  commit_sha: z.string().optional().nullable(),
+  // The branch the agent pushed (commit_sha is declared above); the hub
+  // verifies the commit on the remote (see commit-verify.ts).
   branch: z.string().optional().nullable(),
 })
 
+export type RevanoteResultBase = z.infer<typeof RevanoteResultBase>
+
+// Dispatch-generation binding: the hub states a `dispatch_id` in the prompt (the
+// annotation_runs id of THAT dispatch) and the agent MUST echo it. A reply is
+// correlated by session only, so without this a late reply from a previous
+// dispatch (hub restart, retry) is indistinguishable from the current one and
+// would finalize it. Required: a reply without it is "not mine" (see
+// `extractDispatchId` + the revanote RunStore.shouldFinalize hooks).
+export const RevanoteResult = RevanoteResultBase.extend({
+  dispatch_id: z.string().min(1),
+})
 export type RevanoteResult = z.infer<typeof RevanoteResult>
 
 export const ENVELOPE_RE = /<<JSON>>([\s\S]*?)<<END>>/i
+
+const DISPATCH_ID_RE = /"dispatch_id"\s*:\s*"([^"]*)"/
+
+/**
+ * The `dispatch_id` a reply's envelope echoes, or null when there is no
+ * envelope / no id. Regex on the envelope body (not JSON.parse) so an agent
+ * that botched the JSON but echoed the right id is still attributed to its own
+ * generation and finalizes as `invalid_json` rather than hanging the hook.
+ */
+export function extractDispatchId(raw: string): string | null {
+  const env = (raw ?? '').match(ENVELOPE_RE)
+  if (!env) return null
+  const m = env[1].match(DISPATCH_ID_RE)
+  return m && m[1] ? m[1] : null
+}
 const FENCE_RE = /```(?:json)?\s*\n?([\s\S]*?)\n?```/i
 
 export interface ParseOk {
@@ -62,7 +93,7 @@ export interface ParseFallback {
   ok: false
   reason: 'envelope_missing' | 'invalid_json' | 'schema_invalid'
   detail: string
-  value: RevanoteResult
+  value: RevanoteResultBase
   preface: string
 }
 
@@ -114,7 +145,7 @@ export function parseRevanoteOutput(raw: string): ParseOk | ParseFallback {
 
   // Fallback — emit a synthetic, conservative result so the lifecycle can
   // still finalize and the callback can still fire.
-  const fallback: RevanoteResult = {
+  const fallback: RevanoteResultBase = {
     resolved: false,
     action_taken: reason ?? 'parse_failed',
     agent_reply: preface || text,
@@ -127,6 +158,82 @@ export function parseRevanoteOutput(raw: string): ParseOk | ParseFallback {
     value: fallback,
     preface,
   }
+}
+
+// ── Batch envelope (feat/revanote-batch-dispatch) ───────────────────────────
+//
+// A batch-dispatched turn covers N annotations in one session turn, so the
+// envelope carries one entry per annotation instead of a single result. Each
+// entry is keyed by the annotation's EXTERNAL id (`annotation_id_external` —
+// the id revanote itself knows and the one every other callback path already
+// echoes back), so the reply can be routed to the right annotation without
+// leaking internal DB ids into the prompt.
+export const RevanoteBatchItem = RevanoteResultBase.extend({
+  annotation_id: z.string().min(1),
+})
+export type RevanoteBatchItem = z.infer<typeof RevanoteBatchItem>
+
+export const RevanoteBatchResult = z.object({
+  // One generation id per batch turn (see RevanoteResult.dispatch_id).
+  dispatch_id: z.string().min(1),
+  annotations: z.array(RevanoteBatchItem).min(1),
+})
+export type RevanoteBatchResult = z.infer<typeof RevanoteBatchResult>
+
+export interface ParseBatchOk {
+  ok: true
+  value: RevanoteBatchResult
+}
+export interface ParseBatchFallback {
+  ok: false
+  reason: 'envelope_missing' | 'invalid_json' | 'schema_invalid'
+  detail: string
+}
+
+/**
+ * Parse a batch reply's `<<JSON>>{"annotations":[...]}<<END>>` envelope.
+ * Tolerates the same envelope/fence shapes as `parseRevanoteOutput`, but does
+ * NOT synthesize a fallback value — an unparseable batch reply has no single
+ * sensible per-annotation fallback, so the caller (`batch-dispatch.ts`) falls
+ * every member back through `parseRevanoteOutput`'s own single-item fallback
+ * (`schema_invalid`/`envelope_missing`) instead, exactly mirroring what a
+ * single (non-batched) unparseable reply already does.
+ */
+export function parseRevanoteBatchOutput(raw: string): ParseBatchOk | ParseBatchFallback {
+  const text = (raw ?? '').trim()
+  if (!text) return { ok: false, reason: 'envelope_missing', detail: 'empty reply' }
+
+  const envMatch = text.match(ENVELOPE_RE)
+  let jsonText: string | null = null
+  if (envMatch) {
+    jsonText = envMatch[1].trim()
+  } else {
+    const fence = text.match(FENCE_RE)
+    if (fence) jsonText = fence[1].trim()
+  }
+  if (!jsonText) return { ok: false, reason: 'envelope_missing', detail: 'no envelope or fenced JSON found' }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(jsonText)
+  } catch (err: any) {
+    return { ok: false, reason: 'invalid_json', detail: err?.message ?? 'invalid JSON' }
+  }
+  const r = RevanoteBatchResult.safeParse(parsed)
+  if (!r.success) {
+    return { ok: false, reason: 'schema_invalid', detail: jsonText.slice(0, 200) }
+  }
+  return { ok: true, value: r.data }
+}
+
+/**
+ * Rebuild a single-annotation `<<JSON>>...<<END>>` envelope string from one
+ * batch-item result, so the existing single-annotation finalize path
+ * (`run-lifecycle.ts` `finalizeAnnotationReply`) can be reused verbatim per
+ * batch member — same commit-verify gate, same DB writes, same callback shape.
+ */
+export function envelopeForBatchItem(item: Omit<RevanoteBatchItem, 'annotation_id'>, dispatchId: string): string {
+  return `<<JSON>>\n${JSON.stringify({ ...item, dispatch_id: dispatchId })}\n<<END>>`
 }
 
 /**

@@ -387,6 +387,20 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   (override the `teab` binary name/path), **`TEAB_CLAUDE_BIN`** / **`TEAB_GUARD_HOOK_PATH`** (TEAB's
   own claude-binary / D3 guard-hook knobs). The supervisor `teab_run`/`teab_status` capability ships
   ONLY with a new signed MSI (≥ the TEAB release) — release-gated.
+- **Revanote stall-alert knobs** (fix/revanote-stall-alert; see
+  [docs/revanote.md](docs/revanote.md) "Stall alert"). Owner-visible alert when revanote intake
+  silently stalls — all ~23 client sites share ONE session, so a wedged session stalls every
+  client with no signal otherwise. **`REMO_REVANOTE_STALL_PARKED_MAX_MS`** (default **3600000** =
+  1h) — age threshold for an annotation parked-offline / rejected / target-offline-expired;
+  **`REMO_REVANOTE_STALL_RUN_MAX_MS`** (default **1800000** = 30min) — age threshold for an
+  `annotation_runs` row stuck `status='in_flight'` (worse than A: the dispatcher's own 20min
+  `finalizeTimeoutMs` should have forced a finalize before this); **`REMO_REVANOTE_STALL_COOLDOWN_MS`**
+  (default **3600000** = 1h) — per-user re-alert cooldown (`revanote_stall_alerts` table), so a
+  persistent stall across dozens of annotations sends ONE alert, not one per annotation;
+  **`REMO_REVANOTE_STALL_SWEEP_INTERVAL_MS`** (default **300000** = 5min) — sweep cadence;
+  **`REMO_REVANOTE_STALL_DISABLED`** (`1|true|yes|on`) — no-op escape hatch. Fan-out reuses the
+  existing orchestrator notify channel (`orchestrator/notify.ts` `fanOutNotify` — telegram + in-app +
+  emails4agents email); no new transport.
 
 ## Docs map — subsystems & phases
 
@@ -404,7 +418,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 | Codex + rootless | [codex-and-rootless.md](docs/codex-and-rootless.md) | Phase 05 — Codex CLI runner, rootless ambient sessions, instructions sync. |
 | Coolify self-heal | [coolify-webhook-migration.md](docs/coolify-webhook-migration.md) | Phase 06 — Coolify webhook → triage run → optional `github_issue`. |
 | Auth (Titanium) | [auth.md](docs/auth.md) | Phase 07 — magic-link + opaque cookie sessions + license gate. `TITANIUM_BYPASS` active in prod. |
-| Revanote | [revanote.md](docs/revanote.md) | Phase 08 — visual-annotation webhook → session → `<<JSON>>` callback (retry curve). |
+| Revanote | [revanote.md](docs/revanote.md) | Phase 08 — visual-annotation webhook → session → `<<JSON>>` callback (retry curve). **feat/revanote-batch-dispatch:** annotations sharing `payload_raw.batch_id` are coalesced by a DB-state-driven poll (`hub/src/revanote/batch-dispatch.ts` `startBatchSweep`, boot-started) into ONE turn/branch/PR instead of one per comment — `REMO_REVANOTE_BATCH_DEBOUNCE_MS` (default 30000 = 30s, measured from the group's latest arrival), `REMO_REVANOTE_BATCH_POLL_MS` (default 5000), `REMO_REVANOTE_BATCH_RUN_MAX_MS` (default 7200000 = 2h, the batch turn's own finalize/hook ceiling — longer than a single annotation's 20min default). `REMO_REVANOTE_PENDING_REDISPATCH_MS` (default 120000 = 2min — the same sweep also re-dispatches stale `pending` NON-batch annotations that no in-memory queue owns, e.g. after a hub restart). Manual retry (`POST /api/revanote/annotations/:id/retry`, a DB CAS reset) always dispatches one annotation immediately (`forceSingle`), bypassing coalescing. |
 | Orchestrator session | [claude-architecture-notes.md](docs/claude-architecture-notes.md) | Auto-launching root-folder coordinator session; exactly one open per user. |
 | Telegram bridge | [telegram-bridge.md](docs/telegram-bridge.md) | Phase 12 → **Phase 20 transcript-tail**: bidirectional Telegram ↔ session re-sourced from each backend's on-disk transcript (Claude projects JSONL / Codex rollout JSONL + scrape fallback) after the Phase-17 stream-json rip; fail-closed permission/`user_question` keystroke-injection keyed by `(sessionId,requestId)`; per-session PTY write-arbitration turn lock; human-only guard (no automation drives the PTY); no API key. |
 | Mobile Tauri client | [mobile-client.md](docs/mobile-client.md) · [phase-12-pause-state.md](docs/phase-12-pause-state.md) | Phase 12 — iOS/Android WebView shell + deep-link auth. **Paused 2026-05-28.** |

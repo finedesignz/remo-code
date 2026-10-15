@@ -55,6 +55,8 @@ export type ResolveVerifier = (args: {
   repoSlug: string | null
   commitSha: string | null
   branch: string | null
+  /** When this dispatch was sent: the commit must not predate it (commit_predates_dispatch). */
+  dispatchedAt: Date | null
 }) => Promise<VerifyResult>
 
 const defaultVerifier: ResolveVerifier = async (args) => {
@@ -66,7 +68,10 @@ const defaultVerifier: ResolveVerifier = async (args) => {
     repoSlugFallback: args.repoSlug,
   })
   return verifyPushedCommit(
-    { owner: ctx.owner, repo: ctx.repo, commitSha: args.commitSha, branch: args.branch, installationIds: ctx.installationIds },
+    {
+      owner: ctx.owner, repo: ctx.repo, commitSha: args.commitSha, branch: args.branch,
+      installationIds: ctx.installationIds, dispatchedAt: args.dispatchedAt,
+    },
     realGithubGet,
   )
 }
@@ -84,7 +89,28 @@ export async function finalizeAnnotationReply(
   const { runId, annotationId, userId, startedAt, content } = args
 
   const duration = Date.now() - startedAt
-  const parsed = parseRevanoteOutput(content)
+  const parsedRaw = parseRevanoteOutput(content)
+  // Generation binding, defence in depth behind the RunStore.shouldFinalize
+  // hooks: a reply that echoes a DIFFERENT dispatch's id (reachable through the
+  // pipeline's terminal-timeout path, which finalizes regardless of
+  // shouldFinalize) is never applied to this run -- it finalizes as an honest
+  // failure instead of adopting another generation's verdict.
+  const foreign = parsedRaw.ok && parsedRaw.value.dispatch_id !== runId
+  if (foreign) {
+    console.warn(
+      `[revanote.lifecycle] dispatch_id mismatch run=${runId} annotation=${annotationId} ` +
+        `echoed=${(parsedRaw as any).value.dispatch_id}; reply dropped`,
+    )
+  }
+  const parsed: typeof parsedRaw = foreign
+    ? {
+        ok: false,
+        reason: 'envelope_missing',
+        detail: 'dispatch_id_mismatch',
+        value: { resolved: false, action_taken: 'dispatch_id_mismatch', agent_reply: '', files_changed: [] },
+        preface: parsedRaw.preface,
+      }
+    : parsedRaw
   const result = parsed.value
   const snippet = content.length > 500 ? content.slice(content.length - 500) : content
   const ann = await getAnnotationById(annotationId, userId).catch((err: any) => {
@@ -162,6 +188,7 @@ export async function finalizeAnnotationReply(
         repoSlug: typeof raw.repo_slug === 'string' ? raw.repo_slug : null,
         commitSha: result.commit_sha ?? null,
         branch: result.branch ?? null,
+        dispatchedAt: ann?.dispatched_at ? new Date(ann.dispatched_at) : new Date(startedAt),
       })
     } catch (err: any) {
       v = { ok: false, reason: 'verify_error', detail: err?.message ?? String(err) }
@@ -186,6 +213,26 @@ export async function finalizeAnnotationReply(
     }
   }
 
+  // Annotation FIRST, as a CAS on this run's generation (status still
+  // 'dispatched' AND current_run_id = this run). A retry that reset + re-claimed
+  // the row owns a newer generation; this superseded finalize then loses and
+  // writes nothing else (no run success, no broadcast, no callback) -- it can
+  // never overwrite the newer dispatch's row.
+  const annStatus = resolved ? 'resolved' : 'failed'
+  const won = await updateAnnotationStatus(annotationId, annStatus, {
+    resolved_at: resolved ? new Date() : null,
+    skip_reason: resolved ? null : (rejectReason ?? (result.action_taken || (parsed.ok ? null : parsed.reason) || 'agent_unresolved')),
+    if_run_id: runId,
+  })
+  if (!won) {
+    console.warn(
+      `[revanote.lifecycle] superseded finalize dropped run=${runId} annotation=${annotationId} ` +
+        `(row no longer 'dispatched' under this generation)`,
+    )
+    await updateAnnotationRun(runId, { status: 'cancelled', finished_at: new Date() })
+    return
+  }
+
   await updateAnnotationRun(runId, {
     status: 'success',
     finished_at: new Date(),
@@ -199,12 +246,6 @@ export async function finalizeAnnotationReply(
     cost_usd: null,
     commit_sha: verifiedSha,
     ...(rejectReason ? { error: rejectReason } : {}),
-  })
-
-  const annStatus = resolved ? 'resolved' : 'failed'
-  await updateAnnotationStatus(annotationId, annStatus, {
-    resolved_at: resolved ? new Date() : null,
-    skip_reason: resolved ? null : (rejectReason ?? (result.action_taken || (parsed.ok ? null : parsed.reason) || 'agent_unresolved')),
   })
 
   broadcastRevanoteEvent(userId, {

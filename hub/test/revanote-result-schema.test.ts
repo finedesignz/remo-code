@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import { parseRevanoteOutput, stripRevanoteEnvelope } from '../src/revanote/result-schema'
+import { parseRevanoteOutput, parseRevanoteBatchOutput, stripRevanoteEnvelope, extractDispatchId, envelopeForBatchItem } from '../src/revanote/result-schema'
 
 describe('parseRevanoteOutput', () => {
   test('envelope path returns parsed result', () => {
     const r = parseRevanoteOutput(
-      'Fixed the alignment bug.\n\n<<JSON>>\n{"resolved":true,"action_taken":"updated flex","files_changed":["a.tsx"],"deployed":true}\n<<END>>',
+      'Fixed the alignment bug.\n\n<<JSON>>\n{"dispatch_id":"run-1","resolved":true,"action_taken":"updated flex","files_changed":["a.tsx"],"deployed":true}\n<<END>>',
     )
     expect(r.ok).toBe(true)
     if (r.ok) {
@@ -17,7 +17,7 @@ describe('parseRevanoteOutput', () => {
 
   test('fenced JSON fallback', () => {
     const r = parseRevanoteOutput(
-      'Here is what I did:\n```json\n{"resolved":false,"action_taken":"need more info","files_changed":[],"needs_clarification":true,"clarification_question":"which page?"}\n```',
+      'Here is what I did:\n```json\n{"dispatch_id":"run-1","resolved":false,"action_taken":"need more info","files_changed":[],"needs_clarification":true,"clarification_question":"which page?"}\n```',
     )
     expect(r.ok).toBe(true)
     if (r.ok) {
@@ -49,7 +49,7 @@ describe('parseRevanoteOutput', () => {
 
   test('envelope with assumption is preserved (Phase 5 fix contract)', () => {
     const r = parseRevanoteOutput(
-      '<<JSON>>\n{"resolved":true,"action_taken":"did it","assumption":"assumed the primary CTA","files_changed":[]}\n<<END>>',
+      '<<JSON>>\n{"dispatch_id":"run-1","resolved":true,"action_taken":"did it","assumption":"assumed the primary CTA","files_changed":[]}\n<<END>>',
     )
     expect(r.ok).toBe(true)
     if (r.ok) {
@@ -59,7 +59,7 @@ describe('parseRevanoteOutput', () => {
 
   test('envelope with clarification_reason is preserved (Phase 5 fix contract)', () => {
     const r = parseRevanoteOutput(
-      '<<JSON>>\n{"resolved":false,"action_taken":"","files_changed":[],"needs_clarification":true,"clarification_reason":"ambiguous_intent"}\n<<END>>',
+      '<<JSON>>\n{"dispatch_id":"run-1","resolved":false,"action_taken":"","files_changed":[],"needs_clarification":true,"clarification_reason":"ambiguous_intent"}\n<<END>>',
     )
     expect(r.ok).toBe(true)
     if (r.ok) {
@@ -72,7 +72,7 @@ describe('parseRevanoteOutput', () => {
   // up the parse. A genuinely successful fix must not be marked `failed`.
   test('explicit null assumption on a resolved result still parses ok (BLOCKER 3)', () => {
     const r = parseRevanoteOutput(
-      '<<JSON>>\n{"resolved":true,"action_taken":"did it","assumption":null,"files_changed":[]}\n<<END>>',
+      '<<JSON>>\n{"dispatch_id":"run-1","resolved":true,"action_taken":"did it","assumption":null,"files_changed":[]}\n<<END>>',
     )
     expect(r.ok).toBe(true)
     if (r.ok) {
@@ -83,7 +83,7 @@ describe('parseRevanoteOutput', () => {
 
   test('explicit null clarification_reason on a resolved result still parses ok (BLOCKER 3)', () => {
     const r = parseRevanoteOutput(
-      '<<JSON>>\n{"resolved":true,"action_taken":"did it","clarification_reason":null,"files_changed":[]}\n<<END>>',
+      '<<JSON>>\n{"dispatch_id":"run-1","resolved":true,"action_taken":"did it","clarification_reason":null,"files_changed":[]}\n<<END>>',
     )
     expect(r.ok).toBe(true)
     if (r.ok) {
@@ -94,7 +94,7 @@ describe('parseRevanoteOutput', () => {
 
   test('explicit null on pre-existing optional siblings still parses ok', () => {
     const r = parseRevanoteOutput(
-      '<<JSON>>\n{"resolved":true,"action_taken":"did it","agent_reply":null,"deployed":null,"needs_clarification":null,"clarification_question":null,"files_changed":[]}\n<<END>>',
+      '<<JSON>>\n{"dispatch_id":"run-1","resolved":true,"action_taken":"did it","agent_reply":null,"deployed":null,"needs_clarification":null,"clarification_question":null,"files_changed":[]}\n<<END>>',
     )
     expect(r.ok).toBe(true)
     if (r.ok) {
@@ -117,5 +117,31 @@ describe('stripRevanoteEnvelope', () => {
     expect(cleaned).not.toContain('```')
     expect(cleaned).toContain('before')
     expect(cleaned).toContain('after')
+  })
+})
+
+describe('dispatch_id (dispatch-generation binding)', () => {
+  test('a result without dispatch_id is schema_invalid (required)', () => {
+    const r = parseRevanoteOutput('<<JSON>>\n{"resolved":true,"action_taken":"x","files_changed":[]}\n<<END>>')
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('schema_invalid')
+  })
+
+  test('extractDispatchId reads the echoed id, even from an envelope whose JSON is broken; null when absent', () => {
+    expect(extractDispatchId('hi <<JSON>>{"dispatch_id":"abc-1","resolved":true}<<END>>')).toBe('abc-1')
+    expect(extractDispatchId('<<JSON>>{"dispatch_id": "abc-2", not json<<END>>')).toBe('abc-2')
+    expect(extractDispatchId('<<JSON>>{"resolved":true}<<END>>')).toBeNull()
+    expect(extractDispatchId('{"dispatch_id":"no-envelope"}')).toBeNull()
+  })
+
+  test('batch envelope requires a top-level dispatch_id', () => {
+    const item = '{"annotation_id":"e1","resolved":false,"action_taken":"x","files_changed":[]}'
+    expect(parseRevanoteBatchOutput(`<<JSON>>{"annotations":[${item}]}<<END>>`).ok).toBe(false)
+    expect(parseRevanoteBatchOutput(`<<JSON>>{"dispatch_id":"b-1","annotations":[${item}]}<<END>>`).ok).toBe(true)
+  })
+
+  test('envelopeForBatchItem stamps the member dispatch id', () => {
+    const env = envelopeForBatchItem({ resolved: false, action_taken: 'x', files_changed: [] }, 'run-9')
+    expect(extractDispatchId(env)).toBe('run-9')
   })
 })

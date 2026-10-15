@@ -62,6 +62,8 @@ export interface AnnotationRow {
   received_at: string
   dispatched_at: string | null
   resolved_at: string | null
+  /** annotation_runs id of the dispatch that currently owns this row (generation binding). */
+  current_run_id?: string | null
 }
 
 export interface AnnotationRunRow {
@@ -409,17 +411,227 @@ export async function updateAnnotationStatus(
     mapping_id?: string | null
     dispatched_at?: Date | null
     resolved_at?: Date | null
+    /**
+     * Generation CAS (finalize): write ONLY while the row is still 'dispatched'
+     * AND `current_run_id` is this run -- a retry that reset + re-claimed the row
+     * owns a newer generation and this write must lose.
+     */
+    if_run_id?: string | null
   } = {},
-): Promise<void> {
-  await sql`
+): Promise<boolean> {
+  const rows = opts.if_run_id
+    ? await sql<{ id: string }[]>`
+        UPDATE annotations
+           SET status = ${status},
+               skip_reason = COALESCE(${opts.skip_reason ?? null}, skip_reason),
+               session_id = COALESCE(${opts.session_id ?? null}, session_id),
+               mapping_id = COALESCE(${opts.mapping_id ?? null}, mapping_id),
+               dispatched_at = COALESCE(${opts.dispatched_at ?? null}, dispatched_at),
+               resolved_at = COALESCE(${opts.resolved_at ?? null}, resolved_at)
+         WHERE id = ${id}
+           AND status = 'dispatched'
+           AND current_run_id = ${opts.if_run_id}
+        RETURNING id
+      `
+    : await sql<{ id: string }[]>`
+        UPDATE annotations
+           SET status = ${status},
+               skip_reason = COALESCE(${opts.skip_reason ?? null}, skip_reason),
+               session_id = COALESCE(${opts.session_id ?? null}, session_id),
+               mapping_id = COALESCE(${opts.mapping_id ?? null}, mapping_id),
+               dispatched_at = COALESCE(${opts.dispatched_at ?? null}, dispatched_at),
+               resolved_at = COALESCE(${opts.resolved_at ?? null}, resolved_at)
+         WHERE id = ${id}
+        RETURNING id
+      `
+  return rows.length > 0
+}
+
+/**
+ * Park a row offline ONLY if it is still 'pending' (CAS). A retry/replay that
+ * claimed the row in between ('dispatched') or a finalize must not be reverted
+ * to pending/session_offline by a stale `parked_offline` outcome.
+ */
+export async function parkAnnotationOfflineIfPending(
+  id: string,
+  session_id: string | null,
+  mapping_id: string | null = null,
+): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
     UPDATE annotations
-       SET status = ${status},
-           skip_reason = COALESCE(${opts.skip_reason ?? null}, skip_reason),
-           session_id = COALESCE(${opts.session_id ?? null}, session_id),
-           mapping_id = COALESCE(${opts.mapping_id ?? null}, mapping_id),
-           dispatched_at = COALESCE(${opts.dispatched_at ?? null}, dispatched_at),
-           resolved_at = COALESCE(${opts.resolved_at ?? null}, resolved_at)
+       SET skip_reason = 'session_offline',
+           session_id = COALESCE(${session_id}, session_id),
+           mapping_id = COALESCE(${mapping_id}, mapping_id)
      WHERE id = ${id}
+       AND status = 'pending'
+     RETURNING id
+  `
+  return rows.length > 0
+}
+
+/**
+ * Grace-lapse expiry: 'failed_offline' ONLY while the row is still the parked
+ * row this lapse was registered for (pending + session_offline). A row that
+ * was since claimed/dispatched/resolved (e.g. the session came back) keeps its
+ * state. Returns whether this call performed the transition (callers send the
+ * rejection callback only then).
+ */
+export async function expireParkedAnnotation(id: string): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
+    UPDATE annotations
+       SET status = 'failed_offline',
+           skip_reason = 'target_offline_expired'
+     WHERE id = ${id}
+       AND status = 'pending'
+       AND skip_reason = 'session_offline'
+     RETURNING id
+  `
+  return rows.length > 0
+}
+
+/**
+ * Post-send bookkeeping (session/mapping/dispatched_at) ONLY while the row is
+ * still 'dispatched' -- a reply that already finalized it ('resolved'/'failed')
+ * must not be regressed to 'dispatched'.
+ */
+export async function recordDispatchIfDispatched(
+  id: string,
+  opts: { session_id: string; mapping_id?: string | null; dispatched_at: Date },
+): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
+    UPDATE annotations
+       SET session_id = ${opts.session_id},
+           mapping_id = COALESCE(${opts.mapping_id ?? null}, mapping_id),
+           dispatched_at = ${opts.dispatched_at}
+     WHERE id = ${id}
+       AND status = 'dispatched'
+     RETURNING id
+  `
+  return rows.length > 0
+}
+
+/** Fail a row ONLY if it is still 'dispatched' (send-failure after this call's own claim). */
+export async function failAnnotationIfDispatched(id: string, skip_reason: string): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
+    UPDATE annotations
+       SET status = 'failed',
+           skip_reason = ${skip_reason}
+     WHERE id = ${id}
+       AND status = 'dispatched'
+     RETURNING id
+  `
+  return rows.length > 0
+}
+
+/** Set ONLY mapping_id (webhook pre-resolve) -- never rewrites status from a stale snapshot. */
+export async function setAnnotationMappingId(id: string, mapping_id: string): Promise<void> {
+  await sql`UPDATE annotations SET mapping_id = ${mapping_id} WHERE id = ${id}`
+}
+
+/**
+ * Fail an annotation ONLY if it is still 'pending' (gate-rejected batch members:
+ * a member another path already claimed/resolved must not be clobbered).
+ * Returns whether this call performed the transition.
+ */
+export async function failAnnotationIfPending(
+  id: string,
+  skip_reason: string,
+  session_id: string | null,
+): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
+    UPDATE annotations
+       SET status = 'failed',
+           skip_reason = ${skip_reason},
+           session_id = COALESCE(${session_id}, session_id)
+     WHERE id = ${id}
+       AND status = 'pending'
+     RETURNING id
+  `
+  return rows.length > 0
+}
+
+/**
+ * Compare-and-set reset to 'pending' for the manual-retry path: the row moves
+ * only if it is STILL in the status the caller observed (`expected`). A
+ * concurrent claim/finalize that changed the status in between makes this a
+ * no-op (returns false) so the retry is refused instead of double-sending.
+ */
+export async function resetAnnotationToPendingIfStatus(
+  id: string,
+  expected: AnnotationStatus,
+  skip_reason: string,
+): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
+    UPDATE annotations
+       SET status = 'pending',
+           skip_reason = ${skip_reason}
+     WHERE id = ${id}
+       AND status = ${expected}
+     RETURNING id
+  `
+  return rows.length > 0
+}
+
+/**
+ * Send-time atomic claim (qcfix/r2-claim-at-send — supersedes the round-1
+ * qcfix/batch-claim pre-dispatch claim, which closed F2/F4 but opened a new
+ * strand class: a claim taken BEFORE `dispatch()` claimed rows that only ever
+ * got QUEUED (never sent), and a hub restart drops the in-memory queue/waiter
+ * state, permanently stranding those rows off the 'pending' sweep/retry path
+ * with no recovery (R2-1).
+ *
+ * This is now called from INSIDE the pipeline's `send()` adapter, immediately
+ * before the WS push — for a first dispatch AND for a promoted queue
+ * re-dispatch (both funnel through the same `send()`). A row that is merely
+ * QUEUED behind another in-flight send never reaches this call at all, so it
+ * stays 'pending' — exactly as restart-recoverable as before any claim
+ * existed. Only a row actually about to be sent leaves 'pending', straight to
+ * 'dispatched' (no separate claim state — see revert of 'dispatching' from
+ * the status enum/CHECK in this migration).
+ *
+ * A single conditional `UPDATE ... WHERE status='pending' RETURNING id` per
+ * caller — whichever caller's UPDATE commits first wins each row; every other
+ * concurrent caller (a racing retry, an overlapping sweep tick) sees that row
+ * filtered out of its own WHERE clause and gets it back as NOT claimed. The
+ * caller must treat any id missing from the result as already owned
+ * elsewhere and MUST NOT send for it (throw before building/broadcasting any
+ * prompt — see dispatcher.ts / batch-dispatch.ts `send()`).
+ */
+export async function claimAnnotationsAtSend(
+  ids: string[],
+  /** annotation id -> annotation_runs id of THIS dispatch; recorded as `current_run_id` (generation binding). */
+  runIds: Record<string, string> = {},
+): Promise<string[]> {
+  if (ids.length === 0) return []
+  const rows = await sql<{ id: string }[]>`
+    UPDATE annotations
+       SET status = 'dispatched',
+           current_run_id = (x.m ->> annotations.id::text)::uuid
+      FROM (SELECT ${ids}::uuid[] AS ids, ${JSON.stringify(runIds)}::text::jsonb AS m) x
+     WHERE annotations.id = ANY(x.ids)
+       AND annotations.status = 'pending'
+     RETURNING annotations.id
+  `
+  return rows.map((r) => r.id)
+}
+
+/**
+ * Bind a claimed row to its dispatch generation (batch path: the member run row
+ * is inserted AFTER the claim). Only while the row is still 'dispatched'.
+ */
+export async function bindAnnotationRun(id: string, runId: string): Promise<void> {
+  await sql`UPDATE annotations SET current_run_id = ${runId} WHERE id = ${id} AND status = 'dispatched'`
+}
+
+/**
+ * Retry: close the superseded dispatch's still-open run(s) so a stale in_flight
+ * run is never mistaken for a live owner.
+ */
+export async function cancelInFlightRunsForAnnotation(annotationId: string, reason: string): Promise<void> {
+  await sql`
+    UPDATE annotation_runs
+       SET status = 'cancelled', error = ${reason}, finished_at = now()
+     WHERE annotation_id = ${annotationId} AND status = 'in_flight'
   `
 }
 

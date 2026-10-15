@@ -8,8 +8,8 @@
 // agent's envelope is self-report; the prompt asking it to push first is not a
 // control. So the HUB checks: a resolved reply must name its `commit_sha`, and
 // the hub confirms through the GitHub App that the commit exists in the repo
-// (and, when the reply names a `branch`, that the branch contains it). Anything
-// else is downgraded to resolved:false with a reason, fail-closed.
+// AND is merged to the repo's default branch (the bar -- a squash/merge SHA is
+// not on the PR branch, which may be deleted). Anything else is downgraded to resolved:false with a reason, fail-closed.
 //
 // Escape hatch: REMO_REVANOTE_REQUIRE_PUSHED_COMMIT=0|false|no|off disables
 // the check (e.g. a user with no GitHub App installation yet). Default ON.
@@ -20,7 +20,8 @@ export type VerifyFailReason =
   | 'repo_unknown'
   | 'no_github_installation'
   | 'commit_not_pushed'
-  | 'commit_not_on_branch'
+  | 'commit_not_on_default_branch'
+  | 'commit_predates_dispatch'
   | 'verify_error'
 
 export type VerifyResult =
@@ -34,7 +35,16 @@ export interface VerifyInput {
   branch?: string | null
   /** Candidate GitHub App installations for this user, best match first. */
   installationIds: number[]
+  /**
+   * When the dispatch was sent. When set, the commit's committer date must be
+   * >= this minus `DISPATCH_CLOCK_SKEW_MS`, otherwise an ancestor of the default
+   * branch that merely predates the request (months old) would verify.
+   */
+  dispatchedAt?: Date | string | null
 }
+
+/** Tolerated clock skew between the hub and GitHub's committer timestamps. */
+export const DISPATCH_CLOCK_SKEW_MS = 5 * 60 * 1000
 
 export type GithubGet = (installationId: number, path: string) => Promise<any>
 
@@ -51,8 +61,8 @@ function statusOf(err: any): number | null {
 }
 
 /**
- * Confirm `commitSha` exists in `owner/repo` on GitHub (and is contained in
- * `branch` when given). Tries each installation in order: a 404/422 from one
+ * Confirm `commitSha` exists in `owner/repo` on GitHub and is merged to the
+ * default branch (`input.branch` is advisory and not checked). Tries each installation in order: a 404/422 from one
  * installation may just mean it can't see the repo, so only "every
  * installation says not found" becomes `commit_not_pushed`.
  */
@@ -81,23 +91,41 @@ export async function verifyPushedCommit(input: VerifyInput, get: GithubGet): Pr
     if (!commit) continue // helper returned null for 404
     const fullSha: string = typeof commit.sha === 'string' ? commit.sha : sha
 
-    const branch = (input.branch ?? '').trim()
-    if (branch) {
-      try {
-        const cmp = await get(
-          inst,
-          `/repos/${owner}/${repo}/compare/${encodeURIComponent(branch)}...${encodeURIComponent(fullSha)}`,
-        )
-        // `behind`/`identical` ⇒ the commit is an ancestor of (or equal to) the branch head.
-        if (cmp?.status !== 'identical' && cmp?.status !== 'behind') {
-          return { ok: false, reason: 'commit_not_on_branch', detail: `${branch} (${cmp?.status ?? 'unknown'})` }
+    // The commit must have been made for THIS dispatch, not merely be reachable
+    // from the default branch (any old ancestor satisfies the compare below).
+    if (input.dispatchedAt) {
+      const since = new Date(input.dispatchedAt).getTime()
+      const when = Date.parse(commit?.commit?.committer?.date ?? '')
+      if (!Number.isFinite(when)) return { ok: false, reason: 'verify_error', detail: 'commit_date_unreadable' }
+      if (when < since - DISPATCH_CLOCK_SKEW_MS) {
+        return {
+          ok: false,
+          reason: 'commit_predates_dispatch',
+          detail: `committed ${new Date(when).toISOString()} < dispatched ${new Date(since).toISOString()}`,
         }
-      } catch (err: any) {
-        const st = statusOf(err)
-        if (st === 404) return { ok: false, reason: 'commit_not_on_branch', detail: `${branch} not found` }
-        return { ok: false, reason: 'verify_error', detail: err?.message ?? String(err) }
       }
     }
+
+    // Owner rule: resolved only once the fix is MERGED to the default branch.
+    // A commit that merely exists (pushed PR-branch tip) is not enough.
+    let defaultBranch: string
+    try {
+      const meta = await get(inst, `/repos/${owner}/${repo}`)
+      if (!meta || typeof meta.default_branch !== 'string' || !meta.default_branch) {
+        return { ok: false, reason: 'verify_error', detail: 'default_branch_lookup_failed' }
+      }
+      defaultBranch = meta.default_branch
+      const onDefault = await get(
+        inst,
+        `/repos/${owner}/${repo}/compare/${encodeURIComponent(defaultBranch)}...${encodeURIComponent(fullSha)}`,
+      )
+      if (onDefault?.status !== 'identical' && onDefault?.status !== 'behind') {
+        return { ok: false, reason: 'commit_not_on_default_branch', detail: `${defaultBranch} (${onDefault?.status ?? 'unknown'})` }
+      }
+    } catch (err: any) {
+      return { ok: false, reason: 'verify_error', detail: err?.message ?? String(err) }
+    }
+
     return { ok: true, sha: fullSha, repo: slug }
   }
 

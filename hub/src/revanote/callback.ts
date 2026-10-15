@@ -30,7 +30,13 @@ export interface RevanoteCallbackPayload {
   action_taken: string | null
   agent_reply: string | null
   files_changed: string[]
+  // The pushed commit SHA the agent cited for this fix, once verified to
+  // exist on the GitHub remote (commit-verify.ts). null when resolved=false,
+  // including when the claim was downgraded for failing that verification.
+  commit_sha?: string | null
   deployed: boolean
+  // Advisory — the live URL the agent claims to have re-fetched. Not gated.
+  deploy_url?: string | null
   needs_clarification?: boolean
   clarification_question?: string | null
   // Phase 5 — best-guess-default fix contract (additive).
@@ -44,8 +50,6 @@ export interface RevanoteCallbackPayload {
   pr_url?: string | null
   diff_summary?: string | null
   diff_hash?: string | null
-  // fix/revanote-verify-pushed — the hub-verified pushed commit behind a resolve.
-  commit_sha?: string | null
 }
 
 // Retry schedule in ms. Last bucket is the dead-letter cap.

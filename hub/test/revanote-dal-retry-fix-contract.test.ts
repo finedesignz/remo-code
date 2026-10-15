@@ -179,7 +179,7 @@ describe('insertAnnotation — duplicate dispatch must not discard fix_contract'
       basePayload({ payload_raw: { fix_contract: fixContract } }),
     )
 
-    const prompt = renderAnnotationPrompt({ annotation: retried, mapping: null })
+    const prompt = renderAnnotationPrompt({ annotation: retried, mapping: null, dispatchId: 'run-1' })
 
     // The prompt builder only emits the best-guess-default instructions and
     // the `"assumption"` envelope key when `payload_raw.fix_contract` is

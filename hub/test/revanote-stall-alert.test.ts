@@ -1,0 +1,251 @@
+/**
+ * fix/revanote-stall-alert — owner-visible alert when revanote intake stalls.
+ *
+ * All ~23 revanote client sites map to ONE session; a wedged session stalls
+ * every client with no signal. This sweep fans out at most once per user per
+ * cooldown when annotations sit parked/rejected/target-offline past threshold,
+ * or an annotation_run sits in_flight past its own (shorter) threshold.
+ */
+import { describe, test, expect, mock } from 'bun:test'
+import {
+  sweepRevanoteStalls,
+  STALL_PARKED_MAX_MS,
+  STALL_RUN_MAX_MS,
+  STALL_COOLDOWN_MS,
+  runStallThresholdMs,
+  type UserStallSummary,
+} from '../src/revanote/stall-alert.ts'
+import { batchRunMaxMs } from '../src/revanote/batch-dispatch.ts'
+
+const NOW = 1_800_000_000_000
+
+function deps(overrides: Partial<{
+  summaries: UserStallSummary[]
+  lastAlertAt: Record<string, number | null>
+  notifyCalls: any[]
+  recordCalls: any[]
+}> = {}) {
+  const notifyCalls = overrides.notifyCalls ?? []
+  const recordCalls = overrides.recordCalls ?? []
+  const lastAlertAt = overrides.lastAlertAt ?? {}
+  return {
+    loadStalledPerUser: async () => overrides.summaries ?? [],
+    getLastAlertAt: async (userId: string) => lastAlertAt[userId] ?? null,
+    recordAlert: async (userId: string, now: number) => {
+      recordCalls.push([userId, now])
+    },
+    notify: async (input: any) => {
+      notifyCalls.push(input)
+      return { delivered: ['inapp'] }
+    },
+  }
+}
+
+describe('sweepRevanoteStalls', () => {
+  test('fires when parked annotations exceed the threshold', async () => {
+    const notifyCalls: any[] = []
+    const recordCalls: any[] = []
+    const alerted = await sweepRevanoteStalls(
+      NOW,
+      deps({
+        summaries: [
+          {
+            user_id: 'u1',
+            parked_count: 5,
+            parked_oldest_ms: NOW - STALL_PARKED_MAX_MS - 60_000,
+            stuck_run_count: 0,
+            stuck_run_oldest_ms: null,
+          },
+        ],
+        notifyCalls,
+        recordCalls,
+      }),
+    )
+    expect(alerted).toEqual(['u1'])
+    expect(notifyCalls).toHaveLength(1)
+    expect(notifyCalls[0].userId).toBe('u1')
+    expect(notifyCalls[0].detail).toContain('5 revanote annotation')
+    expect(recordCalls).toEqual([['u1', NOW]])
+  })
+
+  test('fires when an annotation_run is stuck in_flight past its threshold', async () => {
+    const notifyCalls: any[] = []
+    const alerted = await sweepRevanoteStalls(
+      NOW,
+      deps({
+        summaries: [
+          {
+            user_id: 'u2',
+            parked_count: 0,
+            parked_oldest_ms: null,
+            stuck_run_count: 1,
+            stuck_run_oldest_ms: NOW - STALL_RUN_MAX_MS - 1000,
+          },
+        ],
+        notifyCalls,
+      }),
+    )
+    expect(alerted).toEqual(['u2'])
+    expect(notifyCalls[0].detail).toContain('stuck in-flight')
+  })
+
+  test('does NOT fire below threshold (loader already filters, but zero-count rows are also skipped)', async () => {
+    const notifyCalls: any[] = []
+    const alerted = await sweepRevanoteStalls(
+      NOW,
+      deps({
+        summaries: [
+          { user_id: 'u3', parked_count: 0, parked_oldest_ms: null, stuck_run_count: 0, stuck_run_oldest_ms: null },
+        ],
+        notifyCalls,
+      }),
+    )
+    expect(alerted).toEqual([])
+    expect(notifyCalls).toHaveLength(0)
+  })
+
+  test('no summaries at all -> no-op, no throw', async () => {
+    const alerted = await sweepRevanoteStalls(NOW, deps({ summaries: [] }))
+    expect(alerted).toEqual([])
+  })
+
+  test('cooldown: does not re-alert a user alerted within STALL_COOLDOWN_MS', async () => {
+    const notifyCalls: any[] = []
+    const alerted = await sweepRevanoteStalls(
+      NOW,
+      deps({
+        summaries: [
+          { user_id: 'u4', parked_count: 3, parked_oldest_ms: NOW - STALL_PARKED_MAX_MS - 1, stuck_run_count: 0, stuck_run_oldest_ms: null },
+        ],
+        lastAlertAt: { u4: NOW - STALL_COOLDOWN_MS + 60_000 },
+        notifyCalls,
+      }),
+    )
+    expect(alerted).toEqual([])
+    expect(notifyCalls).toHaveLength(0)
+  })
+
+  test('cooldown: DOES re-alert once the cooldown has fully elapsed', async () => {
+    const notifyCalls: any[] = []
+    const alerted = await sweepRevanoteStalls(
+      NOW,
+      deps({
+        summaries: [
+          { user_id: 'u5', parked_count: 2, parked_oldest_ms: NOW - STALL_PARKED_MAX_MS - 1, stuck_run_count: 0, stuck_run_oldest_ms: null },
+        ],
+        lastAlertAt: { u5: NOW - STALL_COOLDOWN_MS - 1 },
+        notifyCalls,
+      }),
+    )
+    expect(alerted).toEqual(['u5'])
+    expect(notifyCalls).toHaveLength(1)
+  })
+
+  test('dedup: never alerted before -> fires once', async () => {
+    const notifyCalls: any[] = []
+    const alerted = await sweepRevanoteStalls(
+      NOW,
+      deps({
+        summaries: [
+          { user_id: 'u6', parked_count: 1, parked_oldest_ms: NOW - STALL_PARKED_MAX_MS - 1, stuck_run_count: 0, stuck_run_oldest_ms: null },
+        ],
+        lastAlertAt: { u6: null },
+        notifyCalls,
+      }),
+    )
+    expect(alerted).toEqual(['u6'])
+  })
+
+  test('one user failing to notify never aborts the pass for others', async () => {
+    const notifyCalls: any[] = []
+    const d = deps({
+      summaries: [
+        { user_id: 'boom', parked_count: 1, parked_oldest_ms: NOW - STALL_PARKED_MAX_MS - 1, stuck_run_count: 0, stuck_run_oldest_ms: null },
+        { user_id: 'ok', parked_count: 1, parked_oldest_ms: NOW - STALL_PARKED_MAX_MS - 1, stuck_run_count: 0, stuck_run_oldest_ms: null },
+      ],
+      notifyCalls,
+    })
+    d.notify = async (input: any) => {
+      if (input.userId === 'boom') throw new Error('send failed')
+      notifyCalls.push(input)
+      return { delivered: ['inapp'] }
+    }
+    const alerted = await sweepRevanoteStalls(NOW, d)
+    expect(alerted).toEqual(['ok'])
+    expect(notifyCalls).toHaveLength(1)
+  })
+
+  test('a load failure is fail-open (empty sweep, no throw)', async () => {
+    const alerted = await sweepRevanoteStalls(NOW, {
+      loadStalledPerUser: async () => {
+        throw new Error('db down')
+      },
+    })
+    expect(alerted).toEqual([])
+  })
+})
+
+describe('runStallThresholdMs (batch-vs-single alignment)', () => {
+  test('single-annotation run uses STALL_RUN_MAX_MS (default 30min)', () => {
+    expect(runStallThresholdMs(false)).toBe(STALL_RUN_MAX_MS)
+  })
+
+  test('batch-dispatched run uses the live batch ceiling, not STALL_RUN_MAX_MS', () => {
+    const threshold = runStallThresholdMs(true)
+    expect(threshold).toBe(batchRunMaxMs())
+    // The whole point of the alignment fix: a healthy 2h batch turn must NOT
+    // be flagged by the 30min single-annotation threshold.
+    expect(threshold).toBeGreaterThan(STALL_RUN_MAX_MS)
+  })
+})
+
+// Item 7: a row left 'dispatched' with NO in_flight run (crash between the claim
+// and the run insert, or a throw in markFailed) is invisible to both sweeps.
+// The real loader's SQL is modelled here by its TEXT (no Postgres in this suite).
+describe('stall alert -- dispatched row with no in_flight run', () => {
+  const rows: any[] = []
+  const runs: any[] = []
+  mock.module('../src/db/postgres.ts', () => ({
+    sql: async (strings: TemplateStringsArray, ...values: any[]) => {
+      const text = strings.join('')
+      if (text.includes('FROM annotations') && text.includes('GROUP BY user_id') && !text.includes('annotation_runs ar')) {
+        const cutoff = (values.find((v) => v instanceof Date) as Date).getTime()
+        const considersDispatched = text.includes("status = 'dispatched'") && text.includes('NOT EXISTS')
+        const hit = rows.filter((a) =>
+          considersDispatched &&
+          a.status === 'dispatched' &&
+          new Date(a.dispatched_at ?? a.received_at).getTime() < cutoff &&
+          !runs.some((r) => r.annotation_id === a.id && r.status === 'in_flight'),
+        )
+        if (hit.length === 0) return []
+        return [{ user_id: 'u1', cnt: String(hit.length), oldest: new Date(hit[0].dispatched_at ?? hit[0].received_at).toISOString() }]
+      }
+      return []
+    },
+  }))
+
+  const alertDeps = (notifyCalls: any[]) => ({
+    getLastAlertAt: async () => null,
+    recordAlert: async () => {},
+    notify: async (input: any) => { notifyCalls.push(input); return { delivered: ['inapp'] } },
+  })
+
+  test('7: fires for a stale dispatched row with no in_flight run', async () => {
+    rows.length = 0; runs.length = 0
+    rows.push({ id: 'a1', status: 'dispatched', received_at: new Date(NOW - STALL_PARKED_MAX_MS - 60_000).toISOString(), dispatched_at: null })
+    const calls: any[] = []
+    const alerted = await sweepRevanoteStalls(NOW, alertDeps(calls))
+    expect(alerted).toEqual(['u1'])
+    expect(calls).toHaveLength(1)
+  })
+
+  test('7: does NOT fire for a stale dispatched row that has an in_flight run', async () => {
+    rows.length = 0; runs.length = 0
+    rows.push({ id: 'a1', status: 'dispatched', received_at: new Date(NOW - STALL_PARKED_MAX_MS - 60_000).toISOString(), dispatched_at: null })
+    runs.push({ annotation_id: 'a1', status: 'in_flight' })
+    const calls: any[] = []
+    const alerted = await sweepRevanoteStalls(NOW, alertDeps(calls))
+    expect(alerted).toEqual([])
+    expect(calls).toHaveLength(0)
+  })
+})

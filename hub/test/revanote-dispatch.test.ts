@@ -48,7 +48,7 @@ function makeAnnotation(over: Partial<any> = {}) {
     status: 'pending',
     skip_reason: null,
     source_ip: null,
-    payload_raw: {},
+    payload_raw: { installation_id: 999, repo_slug: 'owner/repo' },
     received_at: new Date().toISOString(),
     dispatched_at: null,
     resolved_at: null,
@@ -86,12 +86,30 @@ const state: {
   resolvedSession: { id: string } | null
   // session_id persisted on the annotation row returned by getAnnotationById.
   annSessionId: string
+  // every id the pre-send claim (claimAnnotationsAtSend) was invoked with,
+  // across every call — used to prove WHEN (relative to queueing) a claim
+  // happens (R2-1).
+  claimCalls: string[]
+  // Q3 harness: when non-null, the claim models the real conditional UPDATE
+  // (an id already in the set is NOT claimable; a successful claim adds it).
+  claimed: Set<string> | null
+  // Q3 harness: awaited inside insertAnnotationRun (between open() and send()).
+  onOpen: (() => Promise<void>) | null
+  // single-path markSkipped CAS outcome (false = a concurrent dispatch already resolved the row).
+  failCas: boolean
+  // Generation binding: annotation id -> current_run_id the send-time claim recorded.
+  currentRun: Record<string, string>
 } = {
   runs: [], annStatus: [], broadcasts: [], sentFrames: [], callbacks: [],
   budgetPct: 60, todayCost: 0, costCap: 10,
   offlineSessions: new Set(),
   resolvedSession: { id: 'sess-1' },
   annSessionId: 'sess-1',
+  claimCalls: [],
+  claimed: null,
+  onOpen: null,
+  failCas: true,
+  currentRun: {},
 }
 
 let runSeq = 0
@@ -100,12 +118,29 @@ let runSeq = 0
 // revanoteBudgetGate (cap+pct), sumTodayAnnotationCostForUser is its own DAL fn.
 // We discriminate by the SQL text fragments.
 mock.module('../src/db/postgres.ts', () => ({
-  sql: async (strings: TemplateStringsArray) => {
+  sql: async (strings: TemplateStringsArray, ...values: any[]) => {
     const text = strings.join('')
     if (text.includes('user_id FROM annotations')) return [{ user_id: 'user-1' }]
     if (text.includes('AS tz')) return [{ tz: 'UTC' }]
     if (text.includes('revanote_budget_pct')) return [{ cap: String(state.costCap), pct: state.budgetPct }]
     if (text.includes('daily_cost_cap_usd::text AS cap')) return [{ cap: String(state.costCap) }]
+    // Atomic pre-send claim (qcfix/batch-claim) — this suite doesn't model
+    // annotation row state across calls (getAnnotationById below always
+    // returns a fresh synthetic 'pending' row), so every requested id is
+    // claimable; concurrent-claim races are covered in
+    // revanote-batch-dispatch.test.ts, which DOES share mutable row state.
+    if (text.includes("SET status = 'dispatched'")) {
+      const ids: string[] = values[0] ?? []
+      state.claimCalls.push(...ids)
+      // Generation binding: values[1] is the {annotation id -> run id} JSON map.
+      if (typeof values[1] === 'string') Object.assign(state.currentRun, JSON.parse(values[1]))
+      if (state.claimed) {
+        const won = ids.filter((id) => !state.claimed!.has(id))
+        for (const id of won) state.claimed.add(id)
+        return won.map((id) => ({ id }))
+      }
+      return ids.map((id) => ({ id }))
+    }
     return []
   },
 }))
@@ -116,6 +151,11 @@ mock.module('../src/db/revanote-dal.ts', () => ({
   getAnnotationById: async (id: string) => makeAnnotation({ id, session_id: state.annSessionId }),
   sumTodayAnnotationCostForUser: async () => state.todayCost,
   insertAnnotationRun: async (opts: any) => {
+    if (state.onOpen) {
+      const hook = state.onOpen
+      state.onOpen = null
+      await hook()
+    }
     runSeq++
     const run = { id: `run-${runSeq}`, annotation_id: opts.annotation_id, status: 'in_flight' }
     state.runs.push(run)
@@ -126,8 +166,33 @@ mock.module('../src/db/revanote-dal.ts', () => ({
     if (run) Object.assign(run, patch)
     return run ?? null
   },
+  // Models the finalize CAS: `if_run_id` only wins while it is the row's current generation.
   updateAnnotationStatus: async (id: string, status: string, opts: any = {}) => {
+    if (opts.if_run_id && state.currentRun[id] !== opts.if_run_id) return false
     state.annStatus.push({ id, status, opts })
+    return true
+  },
+  // CAS helpers (real SQL: conditional UPDATEs) -- rows here are always in the expected state.
+  parkAnnotationOfflineIfPending: async (id: string, session_id: string | null) => {
+    state.annStatus.push({ id, status: 'pending', opts: { skip_reason: 'session_offline', session_id } })
+    return true
+  },
+  expireParkedAnnotation: async (id: string) => {
+    state.annStatus.push({ id, status: 'failed_offline', opts: { skip_reason: 'target_offline_expired' } })
+    return true
+  },
+  recordDispatchIfDispatched: async (id: string, opts: any) => {
+    state.annStatus.push({ id, status: 'dispatched', opts })
+    return true
+  },
+  failAnnotationIfDispatched: async (id: string, skip_reason: string) => {
+    state.annStatus.push({ id, status: 'failed', opts: { skip_reason } })
+    return true
+  },
+  failAnnotationIfPending: async (id: string, skip_reason: string, session_id: string | null) => {
+    if (!state.failCas) return false
+    state.annStatus.push({ id, status: 'failed', opts: { skip_reason, session_id } })
+    return true
   },
 }))
 
@@ -139,7 +204,11 @@ const realCommitVerify = await import(`../src/revanote/commit-verify.ts?bust=${D
 mock.module('../src/revanote/commit-verify.ts', () => ({
   ...realCommitVerify,
   loadVerifyContext: async () => ({ owner: 'acme', repo: 'site', installationIds: [1] }),
-  realGithubGet: async () => ({ sha: 'c0ffee'.padEnd(40, '0') }),
+  realGithubGet: async (_i: number, path: string) => {
+    if (/\/repos\/[^/]+\/[^/]+$/.test(path)) return { default_branch: 'main' }
+    if (path.includes('/compare/')) return { status: 'identical' }
+    return { sha: 'c0ffee'.padEnd(40, '0'), commit: { committer: { date: new Date(Date.now() + 1000).toISOString() } } }
+  },
 }))
 
 mock.module('../src/db/dal.ts', () => ({
@@ -163,6 +232,24 @@ mock.module('../src/revanote/callback.ts', () => ({
   },
   startRevanoteCallbackWorker: () => {},
   stopRevanoteCallbackWorker: () => {},
+}))
+
+// commit-verify gate (fix/revanote-resolved-requires-pushed-sha): the annotation
+// fixture above carries installation_id/repo_slug, so resolved:true replies that
+// cite a commit_sha are verified against a mocked-green GitHub API here — this
+// file is testing the dispatch/pipeline wiring, not the verify gate itself
+// (covered by revanote-commit-verify.test.ts).
+mock.module('../src/auth/github-app.ts', () => ({
+  githubApiRequest: async (_installationId: number, _method: string, path: string) => {
+    if (/\/repos\/[^/]+\/[^/]+$/.test(path)) return { default_branch: 'main' }
+    if (path.includes('/compare/')) return { status: 'identical' }
+    return { sha: 'realsha123', commit: { committer: { date: new Date(Date.now() + 1000).toISOString() } } }
+  },
+  GitHubApiError: class GitHubApiError extends Error {
+    status: number
+    body: string
+    constructor(status: number, body: string, msg: string) { super(msg); this.status = status; this.body = body }
+  },
 }))
 
 // Pass-through threshold + cost-cap so the REAL budget gate is what we exercise
@@ -207,6 +294,11 @@ beforeEach(() => {
   state.offlineSessions = new Set()
   state.resolvedSession = { id: 'sess-1' }
   state.annSessionId = 'sess-1'
+  state.claimCalls = []
+  state.claimed = null
+  state.onOpen = null
+  state.failCas = true
+  state.currentRun = {}
   runSeq = 0
   gateOrder.length = 0
   _reset()
@@ -242,7 +334,7 @@ describe('revanote dispatch adapter — open()→finalize lifecycle', () => {
     expect(state.callbacks).toHaveLength(0)
 
     // Agent replies with an envelope → onSessionReply finalizes.
-    await onSessionReply('sess-1', 'Done.\n<<JSON>>\n{"resolved":true,"action_taken":"fixed button","files_changed":["a.tsx"],"commit_sha":"c0ffee1","deployed":true}\n<<END>>')
+    await onSessionReply('sess-1', 'Done.\n<<JSON>>\n{"dispatch_id":"run-1","resolved":true,"action_taken":"fixed button","files_changed":["a.tsx"],"commit_sha":"c0ffee1","deployed":true}\n<<END>>')
 
     // run finalized success + resolved.
     expect(state.runs[0].status).toBe('success')
@@ -275,11 +367,131 @@ describe('revanote dispatch adapter — open()→finalize lifecycle', () => {
     expect(state.runs).toHaveLength(1) // still one — queued waiter has NOT opened
 
     // First reply finalizes head + promotes waiter → re-dispatch opens run #2.
-    await onSessionReply('sess-1', '<<JSON>>{"resolved":true}<<END>>')
+    await onSessionReply('sess-1', '<<JSON>>{"dispatch_id":"run-1","resolved":true}<<END>>')
     expect(state.runs).toHaveLength(2)
     expect(state.runs[1].id).toBe('run-2')
   })
+
+  test('R2-1: a queued annotation is never claimed and survives a hub restart (_reset) fully dispatchable', async () => {
+    // First dispatch claims the in-flight slot for sess-1.
+    await dispatchPendingAnnotation('ann-1')
+    expect(state.runs).toHaveLength(1)
+
+    // A second, distinct annotation on the SAME session queues behind it.
+    const out2 = await dispatchPendingAnnotation('ann-2')
+    expect(out2).toEqual({ status: 'queued' })
+
+    // The queued annotation must NEVER have been claimed — the claim only
+    // happens inside deps.send(), which a merely-queued request never
+    // reaches. Pre-fix, the claim ran unconditionally BEFORE dispatch() was
+    // even called, so ann-2 would already appear in claimCalls here.
+    expect(state.claimCalls).not.toContain('ann-2')
+    expect(state.annStatus.some((s) => s.id === 'ann-2')).toBe(false)
+
+    // Simulate a hub restart: the pipeline's in-memory active-hook + waiter
+    // state is gone (this is exactly what stranded a claimed-but-unsent row
+    // forever pre-fix — nothing ever resets 'dispatching' back to 'pending').
+    _reset()
+
+    // Because ann-2 was never claimed, it is still 'pending' in the DB and a
+    // fresh dispatch attempt for it must succeed outright (not `noop:
+    // already_claimed`, not stuck) — proving restart-recoverability.
+    const redispatched = await dispatchPendingAnnotation('ann-2')
+    expect(redispatched.status).toBe('dispatched')
+    expect(state.sentFrames.some((f) => true)).toBe(true)
+  })
 })
+
+describe('revanote dispatch adapter — Q3 lost send-time claim race', () => {
+  afterAll(() => mock.restore())
+
+  test('Q3: a dispatch that loses the claim to a racing winner cancels its run row (lost_claim_race), sends nothing, never fails the annotation', async () => {
+    state.claimed = new Set()
+    let winnerSends = 0
+    // Between this dispatch's open() (run row inserted) and its send(): a racing
+    // caller (batch sweep / forceSingle retry) wins the atomic claim and sends.
+    state.onOpen = async () => {
+      const won = await claimViaSql('ann-1')
+      if (won) winnerSends++
+    }
+
+    const out = await dispatchPendingAnnotation('ann-1')
+
+    expect(winnerSends).toBe(1)
+    expect(state.sentFrames).toHaveLength(0) // loser sent nothing
+    expect(state.runs).toHaveLength(1) // the spurious open() row...
+    expect(state.runs[0]).toMatchObject({ status: 'cancelled', error: 'lost_claim_race' }) // ...is closed out
+    expect(state.annStatus.some((s) => s.id === 'ann-1' && s.status === 'failed')).toBe(false)
+    expect(out.status).not.toBe('dispatched')
+  })
+})
+
+const env = (runId: string, extra: Record<string, unknown> = {}) =>
+  `<<JSON>>
+${JSON.stringify({ dispatch_id: runId, resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'c0ffee1', ...extra })}
+<<END>>`
+
+describe('revanote dispatch adapter -- reply bound to its dispatch generation (late reply must not finalize a newer dispatch)', () => {
+  afterAll(() => mock.restore())
+
+  test('A dispatched, hub restart (_reset), B dispatched on the same session: a late reply for A does NOT finalize B; the reply for B does', async () => {
+    await dispatchPendingAnnotation('ann-1') // run-1
+    _reset() // restart: A's hook is gone, B can take the session
+    await dispatchPendingAnnotation('ann-2') // run-2
+    expect(state.runs.map((r) => r.id)).toEqual(['run-1', 'run-2'])
+
+    await onSessionReply('sess-1', env('run-1'))
+    expect(state.annStatus.some((s) => s.id === 'ann-2' && s.status === 'resolved')).toBe(false)
+    expect(state.runs[1].status).toBe('in_flight')
+    expect(state.callbacks).toHaveLength(0)
+
+    await onSessionReply('sess-1', env('run-2'))
+    expect(state.annStatus.some((s) => s.id === 'ann-2' && s.status === 'resolved')).toBe(true)
+    expect(state.runs[1].status).toBe('success')
+  })
+
+  test('an envelope with no dispatch_id is "not mine": the hook stays armed', async () => {
+    await dispatchPendingAnnotation('ann-1')
+    await onSessionReply('sess-1', '<<JSON>>{"resolved":true,"commit_sha":"c0ffee1"}<<END>>')
+    expect(state.runs[0].status).toBe('in_flight')
+    expect(state.callbacks).toHaveLength(0)
+    await onSessionReply('sess-1', env('run-1'))
+    expect(state.runs[0].status).toBe('success')
+  })
+
+  test('terminal-timeout path: a FOREIGN-id envelope is never applied -- run finalizes failed, annotation not resolved', async () => {
+    process.env.REVANOTE_FINALIZE_TIMEOUT_MS = '1'
+    try {
+      await dispatchPendingAnnotation('ann-1')
+      await new Promise((r) => setTimeout(r, 15))
+      await onSessionReply('sess-1', env('some-other-run'))
+    } finally {
+      delete process.env.REVANOTE_FINALIZE_TIMEOUT_MS
+    }
+    expect(state.annStatus.some((s) => s.status === 'resolved')).toBe(false)
+    expect(state.callbacks[0]?.payload.resolved).toBe(false)
+  })
+
+  test('the claim records the dispatch generation (current_run_id) for the claimed annotation', async () => {
+    await dispatchPendingAnnotation('ann-1')
+    expect(state.currentRun['ann-1']).toBe('run-1')
+  })
+
+  test('finalize write is a CAS on the generation: a retry that took the row over (new current_run_id) makes the OLD finalize a no-op (no annotation write, no callback, no broadcast)', async () => {
+    await dispatchPendingAnnotation('ann-1') // run-1
+    state.currentRun['ann-1'] = 'run-2' // retry reset + re-claimed under a newer generation
+    await onSessionReply('sess-1', env('run-1'))
+    expect(state.annStatus.some((s) => s.id === 'ann-1' && (s.status === 'resolved' || s.status === 'failed'))).toBe(false)
+    expect(state.callbacks).toHaveLength(0)
+    expect(state.broadcasts.some((b) => b.type === 'revanote_resolved')).toBe(false)
+  })
+})
+
+async function claimViaSql(id: string): Promise<boolean> {
+  const { sql } = await import('../src/db/postgres.ts')
+  const rows: any[] = await (sql as any)(["UPDATE annotations SET status = 'dispatched' WHERE id = ANY(", ")"], [id])
+  return rows.length === 1
+}
 
 describe('revanote dispatch adapter — budget + cost-cap gates', () => {
   afterAll(() => mock.restore())
@@ -306,6 +518,20 @@ describe('revanote dispatch adapter — budget + cost-cap gates', () => {
     expect(state.callbacks).toHaveLength(1)
     expect(state.callbacks[0].payload.annotation_id).toBe('ext-abc')
     expect(state.callbacks[0].payload.resolved).toBe(false)
+  })
+
+  test('markSkipped is a CAS on pending: a row a concurrent dispatch already resolved gets NO failed write, broadcast or callback', async () => {
+    state.costCap = 10
+    state.budgetPct = 60
+    state.todayCost = 6
+    state.failCas = false
+
+    await dispatchPendingAnnotation('ann-1')
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(state.annStatus.some((s) => s.status === 'failed')).toBe(false)
+    expect(state.callbacks).toHaveLength(0)
+    expect(state.broadcasts.filter((b) => b.type === 'revanote_skipped')).toHaveLength(0)
   })
 
   test('under budget → dispatches (budget gate passes)', async () => {

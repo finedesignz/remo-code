@@ -181,6 +181,16 @@ function positiveIntEnv(name: string, fallback: number): number {
 }
 
 /**
+ * Silent-hook reap ceiling for a `shouldFinalize` store that sets no
+ * `hookMaxMs` (`REMO_DISPATCH_HOOK_MAX_MS`, default 2h). Exported so a caller
+ * judging "can this run still be live?" (revanote's durable retry guard) uses
+ * the SAME number the reaper does instead of a shorter narration timeout.
+ */
+export function hookMaxMsFromEnv(): number {
+  return positiveIntEnv('REMO_DISPATCH_HOOK_MAX_MS', DEFAULT_HOOK_MAX_MS)
+}
+
+/**
  * The pipeline owns one queue instance — not a global functional module var.
  * Depth: `REMO_DISPATCH_MAX_WAITERS` waiters per session (default 50). The old
  * 1-waiter cap dropped every burst beyond two (a Revanote review with 22
@@ -208,6 +218,36 @@ const waiterKey = (sessionId: string, token: string) => `${sessionId}\0${token}`
 
 export function getQueue(): SessionQueue {
   return queue
+}
+
+/**
+ * Read-only liveness check (qcfix/r2-claim-at-send, R2-2): true iff `token`
+ * currently holds `sessionId`'s active send slot OR is a parked waiter for
+ * it. A retry endpoint resetting a 'dispatched' row back to 'pending' must
+ * refuse when this is true — the row's first turn is still genuinely live,
+ * not merely stranded by a crash/restart (which clears both maps, making
+ * this return false for anything that predates the current process).
+ */
+export function isTokenLive(sessionId: string, token: string): boolean {
+  const active = activeBySession.get(sessionId)
+  if (active && active.req.token === token) return true
+  return waiterCtx.has(waiterKey(sessionId, token))
+}
+
+/**
+ * Like `isTokenLive` but session-agnostic: true iff `token` is the active send
+ * or a parked waiter for ANY session. Used by the DB-driven pending re-dispatch
+ * sweep, which has not resolved the row's target session yet and must not touch
+ * something the in-memory queue still owns.
+ */
+export function isTokenLiveAnywhere(token: string): boolean {
+  for (const active of activeBySession.values()) {
+    if (active.req.token === token) return true
+  }
+  for (const key of waiterCtx.keys()) {
+    if (key.endsWith(`\0${token}`)) return true
+  }
+  return false
 }
 
 // Test-only reset.
@@ -332,6 +372,7 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
     void releaseAndPromote(req.sessionId)
     const key = deps.graceKey ? deps.graceKey(req) : req.sessionId
     getGraceBuffer().register(key, () => deps.replay(req), {
+      dedupeKey: req.token,
       onExpire: deps.onParkExpire ? () => deps.onParkExpire!(req) : undefined,
     })
     return { kind: 'parked_offline' }
@@ -472,7 +513,7 @@ export async function reapTimedOutHooks(now: number = Date.now()): Promise<numbe
   let reaped = 0
   for (const [sessionId, active] of [...activeBySession]) {
     if (!active.deps.store?.shouldFinalize) continue
-    const maxMs = active.deps.hookMaxMs ?? positiveIntEnv('REMO_DISPATCH_HOOK_MAX_MS', DEFAULT_HOOK_MAX_MS)
+    const maxMs = active.deps.hookMaxMs ?? hookMaxMsFromEnv()
     if (now - active.startedAt < maxMs) continue
     if (activeBySession.get(sessionId) !== active) continue // finalized meanwhile
     console.warn(

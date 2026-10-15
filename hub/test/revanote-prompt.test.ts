@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { previewComment, storagePrefix, renderAnnotationPrompt } from '../src/revanote/prompt'
+import { previewComment, storagePrefix, renderAnnotationPrompt, renderBatchAnnotationPrompt } from '../src/revanote/prompt'
 
 describe('previewComment', () => {
   test('short comment unchanged', () => {
@@ -49,6 +49,7 @@ describe('renderAnnotationPrompt', () => {
   test('PR strategy with auto_merge', () => {
     const out = renderAnnotationPrompt({
       annotation: ann,
+      dispatchId: 'run-1',
       mapping: {
         id: 'm1', user_id: 'u', hostname_pattern: 'app.example.com',
         repo_path: 'C:/code/app', supervisor_id: null,
@@ -68,6 +69,7 @@ describe('renderAnnotationPrompt', () => {
   test('direct strategy', () => {
     const out = renderAnnotationPrompt({
       annotation: ann,
+      dispatchId: 'run-1',
       mapping: {
         id: 'm1', user_id: 'u', hostname_pattern: '*.example.com',
         repo_path: 'C:/code/app', supervisor_id: null,
@@ -79,7 +81,7 @@ describe('renderAnnotationPrompt', () => {
   })
 
   test('no mapping → fallback text', () => {
-    const out = renderAnnotationPrompt({ annotation: ann, mapping: null })
+    const out = renderAnnotationPrompt({ annotation: ann, mapping: null, dispatchId: 'run-1' })
     expect(out).toContain('no mapping configured')
   })
 
@@ -96,7 +98,7 @@ describe('renderAnnotationPrompt', () => {
         },
       },
     }
-    const out = renderAnnotationPrompt({ annotation: annWithContract, mapping: null })
+    const out = renderAnnotationPrompt({ annotation: annWithContract, mapping: null, dispatchId: 'run-1' })
     expect(out).toContain('best-guess')
     expect(out).toContain('ambiguous_intent')
     expect(out).toContain('conflicting_instruction')
@@ -107,7 +109,7 @@ describe('renderAnnotationPrompt', () => {
   })
 
   test('fix_contract absent → no fix-contract text, envelope byte-identical to pre-Phase-5', () => {
-    const out = renderAnnotationPrompt({ annotation: ann, mapping: null })
+    const out = renderAnnotationPrompt({ annotation: ann, mapping: null, dispatchId: 'run-1' })
     expect(out).not.toContain('ambiguous_intent')
     expect(out).not.toContain('"assumption":')
     expect(out).not.toContain('"clarification_reason":')
@@ -123,7 +125,7 @@ describe('renderAnnotationPrompt', () => {
   // with `commit_sha` / `branch` and the pushed-commit rule; the baseline
   // carries those lines and still pins every other byte.
   test('fix_contract absent → prompt is byte-identical to captured pre-Phase-5 baseline', () => {
-    const out = renderAnnotationPrompt({ annotation: ann, mapping: null })
+    const out = renderAnnotationPrompt({ annotation: ann, mapping: null, dispatchId: 'run-1' })
     const preSPhase5Baseline =
       'A reviewer left a Revanote annotation on a deployed page. Please address it.\n\n' +
       'Repo: (no mapping configured for this host — fix in-tree only)\n\n' +
@@ -157,26 +159,69 @@ describe('renderAnnotationPrompt', () => {
       '- Strategy: PR.\n' +
       '- Create branch `revanote/annotation-ext-1`, commit fix with a descriptive message, push, then `gh pr create` with the annotation comment in the body.\n' +
       '- Leave the PR open for human review.\n\n\n' +
+      'This is a single Revanote comment dispatched on its own (no sibling\n' +
+      'comments were batched with it). Before marking it resolved:\n' +
+      '  1. Make the fix in its own branch, commit, push, and open its own PR.\n' +
+      '  2. Wait for CI to go green.\n' +
+      '  3. Merge the PR yourself.\n' +
+      '  4. Redeploy the site that serves the page_url host.\n' +
+      "  5. Re-fetch this comment's page_url to confirm the change is actually\n" +
+      '     live.\n' +
+      'Only after all five steps is this comment eligible for "resolved": true. Cite\n' +
+      'the MERGED commit SHA on the repo\'s default branch as "commit_sha" — not\n' +
+      'your local working-tree or unmerged branch-tip SHA — and the confirmed\n' +
+      'live URL as "deploy_url". Never set "resolved": true before the merge and\n' +
+      'the deploy have both actually happened. Any comment you cannot verify this\n' +
+      'way gets "resolved": false or "needs_clarification": true with the\n' +
+      'reason — never a guess. This is advisory text — the hub independently\n' +
+      'verifies "commit_sha" against the GitHub remote before trusting\n' +
+      '"resolved": true (a merged commit on the default branch passes; an\n' +
+      'unmerged/local one does not), and downgrades to false with a reason\n' +
+      'otherwise.\n\n' +
       'When you are done (resolved OR clarification needed), end your reply with a\n' +
       'machine-readable JSON envelope so the hub can post a callback. Use exactly\n' +
-      'this format on its own lines (no markdown fences inside the envelope):\n\n' +
+      'this format on its own lines (no markdown fences inside the envelope).\n' +
+      '"dispatch_id" is REQUIRED and must be copied EXACTLY as shown (it identifies\n' +
+      'this dispatch; a reply without it, or with a different one, is discarded):\n\n' +
       '<<JSON>>\n' +
       '{\n' +
+      '  "dispatch_id": "run-1",\n' +
       '  "resolved": true,\n' +
       '  "action_taken": "short summary of what you did",\n' +
       '  "files_changed": ["path/one.tsx", "path/two.ts"],\n' +
-      '  "commit_sha": "full SHA of the commit you pushed",\n' +
+      '  "commit_sha": "the full commit SHA MERGED to the default branch that made this fix (required when resolved is true)",\n' +
       '  "branch": "the branch you pushed it to",\n' +
       '  "deployed": true,\n' +
+      '  "deploy_url": "the live URL you re-fetched to confirm the change, when deployed is true",\n' +
       '  "needs_clarification": false\n' +
       '}\n' +
       '<<END>>\n\n' +
-      '"resolved": true is accepted ONLY with the "commit_sha" of a commit already pushed\n' +
-      'to the remote; the hub checks it on GitHub and rejects a resolve it cannot find.\n' +
-      'Push first, then report. Never report resolved for local-only or uncommitted work.\n\n' +
+      '"resolved": true is accepted ONLY with the "commit_sha" of a commit already MERGED\n' +
+      "to the repo's default branch; the hub checks it on GitHub and rejects a resolve it\n" +
+      'cannot find there. Merge first, then report. Never report resolved for local-only,\n' +
+      'uncommitted, or unmerged-branch work.\n\n' +
       'If you cannot fix it autonomously, set "resolved": false, "needs_clarification": true,\n' +
       'and put a single question in "clarification_question".'
     expect(out).toBe(preSPhase5Baseline)
+  })
+})
+
+describe('dispatch_id in the reply envelope template', () => {
+  const ann: any = {
+    id: 'a1', annotation_id_external: 'ext-1', page_url: 'https://app.example.com/x', annotation_url: null,
+    screenshot_url: null, x: null, y: null, element_selector: null, comment: 'c', replies_json: [], payload_raw: {},
+  }
+  test('single prompt states the dispatch id and requires it', () => {
+    const out = renderAnnotationPrompt({ annotation: ann, mapping: null, dispatchId: 'run-42' })
+    expect(out).toContain('"dispatch_id": "run-42"')
+    expect(out).toContain('"dispatch_id" is REQUIRED')
+  })
+
+  test('batch prompt carries ONE top-level dispatch id', () => {
+    const out = renderBatchAnnotationPrompt({ items: [{ annotation: ann, mapping: null }], dispatchId: 'batch-gen-7' })
+    expect(out.match(/"dispatch_id": "batch-gen-7"/g)).toHaveLength(1)
+    expect(out.indexOf('"dispatch_id"')).toBeLessThan(out.indexOf('"annotations": ['))
+    expect(out).toContain('"dispatch_id" is REQUIRED')
   })
 })
 
