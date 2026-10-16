@@ -17,12 +17,62 @@
 // via `cargo tauri ios init` / `cargo tauri android init` on a host with the
 // appropriate toolchain — see mobile/tauri/README.md.
 
+use std::sync::Mutex;
+
+use tauri::webview::PageLoadEvent;
 use tauri::{Emitter, Manager, Url, WebviewWindow};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 const FINALIZE_PATH: &str = "/api/auth/finalize-mobile";
 const APP_FINALIZE_PATH: &str = "/auth/app-finalize";
 const APP_ORIGIN: &str = "https://app.remo-code.com";
+const APP_HOST: &str = "app.remo-code.com";
+
+/// A finalize script waiting for the WebView to show a hub document.
+///
+/// The login's `remo_login` pending cookie is set by the hub SPA (a hub-origin,
+/// SameSite=Lax cookie). A finalize `fetch` from any other document (the bundled
+/// shell page `tauri://localhost` / `http://tauri.localhost`, which is what the
+/// WebView shows on a cold start by the deep link) is cross-site, so that cookie
+/// is not sent and `/auth/app-finalize` answers `state_mismatch`. The script
+/// therefore only ever runs inside a first-party hub document: immediately on
+/// the warm path, else parked here and run by `on_page_load` once the WebView
+/// has navigated to the hub. Holds a script, never logged.
+#[derive(Default)]
+struct PendingFinalize(Mutex<Option<String>>);
+
+/// True for a first-party hub document (`https://app.remo-code.com`, default port).
+fn is_hub_document(url: &Url) -> bool {
+    url.scheme() == "https" && url.host_str() == Some(APP_HOST) && url.port().is_none()
+}
+
+/// The hub entry the shell normally redirects to (ui/src/main.ts), with the
+/// `remo_shell` marker the SPA reads (web/src/lib/platform.ts).
+fn hub_entry_url(version: &str) -> Url {
+    let mut url = Url::parse(APP_ORIGIN).expect("APP_ORIGIN is a valid URL");
+    url.query_pairs_mut().append_pair("remo_shell", if version.is_empty() { "1" } else { version });
+    url
+}
+
+/// Run `js` inside a first-party hub document: now when the WebView already
+/// shows one (warm path), else park it and navigate to the hub (cold start).
+fn run_in_hub_document(window: &WebviewWindow, js: String) {
+    let on_hub = window.url().map(|u| is_hub_document(&u)).unwrap_or(false);
+    if on_hub {
+        if let Err(e) = window.eval(&js) {
+            log::error!("[mobile] eval finalize JS failed: {}", e);
+        }
+        return;
+    }
+    if let Some(pending) = window.try_state::<PendingFinalize>() {
+        *pending.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(js);
+    }
+    let version = window.app_handle().package_info().version.to_string();
+    log::info!("[mobile] deep link: navigating to the hub origin before finalizing");
+    if let Err(e) = window.navigate(hub_entry_url(&version)) {
+        log::error!("[mobile] navigate to the hub failed: {}", e);
+    }
+}
 
 fn finalize_js(token: &str, app_origin: &str, finalize_path: &str) -> String {
     // token is a Keygen-issued opaque string from the magic-link callback.
@@ -60,14 +110,12 @@ fn finalize_js(token: &str, app_origin: &str, finalize_path: &str) -> String {
     )
 }
 
-// The fetch below runs in whatever document the WebView shows: the hub SPA
-// (Origin: https://app.remo-code.com) or, e.g. on a cold start by the deep link,
-// the bundled shell page (Origin: tauri://localhost on iOS/macOS,
-// http://tauri.localhost on Android/Windows). The hub's /auth/app-finalize and
-// /auth/email {client:"app"} admit exactly those configured shell origins (CORS
-// with credentials, SameSite=None; Partitioned pending cookie), see
-// hub/src/auth/titanium-login.ts isAppShellOrigin. No Rust HTTP client is used
-// for the login: the cookies live in the WebView's jar.
+// The fetch below runs only inside a first-party hub document
+// (Origin: https://app.remo-code.com), see run_in_hub_document: the remo_login
+// pending cookie the hub SPA set is SameSite=Lax and would not be sent from the
+// bundled shell page (tauri://localhost, http://tauri.localhost), whose fetch is
+// cross-site. No Rust HTTP client is used for the login: the cookies live in the
+// WebView's jar.
 fn app_finalize_js(state: &str, act: &str, app_origin: &str, path: &str) -> String {
     // state + act come from the deep link; JSON-encode them so quotes and
     // backslashes cannot break out of the string literals.
@@ -172,10 +220,7 @@ fn handle_deep_link(window: &WebviewWindow, url_str: &str) {
             let _ = window.eval(&format!("location.replace({});", target));
             return;
         }
-        let js = app_finalize_js(&state, &act, APP_ORIGIN, APP_FINALIZE_PATH);
-        if let Err(e) = window.eval(&js) {
-            log::error!("[mobile] eval app-finalize JS failed: {}", e);
-        }
+        run_in_hub_document(window, app_finalize_js(&state, &act, APP_ORIGIN, APP_FINALIZE_PATH));
         return;
     }
 
@@ -185,10 +230,7 @@ fn handle_deep_link(window: &WebviewWindow, url_str: &str) {
         return;
     };
 
-    let js = finalize_js(&token, APP_ORIGIN, FINALIZE_PATH);
-    if let Err(e) = window.eval(&js) {
-        log::error!("[mobile] eval finalize JS failed: {}", e);
-    }
+    run_in_hub_document(window, finalize_js(&token, APP_ORIGIN, FINALIZE_PATH));
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -198,6 +240,25 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_deep_link::init())
+        .manage(PendingFinalize::default())
+        // Drain a parked finalize once a hub document has loaded (see PendingFinalize).
+        .on_page_load(|webview, payload| {
+            if payload.event() != PageLoadEvent::Finished || !is_hub_document(payload.url()) {
+                return;
+            }
+            let Some(pending) = webview.try_state::<PendingFinalize>() else {
+                return;
+            };
+            let parked = {
+                let mut slot = pending.0.lock().unwrap_or_else(|e| e.into_inner());
+                slot.take()
+            };
+            if let Some(js) = parked {
+                if let Err(e) = webview.eval(&js) {
+                    log::error!("[mobile] eval parked finalize JS failed: {}", e);
+                }
+            }
+        })
         .setup(|app| {
             let handle = app.handle().clone();
 
@@ -278,6 +339,31 @@ mod tests {
         assert!(out.contains("code=REDACTED") && out.contains("token=REDACTED"));
         assert!(out.contains("code_verifier=REDACTED"));
         assert!(out.contains("code_challenge=cc456") && out.contains("ok=1"));
+    }
+
+    #[test]
+    fn only_a_first_party_hub_document_runs_the_finalize() {
+        for ok in ["https://app.remo-code.com/", "https://app.remo-code.com/#/login", "https://app.remo-code.com/?remo_shell=1"] {
+            assert!(is_hub_document(&Url::parse(ok).unwrap()), "{ok}");
+        }
+        for no in [
+            "tauri://localhost/",
+            "http://tauri.localhost/",
+            "http://app.remo-code.com/",
+            "https://app.remo-code.com:8443/",
+            "https://app.remo-code.com.evil.example/",
+            "https://evil.example/app.remo-code.com",
+        ] {
+            assert!(!is_hub_document(&Url::parse(no).unwrap()), "{no}");
+        }
+    }
+
+    #[test]
+    fn hub_entry_url_is_a_hub_document_with_the_shell_marker() {
+        let url = hub_entry_url("0.1.0");
+        assert!(is_hub_document(&url));
+        assert_eq!(url.as_str(), "https://app.remo-code.com/?remo_shell=0.1.0");
+        assert_eq!(hub_entry_url("").as_str(), "https://app.remo-code.com/?remo_shell=1");
     }
 
     #[test]
