@@ -71,6 +71,7 @@ import { parseRevanoteBatchOutput, envelopeForBatchItem, ENVELOPE_RE, extractDis
 import { finalizeAnnotationReply } from './run-lifecycle.ts'
 import { dispatch, isTokenLiveAnywhere, type DispatchRequest, type PipelineDeps, type RunStore } from '../dispatch/pipeline.ts'
 import { thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate } from '../dispatch/gates.ts'
+import { automationKillSwitchGate } from '../dispatch/automation-controls.ts'
 import { ensureSessionOnline } from '../dispatch/spawn-on-error.ts'
 import {
   resolveMappingAndSession,
@@ -463,7 +464,7 @@ async function dispatchBatch(
 
   const ceilingMs = batchRunMaxMs()
   const deps: PipelineDeps = {
-    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate, revanoteBudgetGate(userId, tz)],
+    gates: [automationKillSwitchGate, thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate, revanoteBudgetGate(userId, tz)],
     store,
     finalizeTimeoutMs: ceilingMs,
     hookMaxMs: ceilingMs,
