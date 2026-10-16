@@ -253,6 +253,9 @@ app.use('/api/auth/login/callback', rateLimit({
 // start is `silent` so a limited request gets the identical {ok:true} answer and
 // simply sends nothing.
 app.use('/auth/email', async (c, next) => {
+  // A CORS preflight from the Tauri shell sends no email: it must not spend the
+  // 3/min per-IP budget of the real request.
+  if (c.req.method === 'OPTIONS') return next()
   const email = await readEmailForRateLimit(c)
   return rateLimitMulti({
     silent: true,

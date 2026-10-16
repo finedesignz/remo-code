@@ -60,6 +60,14 @@ fn finalize_js(token: &str, app_origin: &str, finalize_path: &str) -> String {
     )
 }
 
+// The fetch below runs in whatever document the WebView shows: the hub SPA
+// (Origin: https://app.remo-code.com) or, e.g. on a cold start by the deep link,
+// the bundled shell page (Origin: tauri://localhost on iOS/macOS,
+// http://tauri.localhost on Android/Windows). The hub's /auth/app-finalize and
+// /auth/email {client:"app"} admit exactly those configured shell origins (CORS
+// with credentials, SameSite=None; Partitioned pending cookie), see
+// hub/src/auth/titanium-login.ts isAppShellOrigin. No Rust HTTP client is used
+// for the login: the cookies live in the WebView's jar.
 fn app_finalize_js(state: &str, act: &str, app_origin: &str, path: &str) -> String {
     // state + act come from the deep link; JSON-encode them so quotes and
     // backslashes cannot break out of the string literals.

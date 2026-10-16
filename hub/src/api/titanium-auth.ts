@@ -4,20 +4,24 @@
 // and CSRF catch-alls on purpose and do their own checks:
 //
 //   POST /auth/email         SPA email form (JSON {email, client?}). Origin must be
-//                            the hub origin. Sets remo_login {state} (+ PKCE for the
+//                            the hub origin (or, for client:"app" only, the exact
+//                            Tauri WebView origin; CORS for those origins only). Sets remo_login {state} (+ PKCE for the
 //                            app shell) and asks the portal, in the background, to
 //                            mail a link. Same answer for every address.
 //   POST /auth/start         "Continue with Titanium" (form). Origin must be the hub
 //                            origin. remo_login {state, verifier} → 303 hosted login
 //                            with return_url=<hub>/auth/callback?state&code_challenge.
 //   GET  /auth/callback      ?state&act. state matches remo_login: exchange (+verifier)
-//                            and sign in. No match: exchange, park the identity in
+//                            and sign in. No match + code_challenge (PKCE-bound act):
+//                            400 "finish where you started", no exchange. No match
+//                            otherwise (email link): exchange, park the identity in
 //                            remo_confirm (5 min) and 303 /auth/confirm. Nothing is
 //                            minted on a GET without a state match.
 //   GET  /auth/confirm       "Sign in as a***@x.com?" page.
 //   POST /auth/confirm       Origin == hub origin + valid remo_confirm + matching csrf.
 //   POST /auth/app-finalize  Tauri shell: {state, act} from the WebView (same cookie
-//                            jar as /auth/email). Origin == hub origin, remo_login
+//                            jar as /auth/email). Origin == hub origin or the exact
+//                            Tauri WebView origin, remo_login
 //                            client=app, state match, PKCE verifier at exchange.
 //                            Never falls back to a confirmation page.
 //   POST /auth/logout        Clears the hub session + pending cookies (Origin may be
@@ -29,6 +33,7 @@
 
 import { Hono, type Context } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
+import { cors } from "hono/cors";
 import { config } from "../config.ts";
 import {
   APP_DEEP_LINK_CALLBACK,
@@ -40,6 +45,7 @@ import {
   exchangeAct,
   getCallbackUrl,
   getHostedLoginUrl,
+  isAppShellOrigin,
   maskEmail,
   newPendingConfirm,
   newPendingLogin,
@@ -59,6 +65,19 @@ import { clearCsrfCookie, issueCsrfToken, setCsrfCookie } from "../csrf.ts";
 
 export const titaniumAuthRouter = new Hono();
 
+// The Tauri WebView calls the app-shell leg with fetch() from its own origin
+// (tauri://localhost / http(s)://tauri.localhost), cross-origin to the hub: answer
+// CORS (with credentials, so the pending-login and session cookies flow) for
+// exactly those configured origins and nothing else. Web-leg routes get no CORS.
+const appShellCors = cors({
+  origin: (origin) => (isAppShellOrigin(origin) ? origin : null),
+  allowMethods: ["POST"],
+  allowHeaders: ["Content-Type"],
+  credentials: true,
+});
+titaniumAuthRouter.use("/email", appShellCors);
+titaniumAuthRouter.use("/app-finalize", appShellCors);
+
 // Test seam: lets unit tests replace the DB-backed linker (no Postgres needed).
 type Linker = typeof linkTitaniumLogin;
 let _linker: Linker = linkTitaniumLogin;
@@ -74,7 +93,7 @@ function ipOf(c: Context): string | null {
 }
 
 function clearPendingLogin(c: Context) {
-  setCookie(c, PENDING_LOGIN_COOKIE, "", pendingCookieOptions(0));
+  setCookie(c, PENDING_LOGIN_COOKIE, "", pendingCookieOptions(0, { appShell: isAppShellOrigin(c.req.header("origin")) }));
 }
 function clearPendingConfirm(c: Context) {
   setCookie(c, PENDING_CONFIRM_COOKIE, "", pendingCookieOptions(0));
@@ -153,11 +172,16 @@ async function completeLogin(
 
 // ── POST /auth/email ────────────────────────────────────────────────────────
 titaniumAuthRouter.post("/email", async (c) => {
-  if (!originAllowed(c.req.header("origin"))) return c.json({ error: "origin_not_allowed" }, 403);
+  const origin = c.req.header("origin");
+  if (!originAllowed(origin, { allowAppShell: true })) return c.json({ error: "origin_not_allowed" }, 403);
   const body = (await c.req.json().catch(() => null)) as { email?: unknown; client?: unknown } | null;
   const email = typeof body?.email === "string" ? normalizeEmail(body.email) : "";
   if (!email) return c.json({ error: "invalid_email" }, 400);
   const client = body?.client === "app" ? "app" : "web";
+  // The Tauri WebView origin is admitted for the app-shell leg only: a web login
+  // (which returns to /auth/callback in a browser) must come from the hub origin.
+  const appShell = isAppShellOrigin(origin);
+  if (appShell && client !== "app") return c.json({ error: "origin_not_allowed" }, 403);
 
   let pending: Awaited<ReturnType<typeof newPendingLogin>>;
   try {
@@ -169,7 +193,7 @@ titaniumAuthRouter.post("/email", async (c) => {
     return c.json({ error: "server_misconfigured" }, 503);
   }
   const returnUrl = getCallbackUrl({ state: pending.state, codeChallenge: pending.challenge, client });
-  setCookie(c, PENDING_LOGIN_COOKIE, pending.token, pendingCookieOptions(PENDING_LOGIN_TTL_SECONDS));
+  setCookie(c, PENDING_LOGIN_COOKIE, pending.token, pendingCookieOptions(PENDING_LOGIN_TTL_SECONDS, { appShell }));
 
   // Same answer for every address and for a rate-limited request: the portal call
   // runs AFTER the response, so neither the body nor the timing is an oracle.
@@ -223,8 +247,26 @@ titaniumAuthRouter.get("/callback", async (c) => {
       return c.redirect("/", 302);
     }
 
-    // Not started in this browser (another device, or a link someone handed us).
-    // Redeem, but never mint on this GET: ask the user to confirm the account.
+    // Not started in this browser, and the return_url carried a PKCE challenge (the
+    // hosted "Continue with Titanium" login): the portal bound the act to a verifier
+    // only the starting browser holds, so an exchange here could only fail and would
+    // spend the act. Do not call it; nothing is minted and no cookie is touched.
+    if (c.req.query("code_challenge") !== undefined) {
+      c.header("Cache-Control", "no-store");
+      return c.html(
+        page(
+          "Finish signing in · Remo Code",
+          `<h1>Finish signing in</h1>
+<p>Finish signing in in the browser where you started, or start again.</p>
+<p><a href="${LOGIN_PAGE}">Start again</a></p>`,
+        ),
+        400,
+      );
+    }
+
+    // Not started in this browser (another device, or a link someone handed us),
+    // email-link login (never PKCE). Redeem, but never mint on this GET: ask the
+    // user to confirm the account.
     const result = await exchangeAct(act);
     if (!result.ok) return c.redirect(loginError(result.error), 302);
     const { token } = await newPendingConfirm(result);
@@ -294,7 +336,7 @@ titaniumAuthRouter.post("/confirm", async (c) => {
 // match this device's pending login is refused outright, no confirmation fallback.
 titaniumAuthRouter.post("/app-finalize", async (c) => {
   try {
-    if (!originAllowed(c.req.header("origin"))) return c.json({ error: "origin_not_allowed" }, 403);
+    if (!originAllowed(c.req.header("origin"), { allowAppShell: true })) return c.json({ error: "origin_not_allowed" }, 403);
     const body = (await c.req.json().catch(() => null)) as { state?: unknown; act?: unknown } | null;
     const act = typeof body?.act === "string" ? body.act : "";
     const state = typeof body?.state === "string" ? body.state : "";

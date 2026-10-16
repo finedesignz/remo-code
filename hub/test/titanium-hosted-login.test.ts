@@ -238,6 +238,50 @@ describe('GET /auth/callback', () => {
     expect(cookieHeader(res, 'remo_confirm')).toMatch(/Max-Age=300/);
   });
 
+  for (const [name, cookieFor] of [
+    ['state MISMATCH', async () => `remo_login=${(await pendingCookie({ pkce: true })).token}`],
+    ['no remo_login cookie', async () => undefined],
+  ] as const) {
+    test(`${name} + code_challenge (hosted PKCE login) → NO exchange; 400 "finish where you started"; nothing minted or cleared`, async () => {
+      const cookie = await cookieFor();
+      const res = await app().request(
+        `/auth/callback?state=other-browser&code_challenge=Q2hhbGxlbmdl&code_challenge_method=S256&act=act_pk`,
+        { headers: { cookie: [cookie, '__Host-remo_sid=remo_existing'].filter(Boolean).join('; ') } },
+      );
+      expect(res.status).toBe(400);
+      const body = await res.text();
+      expect(body).toContain('Finish signing in in the browser where you started, or start again.');
+      expect(body).toContain('href="/#/login"');
+      expect(calls).toHaveLength(0); // the act is not spent
+      expect(setCookies(res)).toEqual([]); // no confirm cookie, session and pending login untouched
+      expect(dalMocks.createAuthSession).not.toHaveBeenCalled();
+      expect(dalMocks.deleteAuthSession).not.toHaveBeenCalled();
+      expect(linkCalls).toHaveLength(0);
+    });
+  }
+
+  test('state matches + code_challenge → still exchanged with the verifier (unchanged)', async () => {
+    const p = await pendingCookie({ pkce: true });
+    const res = await callback(`state=${p.state}&code_challenge=${p.challenge}&code_challenge_method=S256&act=act_ok`, `remo_login=${p.token}`);
+    expect(res.headers.get('location')).toBe('/');
+    expect(calls.find((c) => c.url === `${PORTAL}/api/exchange`)!.body).toEqual({ act: 'act_ok', app_slug: 'remo-code', code_verifier: p.verifier });
+    expect(hasSession(res)).toBe(true);
+  });
+
+  test('the remo_confirm cookie never carries the license key (raw value and decoded segments)', async () => {
+    const licenseKey = 'key/eyJsaWNlbnNlIjp7ImlkIjoiTElDLVNFQ1JFVC05OSJ9fQ.c2ln';
+    exchangeReply = () => json({ appSlug: 'remo-code', email: 'owner@example.com', accountId: 'acc-1', licenseKey });
+    const res = await callback(`state=x&act=act_lk`);
+    expect(res.headers.get('location')).toBe('/auth/confirm');
+    const raw = cookieHeader(res, 'remo_confirm')!;
+    const value = cookieValue(res, 'remo_confirm')!;
+    const decoded = value.split('.').map((part) => Buffer.from(part, 'base64url').toString('latin1')).join('|');
+    for (const secret of [licenseKey, 'LIC-SECRET-99', 'licenseKey']) {
+      expect(raw).not.toContain(secret);
+      expect(decoded).not.toContain(secret);
+    }
+  });
+
   test('no remo_login cookie at all → confirmation page, no session', async () => {
     const res = await callback(`state=whatever&act=act_3`);
     expect(res.headers.get('location')).toBe('/auth/confirm');
@@ -432,13 +476,93 @@ describe('Tauri shell leg (remo-code:// deep link, PKCE + app_slug)', () => {
     expect(calls).toHaveLength(0);
   });
 
-  test('missing / foreign Origin → 403', async () => {
+  test('missing / foreign / lookalike Origin → 403', async () => {
     const p = await pendingCookie({ pkce: true, client: 'app' });
-    for (const origin of [null, 'tauri://localhost', 'https://evil.example']) {
+    for (const origin of [null, '', 'null', 'https://evil.example', 'tauri://localhost.evil.example', 'tauri://evil', 'https://tauri.localhost.evil.example', 'http://localhost', 'https://app.remo-code.com.evil.example']) {
       const res = await appFinalize({ state: p.state, act: 'a' }, { origin, cookie: `remo_login=${p.token}` });
       expect(res.status).toBe(403);
     }
     expect(calls).toHaveLength(0);
+  });
+
+  test('the Tauri WebView\'s own origin is admitted on the app leg (exact configured values) → session (Tauri cookie variant)', async () => {
+    for (const origin of ['tauri://localhost', 'http://tauri.localhost', 'https://tauri.localhost']) {
+      calls = [];
+      const p = await pendingCookie({ pkce: true, client: 'app' });
+      const res = await appFinalize({ state: p.state, act: 'act_t' }, { origin, cookie: `remo_login=${p.token}` });
+      expect(res.status).toBe(200);
+      expect(calls.find((c) => c.url.endsWith('/api/exchange'))!.body).toEqual({ act: 'act_t', app_slug: 'remo-code', code_verifier: p.verifier });
+      expect(setCookies(res).some((c) => c.startsWith('remo_sid=') && /SameSite=None/.test(c) && /Partitioned/.test(c))).toBe(true);
+      expect(res.headers.get('access-control-allow-origin')).toBe(origin);
+      expect(res.headers.get('access-control-allow-credentials')).toBe('true');
+    }
+  });
+
+  test('a Tauri origin still needs the matching state cookie (no state → 401, act not redeemed)', async () => {
+    const res = await appFinalize({ state: 'x', act: 'a' }, { origin: 'tauri://localhost' });
+    expect(res.status).toBe(401);
+    expect(calls).toHaveLength(0);
+  });
+
+  test('/auth/email {client:"app"} from the Tauri origin → 200; remo_login is SameSite=None; Secure; Partitioned (cross-site jar)', async () => {
+    const res = await startEmail({ client: 'app', origin: 'tauri://localhost' });
+    expect(res.status).toBe(200);
+    const h = cookieHeader(res, 'remo_login')!;
+    expect(h).toMatch(/SameSite=None/);
+    expect(h).toMatch(/Secure/);
+    expect(h).toMatch(/Partitioned/);
+    expect(h).toMatch(/HttpOnly/);
+    expect(h).toMatch(/Path=\/auth/);
+    expect(res.headers.get('access-control-allow-origin')).toBe('tauri://localhost');
+    await flush();
+    const send = calls.find((c) => c.url.endsWith('/send-magic-link'))!;
+    expect(send.body.returnUrl.startsWith('remo-code://auth/callback?')).toBe(true);
+  });
+
+  test('the Tauri origin is NOT a web-leg origin: /auth/email (web), /auth/start, /auth/confirm refuse it', async () => {
+    const web = await startEmail({ origin: 'tauri://localhost' });
+    expect(web.status).toBe(403);
+    expect(cookieHeader(web, 'remo_login')).toBeUndefined();
+    const start = await startHosted('tauri://localhost');
+    expect(start.headers.get('location')).toBe('/#/login?error=origin_not_allowed');
+    expect(cookieHeader(start, 'remo_login')).toBeUndefined();
+    const { token, csrf } = await tl.newPendingConfirm({ email: 'owner@example.com' });
+    const conf = await confirmPost({ origin: 'tauri://localhost', cookie: `remo_confirm=${token}`, csrf });
+    expect(hasSession(conf)).toBe(false);
+    expect(dalMocks.createAuthSession).not.toHaveBeenCalled();
+    await flush();
+    expect(calls).toHaveLength(0);
+  });
+
+  test('MOBILE_TAURI_ORIGINS_ENABLED=false → the Tauri origin is refused on the app leg too', async () => {
+    const prev = config.mobileTauriOriginsEnabled;
+    (config as any).mobileTauriOriginsEnabled = false;
+    try {
+      const p = await pendingCookie({ pkce: true, client: 'app' });
+      const res = await appFinalize({ state: p.state, act: 'a' }, { origin: 'tauri://localhost', cookie: `remo_login=${p.token}` });
+      expect(res.status).toBe(403);
+      const email = await startEmail({ client: 'app', origin: 'tauri://localhost' });
+      expect(email.status).toBe(403);
+      expect(calls).toHaveLength(0);
+    } finally {
+      (config as any).mobileTauriOriginsEnabled = prev;
+    }
+  });
+
+  test('CORS preflight: allowed only for the exact Tauri origins, never a foreign one, never on web-leg routes', async () => {
+    const pre = (path: string, origin: string) =>
+      app().request(path, { method: 'OPTIONS', headers: { origin, 'access-control-request-method': 'POST', 'access-control-request-headers': 'content-type' } });
+    for (const path of ['/auth/email', '/auth/app-finalize']) {
+      const ok = await pre(path, 'tauri://localhost');
+      expect(ok.headers.get('access-control-allow-origin')).toBe('tauri://localhost');
+      expect(ok.headers.get('access-control-allow-credentials')).toBe('true');
+      const bad = await pre(path, 'https://evil.example');
+      expect(bad.headers.get('access-control-allow-origin')).toBeNull();
+    }
+    for (const path of ['/auth/start', '/auth/confirm', '/auth/logout']) {
+      const r = await pre(path, 'tauri://localhost');
+      expect(r.headers.get('access-control-allow-origin')).toBeNull();
+    }
   });
 
   test('another app\'s act on the deep link → refused', async () => {

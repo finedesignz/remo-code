@@ -16,7 +16,7 @@ Code: `hub/src/api/titanium-auth.ts` (routes, mounted at `/auth`, root, NOT unde
 |---|---|
 | `POST /auth/email` | SPA email form, JSON `{email, client?}`. **Origin must equal `REMO_PUBLIC_URL`** (missing or foreign → 403). Sets `remo_login` (signed, 15 min, `{state}`; the app shell also gets a PKCE verifier) and, AFTER the response, asks the portal (`POST https://license.titaniumlabs.us/api/auth/send-magic-link {email, appId:"remo-code", returnUrl}`) to mail a link. Identical `{ok:true}` for every address and for a rate-limited request (3/min/IP, 5/h/address, silent). |
 | `POST /auth/start` | "Continue with Titanium" (form). Same Origin rule. `remo_login {state, verifier}` → 303 `https://auth.titaniumlabs.us/login?app_id=remo-code&return_url=<REMO_PUBLIC_URL>/auth/callback?state=…&code_challenge=…&code_challenge_method=S256` (passkey first, email link, Google per the app's portal policy). |
-| `GET /auth/callback?state&act` | `state` matches `remo_login` (constant time): `POST /api/exchange {act, app_slug:"remo-code", code_verifier?}` → link user → session. **No match** (link opened on another device, or a link someone handed you): exchange, park the identity in `remo_confirm` (signed, 5 min, own key, csrf) and 303 `/auth/confirm`. Nothing is minted on a GET without a state match. |
+| `GET /auth/callback?state&act` | `state` matches `remo_login` (constant time): `POST /api/exchange {act, app_slug:"remo-code", code_verifier?}` → link user → session. **No match** (link opened on another device, or a link someone handed you): exchange, park the identity in `remo_confirm` (signed, 5 min, own key, csrf; email + accountId only, never the license key) and 303 `/auth/confirm`. **No match and the URL carries `code_challenge`** (a hosted, PKCE-bound login: only the starting browser holds the verifier): the exchange is NOT called (it could only fail and would spend the act); a plain 400 page says "Finish signing in in the browser where you started, or start again", nothing minted, no cookie touched. Nothing is minted on a GET without a state match. |
 | `GET /auth/confirm` / `POST /auth/confirm` | "Sign in as a\*\*\*@x.com?" page. The POST mints only with Origin == `REMO_PUBLIC_URL`, a valid `remo_confirm`, and the matching csrf field. Cancel keeps any existing session. |
 | `POST /auth/app-finalize` | Tauri shell deep-link leg (see "App shell" below). |
 | `POST /auth/logout` | Clears the hub session, CSRF and pending cookies (a missing Origin is accepted, a foreign one refused) → 303 `/auth/signed-out`, which auto-submits a top-level POST to `https://auth.titaniumlabs.us/api/auth/logout` with `return_url=<REMO_PUBLIC_URL>/#/login?signed_out=1`, so the portal's own 7-day session ends too. |
@@ -57,7 +57,11 @@ kept in sessionStorage) and sends `POST /auth/email {client:"app"}`: `remo_login
 `{state, verifier, client:"app"}` in the WebView's cookie jar and the return URL is
 `remo-code://auth/callback?state=…&code_challenge=…&code_challenge_method=S256`. The shell
 (`mobile/tauri/src-tauri/src/lib.rs`) POSTs `{state, act}` to `/auth/app-finalize` from that WebView;
-the hub requires Origin == `REMO_PUBLIC_URL`, a `client:"app"` pending cookie with a verifier and a
+the hub requires Origin == `REMO_PUBLIC_URL` or one of the exact Tauri WebView origins
+(`tauri://localhost`, `http://tauri.localhost`, `https://tauri.localhost`; `MOBILE_TAURI_ORIGINS_ENABLED`,
+admitted on `/auth/email {client:"app"}` and `/auth/app-finalize` only, with CORS + credentials for those
+origins only and a `SameSite=None; Secure; Partitioned` `remo_login` when the request came from one; a
+missing Origin is still refused), a `client:"app"` pending cookie with a verifier and a
 state match, then exchanges with the verifier. A deep link this device did not start is refused
 (401, no confirmation fallback). The hosted-login button is hidden in the shell (the WebView would
 have to hand off to the system browser; not wired). The old `finalize-mobile` handoff is NOT kept as

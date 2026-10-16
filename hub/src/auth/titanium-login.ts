@@ -61,7 +61,38 @@ export function cookieSecure(): boolean {
   return appOrigin().startsWith("https:");
 }
 
-export function pendingCookieOptions(maxAge: number) {
+/**
+ * The Tauri shell's own WebView origin (`tauri://localhost` on iOS/macOS,
+ * `http://tauri.localhost` on Android/Windows, `https://` with useHttpsScheme),
+ * exactly as listed in config.mobileTauriOrigins, and only while
+ * MOBILE_TAURI_ORIGINS_ENABLED is on (the same first-party list the /api CORS and
+ * the Tauri session-cookie variant use, hub/src/session.ts isTauriOrigin). A remote
+ * web page cannot send these origins (`tauri:` is not a web scheme, `*.localhost`
+ * is loopback-only). Admitted ONLY on the app-shell leg (/auth/email
+ * {client:"app"} and /auth/app-finalize), never on a web-leg route.
+ */
+export function isAppShellOrigin(origin: string | null | undefined): boolean {
+  if (!origin || !config.mobileTauriOriginsEnabled) return false;
+  return config.mobileTauriOrigins.includes(origin);
+}
+
+/**
+ * `appShell`: the request came from the Tauri WebView origin, for which the hub
+ * origin is a cross-site context. A SameSite=Lax cookie would be neither stored
+ * nor sent there, so the shell variant is SameSite=None; Secure; Partitioned
+ * (mirrors the Tauri session cookie, hub/src/session.ts).
+ */
+export function pendingCookieOptions(maxAge: number, opts: { appShell?: boolean } = {}) {
+  if (opts.appShell) {
+    return {
+      httpOnly: true,
+      secure: true,
+      sameSite: "None" as const,
+      partitioned: true,
+      maxAge,
+      path: PENDING_COOKIE_PATH,
+    };
+  }
   return {
     httpOnly: true,
     secure: cookieSecure(),
@@ -102,11 +133,17 @@ export function pkceChallenge(verifier: string): string {
  * endpoints (they plant the state cookie) and the confirm / app-finalize POSTs
  * require `Origin` to equal the hub's public origin: a missing or foreign Origin
  * is refused (a cross-site POST would otherwise plant an attacker-known state).
- * Logout passes `allowMissing: true` (refuse only a foreign Origin).
+ * Logout passes `allowMissing: true` (refuse only a foreign Origin). The app-shell
+ * leg passes `allowAppShell: true`: the Tauri WebView's exact origin is admitted
+ * too (see isAppShellOrigin), never a wildcard and never a missing Origin.
  */
-export function originAllowed(origin: string | null | undefined, opts: { allowMissing?: boolean } = {}): boolean {
+export function originAllowed(
+  origin: string | null | undefined,
+  opts: { allowMissing?: boolean; allowAppShell?: boolean } = {},
+): boolean {
   if (!origin) return opts.allowMissing === true;
-  return origin === appOrigin();
+  if (origin === appOrigin()) return true;
+  return opts.allowAppShell === true && isAppShellOrigin(origin);
 }
 
 // ── Return URLs ─────────────────────────────────────────────────────────────

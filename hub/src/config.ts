@@ -114,11 +114,14 @@ const sessionIdleGraceSeconds = (() => {
   return n;
 })();
 // Phase 12.1: Tauri mobile WebView origins. iOS WKWebView shows
-// `tauri://localhost`; Android System WebView shows `https://tauri.localhost`.
+// `tauri://localhost`; Android System WebView shows `https://tauri.localhost`
+// with `useHttpsScheme: true`, and Tauri 2's default (our tauri.conf.json sets no
+// useHttpsScheme) is `http://tauri.localhost` on Android and Windows. All exact
+// values, never a pattern; `*.localhost` is loopback-only in browsers.
 // Treated as additional first-party origins (CORS allow + Tauri cookie variant).
 // Disable only for debug isolation — default ON.
 const mobileTauriOriginsEnabled = parseBool(process.env.MOBILE_TAURI_ORIGINS_ENABLED, true);
-const MOBILE_TAURI_ORIGINS = ["tauri://localhost", "https://tauri.localhost"] as const;
+const MOBILE_TAURI_ORIGINS = ["tauri://localhost", "https://tauri.localhost", "http://tauri.localhost"] as const;
 // Placeholders for Universal Links / Android App Links. Defaults keep the
 // `.well-known/*` routes serving in dev where the real team id / fingerprint
 // have not yet been provisioned.

@@ -29,9 +29,9 @@ pipeline ship in later sub-phases (12.2–12.5). What this PR provides:
 | Platform | Origin header |
 |---|---|
 | iOS (WKWebView) | `tauri://localhost` |
-| Android (System WebView) | `https://tauri.localhost` |
+| Android (System WebView) / Windows | `http://tauri.localhost` (Tauri 2 default), `https://tauri.localhost` with `useHttpsScheme` |
 
-Both origins are added to `config.allowedOrigins` automatically when
+These exact origins are added to `config.allowedOrigins` automatically when
 `MOBILE_TAURI_ORIGINS_ENABLED=true` (default). They flow through the same
 `hono/cors` middleware that handles the SPA's own origin. The `/ws/client`
 origin check (`hub/src/index.ts`) accepts them through the same allow-list.
