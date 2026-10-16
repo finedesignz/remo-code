@@ -350,11 +350,18 @@ describe('GET /auth/callback', () => {
     expect(res.headers.get('location')).toBe('/#/login?error=server_misconfigured');
   });
 
-  test('fresh-session invariant: an inbound session row is revoked before the new one', async () => {
+  test('fresh-session invariant: the inbound session row is revoked only AFTER the new one exists', async () => {
+    const order: string[] = [];
+    dalMocks.createAuthSession.mockImplementationOnce(async () => {
+      order.push('create');
+      return { token: 'remo_freshtoken', id: 'sha', expiresAt: new Date(Date.now() + 3600_000) };
+    });
+    dalMocks.deleteAuthSession.mockImplementationOnce(async () => { order.push('delete'); });
     const p = await pendingCookie();
     const res = await callback(`state=${p.state}&act=act`, `remo_login=${p.token}; __Host-remo_sid=remo_old`);
     expect(hasSession(res)).toBe(true);
     expect(dalMocks.deleteAuthSession).toHaveBeenCalledWith('remo_old');
+    expect(order).toEqual(['create', 'delete']);
   });
 });
 
@@ -688,4 +695,49 @@ describe('return URLs come from REMO_PUBLIC_URL, never the Host header', () => {
     const ret = new URL(new URL(res.headers.get('location')!).searchParams.get('return_url')!);
     expect(ret.origin).toBe(config.publicUrl);
   });
+});
+
+// ── No logout CSRF: a failed login never touches the inbound session ───────
+describe('a failed login keeps the existing session (cookie and row)', () => {
+  const EXISTING = '__Host-remo_sid=remo_existing';
+  function expectSessionUntouched(res: Response) {
+    expect(cookieHeader(res, '__Host-remo_sid')).toBeUndefined(); // neither cleared nor replaced
+    expect(dalMocks.deleteAuthSession).not.toHaveBeenCalled(); // the DB row survives
+  }
+  const failures: Array<[string, () => void]> = [
+    ['exchange failure', () => { exchangeReply = () => json({ error: 'token_not_found' }, 404); }],
+    ['link conflict', () => { linkResult = { ok: false, reason: 'account_conflict' }; }],
+    ['unknown identity', () => { linkResult = { ok: false, reason: 'no_account' }; }],
+    ['session-create error', () => { dalMocks.createAuthSession.mockImplementationOnce(async () => { throw new Error('db down'); }); }],
+  ];
+
+  for (const [name, arrange] of failures) {
+    test(`GET /auth/callback (matched state), ${name}`, async () => {
+      arrange();
+      const p = await pendingCookie({ pkce: true });
+      const res = await callback(`state=${p.state}&act=act_f`, `remo_login=${p.token}; ${EXISTING}`);
+      expect(res.status).toBe(302);
+      expect(res.headers.get('location')).toMatch(/^\/#\/login\?error=/);
+      expectSessionUntouched(res);
+    });
+
+    test(`POST /auth/app-finalize, ${name}`, async () => {
+      arrange();
+      const p = await pendingCookie({ pkce: true, client: 'app' });
+      const res = await appFinalize({ state: p.state, act: 'act_f' }, { cookie: `remo_login=${p.token}; ${EXISTING}` });
+      expect(res.status).toBeGreaterThanOrEqual(400);
+      expectSessionUntouched(res);
+    });
+  }
+
+  for (const [name, arrange] of failures.filter(([n]) => n !== 'exchange failure')) {
+    test(`POST /auth/confirm, ${name}`, async () => {
+      arrange();
+      const { token, csrf } = await tl.newPendingConfirm({ email: 'owner@example.com', accountId: 'acc-1' });
+      const res = await confirmPost({ cookie: `remo_confirm=${token}; ${EXISTING}`, csrf });
+      expect(res.status).toBe(303);
+      expect(res.headers.get('location')).toMatch(/^\/#\/login\?error=/);
+      expectSessionUntouched(res);
+    });
+  }
 });

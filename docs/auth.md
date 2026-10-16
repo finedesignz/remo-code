@@ -30,8 +30,11 @@ or not `remo-code` → `wrong_app`; empty email → refused. The email is trimme
 `purpose` claim. `SESSION_SECRET` unset or < 32 chars → the start routes refuse
 (`/#/login?error=server_misconfigured`), never a fallback key. The dashboard session itself is
 unchanged: opaque `remo_…` token, sha-256 in `auth_sessions`, `__Host-remo_sid` (see below).
-Any mint failure is the normal error redirect, never an unhandled 500. A fresh login revokes the
-inbound session row first (the step-up gate keys on `auth_sessions.created_at`).
+Any mint failure is the normal error redirect, never an unhandled 500. No logout CSRF: a failed
+login (exchange, linking refusal, session-create error) on the callback, `/auth/confirm` or
+`/auth/app-finalize` leaves the inbound session cookie and row untouched; a successful login
+revokes the inbound session row only AFTER the new one exists (the step-up gate keys on
+`auth_sessions.created_at`).
 
 **Pending cookies.** `remo_login` / `remo_confirm`: HttpOnly, Secure (unless `REMO_PUBLIC_URL`
 is plain http), SameSite=Lax, `Path=/auth`.

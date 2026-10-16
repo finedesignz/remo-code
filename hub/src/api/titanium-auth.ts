@@ -148,12 +148,15 @@ async function completeLogin(
       return { ok: false, error: link.reason };
     }
 
+    // No logout CSRF: the inbound session is revoked only AFTER the new one
+    // exists. Any failure above or here (link refusal, session-create error)
+    // returns with the inbound session row and cookie untouched.
     const inbound = readSessionCookie(c);
+    const { token } = await createAndSetSession(c, { userId: link.userId, ip, userAgent: ua });
+    setCsrfCookie(c, issueCsrfToken(token));
     if (inbound) {
       try { await deleteAuthSession(inbound); } catch {}
     }
-    const { token } = await createAndSetSession(c, { userId: link.userId, ip, userAgent: ua });
-    setCsrfCookie(c, issueCsrfToken(token));
     try {
       await recordAuthEvent({
         userId: link.userId,
@@ -235,15 +238,10 @@ titaniumAuthRouter.get("/callback", async (c) => {
     if (matched) {
       clearPendingLogin(c);
       const result = await exchangeAct(act, pending!.verifier);
-      if (!result.ok) {
-        await destroySession(c);
-        return c.redirect(loginError(result.error), 302);
-      }
+      // Failures leave any existing session alone (no logout CSRF).
+      if (!result.ok) return c.redirect(loginError(result.error), 302);
       const done = await completeLogin(c, result, "titanium_state");
-      if (!done.ok) {
-        await destroySession(c);
-        return c.redirect(loginError(done.error), 302);
-      }
+      if (!done.ok) return c.redirect(loginError(done.error), 302);
       return c.redirect("/", 302);
     }
 
@@ -317,10 +315,7 @@ titaniumAuthRouter.post("/confirm", async (c) => {
 
     clearPendingLogin(c);
     const done = await completeLogin(c, pending, "titanium_confirm");
-    if (!done.ok) {
-      await destroySession(c);
-      return redirect303(c, loginError(done.error));
-    }
+    if (!done.ok) return redirect303(c, loginError(done.error));
     return redirect303(c, "/");
   } catch (err) {
     console.error("[auth] titanium confirm failed", { reason: err instanceof Error ? err.name : "unknown" });
@@ -350,10 +345,7 @@ titaniumAuthRouter.post("/app-finalize", async (c) => {
     const result = await exchangeAct(act, pending.verifier);
     if (!result.ok) return c.json({ error: result.error }, 401);
     const done = await completeLogin(c, result, "titanium_app");
-    if (!done.ok) {
-      await destroySession(c);
-      return c.json({ error: done.error }, done.error === "server_misconfigured" ? 503 : 403);
-    }
+    if (!done.ok) return c.json({ error: done.error }, done.error === "server_misconfigured" ? 503 : 403);
     return c.json({ ok: true });
   } catch (err) {
     console.error("[auth] titanium app finalize failed", { reason: err instanceof Error ? err.name : "unknown" });
