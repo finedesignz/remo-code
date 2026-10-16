@@ -46,6 +46,7 @@ import {
   getCallbackUrl,
   getHostedLoginUrl,
   isAppShellOrigin,
+  isSpaOrigin,
   maskEmail,
   newPendingConfirm,
   newPendingLogin,
@@ -75,7 +76,17 @@ const appShellCors = cors({
   allowHeaders: ["Content-Type"],
   credentials: true,
 });
-titaniumAuthRouter.use("/email", appShellCors);
+// /auth/email is also fetched by the SPA itself, which in dev runs on its own
+// origin (HUB_ALLOWED_ORIGINS, e.g. the Vite server): answer CORS for exactly
+// those SPA origins too. /auth/start and /auth/logout are form POSTs (top-level
+// navigations) and need no CORS.
+const emailCors = cors({
+  origin: (origin) => (isAppShellOrigin(origin) || isSpaOrigin(origin) ? origin : null),
+  allowMethods: ["POST"],
+  allowHeaders: ["Content-Type"],
+  credentials: true,
+});
+titaniumAuthRouter.use("/email", emailCors);
 titaniumAuthRouter.use("/app-finalize", appShellCors);
 
 // Test seam: lets unit tests replace the DB-backed linker (no Postgres needed).

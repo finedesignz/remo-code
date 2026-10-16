@@ -144,8 +144,20 @@ export function originAllowed(
   opts: { allowMissing?: boolean; allowAppShell?: boolean } = {},
 ): boolean {
   if (!origin) return opts.allowMissing === true;
-  if (origin === appOrigin()) return true;
+  if (origin === appOrigin() || isSpaOrigin(origin)) return true;
   return opts.allowAppShell === true && isAppShellOrigin(origin);
+}
+
+/**
+ * An exact SPA origin from HUB_ALLOWED_ORIGINS (dev: the Vite server on :5173 with
+ * VITE_HUB_URL pointing at the hub), the same list the /api CORS already trusts with
+ * credentials. Exact match only, never a wildcard; the Tauri WebView origins that
+ * config merges into that list are NOT SPA origins (they stay app-shell only).
+ */
+export function isSpaOrigin(origin: string | null | undefined): boolean {
+  if (!origin || origin === "*" || origin === "null") return false;
+  if (config.mobileTauriOrigins.includes(origin)) return false;
+  return config.allowedOrigins.includes(origin);
 }
 
 // ── Return URLs ─────────────────────────────────────────────────────────────

@@ -741,3 +741,72 @@ describe('a failed login keeps the existing session (cookie and row)', () => {
     });
   }
 });
+
+// ── SPA on its own origin (dev: Vite on :5173, VITE_HUB_URL -> hub) ──────────
+describe('login and logout POSTs accept an exact HUB_ALLOWED_ORIGINS SPA origin', () => {
+  const SPA = 'http://localhost:5173';
+  const TAURI = 'tauri://localhost';
+  let savedOrigins: string[];
+  beforeEach(() => {
+    savedOrigins = [...(config as any).allowedOrigins];
+    (config as any).allowedOrigins = [SPA, TAURI];
+  });
+  afterAll(() => { (config as any).allowedOrigins = savedOrigins; });
+  const restore = () => { (config as any).allowedOrigins = savedOrigins; };
+
+  test('POST /auth/email from the SPA origin → accepted, state cookie, CORS for that origin', async () => {
+    try {
+      const res = await startEmail({ origin: SPA });
+      expect(res.status).toBe(200);
+      expect(cookieValue(res, 'remo_login')).not.toBeNull();
+      expect(res.headers.get('access-control-allow-origin')).toBe(SPA);
+      expect(res.headers.get('access-control-allow-credentials')).toBe('true');
+    } finally { restore(); }
+  });
+
+  test('POST /auth/start and /auth/logout from the SPA origin → accepted', async () => {
+    try {
+      const start = await startHosted(SPA);
+      expect(start.status).toBe(303);
+      expect(start.headers.get('location')).toMatch(/^https:\/\/auth\.titaniumlabs\.us\/login\?/);
+      const out = await app().request('/auth/logout', { method: 'POST', headers: { origin: SPA, cookie: '__Host-remo_sid=remo_x' } });
+      expect(out.status).toBe(303);
+      expect(dalMocks.deleteAuthSession).toHaveBeenCalledWith('remo_x');
+    } finally { restore(); }
+  });
+
+  test('a foreign Origin, or an origin only on the list as a Tauri shell, stays refused on the web leg', async () => {
+    try {
+      for (const origin of ['https://evil.example', 'http://localhost:5174', TAURI]) {
+        const start = await startHosted(origin);
+        expect(start.headers.get('location')).toBe('/#/login?error=origin_not_allowed');
+        expect(cookieValue(start, 'remo_login')).toBeNull();
+        const out = await app().request('/auth/logout', { method: 'POST', headers: { origin, cookie: '__Host-remo_sid=remo_x' } });
+        expect(out.status).toBe(403);
+      }
+      const email = await startEmail({ origin: 'https://evil.example' });
+      expect(email.status).toBe(403);
+      expect(email.headers.get('access-control-allow-origin')).toBeNull();
+      expect(dalMocks.deleteAuthSession).not.toHaveBeenCalled();
+    } finally { restore(); }
+  });
+
+  test('a missing Origin: login start refused, logout still accepted', async () => {
+    try {
+      expect((await startEmail({ origin: null })).status).toBe(403);
+      expect((await startHosted(null)).headers.get('location')).toBe('/#/login?error=origin_not_allowed');
+      const out = await app().request('/auth/logout', { method: 'POST' });
+      expect(out.status).toBe(303);
+    } finally { restore(); }
+  });
+
+  test('isSpaOrigin: exact entries only, never a wildcard or the Tauri origins', () => {
+    try {
+      (config as any).allowedOrigins = [SPA, '*', TAURI];
+      expect(tl.isSpaOrigin(SPA)).toBe(true);
+      for (const o of ['*', 'null', TAURI, 'http://localhost:5173.evil.example', '', null, undefined]) {
+        expect(tl.isSpaOrigin(o as any)).toBe(false);
+      }
+    } finally { restore(); }
+  });
+});
