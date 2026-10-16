@@ -1,5 +1,12 @@
 # Mobile Tauri client (Phase 12)
 
+> **Login (2026-10):** the shell now signs in through the Titanium hosted login's deep-link leg
+> (`POST /auth/email {client:"app"}` → `remo-code://auth/callback?state&act` → `POST /auth/app-finalize`,
+> PKCE + `app_slug`), see [auth.md](./auth.md) "App shell". The `?platform=` / `finalize-mobile`
+> handoff described below is LEGACY (404 unless `LEGACY_MAGIC_LINK_LOGIN=on`). A rebuilt shell is
+> required (new `lib.rs` handler + `?remo_shell=` boot marker), and the portal must list
+> `remo-code://auth` in `ALLOWED_RETURN_URL_ORIGINS`.
+
 > **Status: paused 2026-05-28.** See [phase-12-pause-state.md](./phase-12-pause-state.md) for the canonical "where everything is" doc, install commands, deferred items, and resume checklist.
 
 Native iOS + Android wrappers around the existing `web/` SPA, talking to
@@ -22,9 +29,9 @@ pipeline ship in later sub-phases (12.2–12.5). What this PR provides:
 | Platform | Origin header |
 |---|---|
 | iOS (WKWebView) | `tauri://localhost` |
-| Android (System WebView) | `https://tauri.localhost` |
+| Android (System WebView) / Windows | `http://tauri.localhost` (Tauri 2 default), `https://tauri.localhost` with `useHttpsScheme` |
 
-Both origins are added to `config.allowedOrigins` automatically when
+These exact origins are added to `config.allowedOrigins` automatically when
 `MOBILE_TAURI_ORIGINS_ENABLED=true` (default). They flow through the same
 `hono/cors` middleware that handles the SPA's own origin. The `/ws/client`
 origin check (`hub/src/index.ts`) accepts them through the same allow-list.

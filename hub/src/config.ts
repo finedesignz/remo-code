@@ -54,15 +54,50 @@ const titaniumPortalToken = process.env.TITANIUM_KEYGEN_PORTAL_TOKEN || "";
 const titaniumAdminToken = process.env.TITANIUM_KEYGEN_ADMIN_TOKEN || titaniumPortalToken;
 const magicLinkSecret = requireMinLenIfSet("MAGIC_LINK_SECRET", process.env.MAGIC_LINK_SECRET, 32);
 const sessionSecret = requireMinLenIfSet("SESSION_SECRET", process.env.SESSION_SECRET, 32);
-const allowLegacyLogin = parseBool(process.env.ALLOW_LEGACY_LOGIN, true);
+// Titanium hosted login (2026-10): the bcrypt `/api/auth/login` + `/register`
+// routes, the `/api/setup/create-admin` password bootstrap and the legacy Bearer
+// JWT (REST + /ws/client) are OFF unless ALLOW_LEGACY_LOGIN=true is set
+// explicitly. The default was `true`, which kept password login live in prod.
+const allowLegacyLogin = parseBool(process.env.ALLOW_LEGACY_LOGIN, false);
+// The hub's OWN HS256 magic link (`/api/auth/login/request-link`, `/login/callback`
+// and the `finalize-mobile` handoff it mints) is replaced by the Titanium hosted
+// login (`hub/src/api/titanium-auth.ts`). It stays in the code for one release as a
+// rollback, reachable only with LEGACY_MAGIC_LINK_LOGIN=on (routes 404 otherwise).
+function parseOnFlag(v: string | undefined): boolean {
+  return /^(1|true|yes|on)$/i.test((v ?? "").trim());
+}
+const legacyMagicLinkLogin = parseOnFlag(process.env.LEGACY_MAGIC_LINK_LOGIN);
+// Public origin of this hub (the SPA + the Titanium callback). Taken from env,
+// NEVER from the request Host header: it is the return_url the Titanium portal
+// redirects to and the origin every state-setting POST must come from.
+const publicUrl = (() => {
+  const raw = process.env.REMO_PUBLIC_URL || "https://app.remo-code.com";
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new Error(`REMO_PUBLIC_URL must be a valid URL; got ${JSON.stringify(raw)}`);
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") {
+    throw new Error(`REMO_PUBLIC_URL must be http(s); got ${JSON.stringify(raw)}`);
+  }
+  return u.origin;
+})();
+// First-user bootstrap under Titanium login: when the users table is EMPTY, a
+// Titanium login whose verified email equals this address creates the first
+// (admin) user. Unset = no user is ever created by a login (there is no open
+// self-signup); additional users are created by an operator.
+const bootstrapAdminEmail = (process.env.REMO_BOOTSTRAP_ADMIN_EMAIL || "").trim().toLowerCase();
 // Phase 07-D escape hatch: when LICENSE_REQUIRED=false, requireActiveLicense
 // short-circuits to permissive mode (logs a warning once at boot). Used while
 // Keygen JWKS endpoint is unhealthy so identity/REST routes don't 402.
 const licenseRequired = parseBool(process.env.LICENSE_REQUIRED, true);
-// Phase 07 escape hatch (2026-05-26): TITANIUM_BYPASS=true disables JWKS warm
-// at boot, short-circuits the license gate, and 503s the magic-link endpoints.
-// Used while Keygen CE JWKS endpoint is unavailable. Legacy bcrypt login
-// (ALLOW_LEGACY_LOGIN=true) remains the only working auth path under bypass.
+// Phase 07 escape hatch (2026-05-26): TITANIUM_BYPASS=true disables the Keygen
+// JWKS warm at boot and short-circuits the LICENSE gate (Keygen CE JWKS outage).
+// It is a LICENSE switch only (2026-10): it does NOT touch login. The Titanium
+// hosted login keeps working under bypass, and bypass NEVER turns password login
+// on: that needs ALLOW_LEGACY_LOGIN=true, set explicitly. (It still 503s the
+// legacy own magic link, which is itself off unless LEGACY_MAGIC_LINK_LOGIN=on.)
 const titaniumBypass = parseBool(process.env.TITANIUM_BYPASS, false);
 // Bug B (2026-05-28) — when the last web subscriber for a session leaves, wait
 // this many seconds before sending `shutdown` to the agent so its runner is
@@ -79,11 +114,14 @@ const sessionIdleGraceSeconds = (() => {
   return n;
 })();
 // Phase 12.1: Tauri mobile WebView origins. iOS WKWebView shows
-// `tauri://localhost`; Android System WebView shows `https://tauri.localhost`.
+// `tauri://localhost`; Android System WebView shows `https://tauri.localhost`
+// with `useHttpsScheme: true`, and Tauri 2's default (our tauri.conf.json sets no
+// useHttpsScheme) is `http://tauri.localhost` on Android and Windows. All exact
+// values, never a pattern; `*.localhost` is loopback-only in browsers.
 // Treated as additional first-party origins (CORS allow + Tauri cookie variant).
 // Disable only for debug isolation — default ON.
 const mobileTauriOriginsEnabled = parseBool(process.env.MOBILE_TAURI_ORIGINS_ENABLED, true);
-const MOBILE_TAURI_ORIGINS = ["tauri://localhost", "https://tauri.localhost"] as const;
+const MOBILE_TAURI_ORIGINS = ["tauri://localhost", "https://tauri.localhost", "http://tauri.localhost"] as const;
 // Placeholders for Universal Links / Android App Links. Defaults keep the
 // `.well-known/*` routes serving in dev where the real team id / fingerprint
 // have not yet been provisioned.
@@ -216,6 +254,9 @@ export const config = {
   magicLinkSecret,
   sessionSecret,
   allowLegacyLogin,
+  legacyMagicLinkLogin,
+  publicUrl,
+  bootstrapAdminEmail,
   titaniumWebhookSecret,
   licenseRequired,
   titaniumBypass,

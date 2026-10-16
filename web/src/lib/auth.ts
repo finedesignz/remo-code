@@ -1,13 +1,14 @@
 /**
  * Auth client (Phase 07 — Titanium cutover).
  *
- * Session is owned by an HttpOnly cookie (`__Host-remo_sid`) set by the hub on
- * the magic-link callback. JS can NOT read it. We only see the companion
+ * Session is owned by an HttpOnly cookie (`__Host-remo_sid`) set by the hub when
+ * a Titanium hosted login completes (`/auth/callback`). JS can NOT read it. We only see the companion
  * non-HttpOnly `csrf_token` cookie, which is also our "user is signed in"
  * signal (see `hasSessionCookie`).
  *
- * Legacy password login is kept available behind a soak flag and a fallback
- * function until plan D7 flips `VITE_HIDE_LEGACY_LOGIN=true`.
+ * Legacy password login and the own magic link are kept behind hub flags
+ * (ALLOW_LEGACY_LOGIN / LEGACY_MAGIC_LINK_LOGIN, both default off); the login
+ * page shows them only when `/api/client-config` says they are enabled.
  */
 
 import { hubFetch, hubUrl, hasSessionCookie } from './api'
@@ -22,27 +23,56 @@ export interface AuthUser {
 }
 
 /**
- * Request a magic-link email. Server ALWAYS returns 200 (enumeration
- * prevention) — caller should render a generic "check your inbox" state
- * regardless of outcome.
+ * Titanium hosted login, email path. The hub (`POST /auth/email`) sets the
+ * short-lived `remo_login` state cookie and asks the Titanium portal to mail a
+ * sign-in link that returns to `/auth/callback`. Same answer for every address,
+ * so the caller always renders "check your inbox". `client: 'app'` is the Tauri
+ * shell (deep-link return, PKCE). Throws only on a config/transport failure that
+ * says nothing about the address (invalid email format, misconfigured server).
+ */
+export async function requestTitaniumLink(email: string, client: 'web' | 'app' = 'web'): Promise<void> {
+  const res = await fetch(`${HUB_URL}/auth/email`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, client }),
+    credentials: 'include',
+  })
+  if (res.ok) return
+  const body = (await res.json().catch(() => null)) as { error?: string } | null
+  throw new Error(body?.error || 'send_failed')
+}
+
+/** Form action of the "Continue with Titanium" button (hosted login, PKCE). */
+export function titaniumStartAction(): string {
+  return `${HUB_URL}/auth/start`
+}
+
+/**
+ * Full sign-out: a top-level form POST to the hub's `/auth/logout`, which clears
+ * the hub session and 303s the browser (a top-level GET) to the Titanium portal
+ * logout (its session would otherwise sign the user straight back in on the next
+ * "Continue with Titanium").
+ */
+export function submitFullLogout(): void {
+  const form = document.createElement('form')
+  form.method = 'POST'
+  form.action = `${HUB_URL}/auth/logout`
+  form.style.display = 'none'
+  document.body.appendChild(form)
+  form.submit()
+}
+
+/**
+ * LEGACY own magic link (hub `LEGACY_MAGIC_LINK_LOGIN=on` only; the route 404s
+ * otherwise). Kept for one release as a rollback.
  */
 export async function requestMagicLink(email: string): Promise<void> {
-  const res = await fetch(`${HUB_URL}/api/auth/login/request-link`, {
+  await fetch(`${HUB_URL}/api/auth/login/request-link`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email }),
     credentials: 'include',
   }).catch(() => null)
-  // Magic-link is globally disabled when the hub runs Titanium-bypassed
-  // (503 `{ error: "titanium_disabled" }`). That is a deployment-wide config
-  // state, NOT a per-email signal — surfacing it leaks no enumeration info, and
-  // silently rendering "check your inbox" would strand the user waiting for an
-  // email that will never send. Signal the caller to fall back to password
-  // sign-in. Every other outcome stays silent (enumeration safety).
-  if (res && res.status === 503) {
-    const body = (await res.json().catch(() => null)) as { error?: string } | null
-    if (body?.error === 'titanium_disabled') throw new Error('magic_link_disabled')
-  }
 }
 
 /**
@@ -62,8 +92,8 @@ export async function legacyPasswordLogin(
     credentials: 'include',
   })
   if (!res.ok) {
-    if (res.status === 410) {
-      throw new Error('Password sign-in is disabled. Use the magic-link form.')
+    if (res.status === 404 || res.status === 410) {
+      throw new Error('Password sign-in is disabled. Use the email link or Continue with Titanium.')
     }
     const err = await res.json().catch(() => ({ error: 'Login failed' }))
     throw new Error(err.error || 'Login failed')

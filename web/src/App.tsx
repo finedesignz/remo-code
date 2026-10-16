@@ -124,7 +124,7 @@ function getGridTabId(): string | undefined {
 }
 
 export default function App() {
-  const { user, token, loading, signIn, signOut } = useAuth()
+  const { user, token, loading, signIn, signOut, logout } = useAuth()
   const { profile, loading: profileLoading, updateProfile } = useProfile(token)
   const [needsSetup, setNeedsSetup] = useState<boolean | null>(null)
   const [route, setRoute] = useState<Route>(getRoute)
@@ -246,20 +246,20 @@ export default function App() {
       {licenseRequired && <LicenseRequiredBanner onDismiss={() => setLicenseRequired(false)} />}
 
       {route === 'home' && (
-        <HomePage token={token} user={user} signOut={signOut} onNavigate={navigate} gridTabId={gridTabId} />
+        <HomePage token={token} user={user} signOut={logout} onNavigate={navigate} gridTabId={gridTabId} />
       )}
       {route === 'tasks' && (
-        <TasksPage token={token} user={user} signOut={signOut} onNavigate={navigate} />
+        <TasksPage token={token} user={user} signOut={logout} onNavigate={navigate} />
       )}
       {route === 'activity' && (
-        <ActivityPage token={token} user={user} signOut={signOut} onNavigate={navigate} />
+        <ActivityPage token={token} user={user} signOut={logout} onNavigate={navigate} />
       )}
       {route === 'settings' && (
         <SettingsPage
           token={token}
           user={user}
           profile={profile}
-          signOut={signOut}
+          signOut={logout}
           onNavigate={navigate}
           onUpdateProfile={updateProfile}
         />
