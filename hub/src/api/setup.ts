@@ -10,11 +10,13 @@ let setupInProgress = false;
 
 setupRouter.get("/status", async (c) => {
   const count = await countUsers();
-  // `needs_setup` drives the SPA's password SetupForm, which only makes sense
-  // while the legacy password bootstrap is enabled. `needsSetup` is kept for
-  // existing callers.
-  const empty = count === 0;
-  return c.json({ needsSetup: empty, needs_setup: empty && config.allowLegacyLogin });
+  // Both fields drive a password SetupForm (`needs_setup` the SPA, `needsSetup`
+  // older callers), which only works while the legacy password bootstrap is
+  // enabled: /create-admin 404s otherwise. With it off, a fresh install is
+  // bootstrapped by a Titanium login as REMO_BOOTSTRAP_ADMIN_EMAIL, so neither
+  // field may send a caller to the password form.
+  const needs = count === 0 && config.allowLegacyLogin;
+  return c.json({ needsSetup: needs, needs_setup: needs });
 });
 
 // Password bootstrap of the first admin: a LEGACY surface. Under the Titanium

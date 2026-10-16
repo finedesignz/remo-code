@@ -86,7 +86,7 @@ describe('defaults: every legacy login surface is a 404', () => {
 
   test('setup/status does not offer the password SetupForm; client-config hides both legacy UIs', async () => {
     const st = await (await app().request('/api/setup/status')).json();
-    expect(st.needs_setup).toBe(false);
+    expect(st).toEqual({ needsSetup: false, needs_setup: false });
     const cc = await (await app().request('/api/client-config')).json();
     expect(cc.legacy_password_login).toBe(false);
     expect(cc.legacy_magic_link_login).toBe(false);
@@ -94,6 +94,19 @@ describe('defaults: every legacy login surface is a 404', () => {
 });
 
 describe('explicit opt-in re-enables them (rollback path)', () => {
+  test('ALLOW_LEGACY_LOGIN=true + no users → setup/status offers the password SetupForm (both fields)', async () => {
+    (config as any).allowLegacyLogin = true;
+    const st = await (await app().request('/api/setup/status')).json();
+    expect(st).toEqual({ needsSetup: true, needs_setup: true });
+  });
+
+  test('ALLOW_LEGACY_LOGIN=true + an existing user → no SetupForm', async () => {
+    (config as any).allowLegacyLogin = true;
+    dalMocks.countUsers.mockImplementationOnce(async () => 1);
+    const st = await (await app().request('/api/setup/status')).json();
+    expect(st).toEqual({ needsSetup: false, needs_setup: false });
+  });
+
   test('ALLOW_LEGACY_LOGIN=true → password routes reachable (not 404)', async () => {
     (config as any).allowLegacyLogin = true;
     for (const [method, path, body] of LEGACY_PASSWORD) {

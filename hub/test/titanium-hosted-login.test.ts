@@ -603,10 +603,13 @@ describe('logout through the portal', () => {
     expect(PORTAL_LOGOUT).toContain('%23%2Flogin%3Fsigned_out%3D1');
   });
 
-  test('/auth/signed-out (old links) 303s to the same portal GET: no page, form or inline script', async () => {
-    const res = await app().request('/auth/signed-out');
+  test('legacy GET /auth/signed-out neither touches cookies nor hops to Titanium', async () => {
+    const res = await app().request('/auth/signed-out', { headers: { cookie: '__Host-remo_sid=remo_x' } });
     expect(res.status).toBe(303);
-    expect(res.headers.get('location')).toBe(PORTAL_LOGOUT);
+    expect(res.headers.get('location')).toBe(`${APP}/#/login`);
+    expect(res.headers.get('location')).not.toContain('titaniumlabs');
+    expect(res.headers.getSetCookie()).toEqual([]);
+    expect(dalMocks.deleteAuthSession).not.toHaveBeenCalled();
     expect(await res.text()).not.toMatch(/<script|<form|\.submit\(/i);
   });
 

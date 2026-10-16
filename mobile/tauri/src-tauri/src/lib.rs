@@ -103,8 +103,36 @@ fn app_finalize_js(state: &str, act: &str, app_origin: &str, path: &str) -> Stri
     )
 }
 
+/// Query params that carry a one-time credential or login binding. Never logged.
+const SECRET_PARAMS: &[&str] = &["act", "state", "code", "token", "code_verifier"];
+
+/// A deep-link URL safe to log: scheme, host and path, plus the query with every
+/// value of `SECRET_PARAMS` replaced by `REDACTED`. Fragment and userinfo are
+/// dropped. An unparseable URL logs as a fixed placeholder (it may hold anything).
+fn redact_deep_link(url_str: &str) -> String {
+    let Ok(parsed) = Url::parse(url_str) else {
+        return "<unparseable deep link>".to_string();
+    };
+    let mut out = format!("{}://{}{}", parsed.scheme(), parsed.host_str().unwrap_or(""), parsed.path());
+    let pairs: Vec<String> = parsed
+        .query_pairs()
+        .map(|(k, v)| {
+            if SECRET_PARAMS.iter().any(|s| k.eq_ignore_ascii_case(s)) {
+                format!("{}=REDACTED", k)
+            } else {
+                format!("{}={}", k, v)
+            }
+        })
+        .collect();
+    if !pairs.is_empty() {
+        out.push('?');
+        out.push_str(&pairs.join("&"));
+    }
+    out
+}
+
 fn handle_deep_link(window: &WebviewWindow, url_str: &str) {
-    log::info!("[mobile] deep link received: {}", url_str);
+    log::info!("[mobile] deep link received: {}", redact_deep_link(url_str));
     let parsed = match Url::parse(url_str) {
         Ok(u) => u,
         Err(e) => {
@@ -124,7 +152,7 @@ fn handle_deep_link(window: &WebviewWindow, url_str: &str) {
         || (parsed.scheme() == "https" && parsed.host_str() == Some("app.remo-code.com"));
     let is_callback = scheme_ok && parsed.path().ends_with("/callback");
     if !is_callback {
-        log::warn!("[mobile] deep link not a callback: {}", url_str);
+        log::warn!("[mobile] deep link not a callback: {}", redact_deep_link(url_str));
         return;
     }
 
@@ -235,5 +263,25 @@ mod tests {
         assert!(js.contains("\"act\\\\2\""));
         assert!(js.contains("\"/auth/app-finalize\""));
         assert!(js.contains("credentials: 'include'"));
+    }
+
+    #[test]
+    fn redact_deep_link_hides_every_secret_param() {
+        let url = "remo-code://auth/callback?state=S1st&code_challenge=cc456&act=S2act\
+                   &code=S3code&token=S4tok&code_verifier=S5ver&Act=S6act&ok=1#S7frag";
+        let out = redact_deep_link(url);
+        for secret in ["S1st", "S2act", "S3code", "S4tok", "S5ver", "S6act", "S7frag"] {
+            assert!(!out.contains(secret), "{secret} leaked in {out}");
+        }
+        assert!(out.starts_with("remo-code://auth/callback?"));
+        assert!(out.contains("act=REDACTED") && out.contains("state=REDACTED"));
+        assert!(out.contains("code=REDACTED") && out.contains("token=REDACTED"));
+        assert!(out.contains("code_verifier=REDACTED"));
+        assert!(out.contains("code_challenge=cc456") && out.contains("ok=1"));
+    }
+
+    #[test]
+    fn redact_deep_link_never_echoes_an_unparseable_url() {
+        assert_eq!(redact_deep_link("not a url act=secret"), "<unparseable deep link>");
     }
 }

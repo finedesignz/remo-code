@@ -26,7 +26,7 @@
 //                            Never falls back to a confirmation page.
 //   POST /auth/logout        Clears the hub session + pending cookies (Origin may be
 //                            missing, never foreign) → 303 GET portal logout.
-//   GET  /auth/signed-out    303 GET portal logout (old links; no page, no script).
+//   GET  /auth/signed-out    303 to the SPA login (old links; no cookie, no portal hop).
 //
 // The dashboard session stays the opaque `auth_sessions` cookie (hub/src/session.ts);
 // local users are linked by hub/src/db/titanium-link-dal.ts.
@@ -37,6 +37,7 @@ import { cors } from "hono/cors";
 import { config } from "../config.ts";
 import {
   APP_DEEP_LINK_CALLBACK,
+  appOrigin,
   PENDING_CONFIRM_COOKIE,
   PENDING_CONFIRM_TTL_SECONDS,
   PENDING_LOGIN_COOKIE,
@@ -376,12 +377,13 @@ titaniumAuthRouter.post("/logout", async (c) => {
 });
 
 // ── GET /auth/signed-out ────────────────────────────────────────────────────
-// Kept for links to the old signed-out page: the same server-side 303 (a top-level
-// GET) to the portal logout as POST /auth/logout. No page and no inline script (the
-// hub CSP would block one); a cross-site POST would carry no SameSite=Lax cookies.
+// Kept only so links to the old signed-out page do not 404. It touches no cookie
+// and never hops to the Titanium logout (an unauthenticated GET that signs anyone
+// out is logout CSRF); the login route shows the real state. The only sign-out is
+// POST /auth/logout, which 303s to the portal GET logout.
 titaniumAuthRouter.get("/signed-out", (c) => {
   c.header("Cache-Control", "no-store");
-  return redirect303(c, portalLogoutUrl());
+  return redirect303(c, `${appOrigin()}/#/login`);
 });
 
 export const __testing = { APP_DEEP_LINK_CALLBACK, escapeHtml };
