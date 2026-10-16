@@ -575,10 +575,14 @@ describe('Tauri shell leg (remo-code:// deep link, PKCE + app_slug)', () => {
 });
 
 describe('logout through the portal', () => {
-  test('POST /auth/logout (missing Origin ok) clears session + csrf + pending cookies → /auth/signed-out', async () => {
+  const PORTAL_LOGOUT = `https://auth.titaniumlabs.us/api/auth/logout?return_url=${encodeURIComponent(`${APP}/#/login?signed_out=1`)}`;
+
+  test('POST /auth/logout (missing Origin ok) clears session + csrf + pending cookies → 303 GET portal logout', async () => {
     const res = await app().request('/auth/logout', { method: 'POST', headers: { cookie: '__Host-remo_sid=remo_x' } });
     expect(res.status).toBe(303);
-    expect(res.headers.get('location')).toBe('/auth/signed-out');
+    expect(res.headers.get('location')).toBe(PORTAL_LOGOUT);
+    const body = await res.text();
+    expect(body).not.toMatch(/<script|<form/i);
     expect(dalMocks.deleteAuthSession).toHaveBeenCalledWith('remo_x');
     for (const n of ['__Host-remo_sid', 'csrf_token', 'remo_login', 'remo_confirm']) {
       expect(cookieHeader(res, n), n).toMatch(/Max-Age=0/);
@@ -591,15 +595,22 @@ describe('logout through the portal', () => {
     expect(dalMocks.deleteAuthSession).not.toHaveBeenCalled();
   });
 
-  test('/auth/signed-out auto-submits a top-level POST to the portal logout with an app return_url', async () => {
-    const html = await (await app().request('/auth/signed-out')).text();
-    expect(html).toContain('method="POST" action="https://auth.titaniumlabs.us/api/auth/logout"');
-    expect(html).toContain(`name="return_url" value="${APP}/#/login?signed_out=1"`);
-    expect(html).toMatch(/\.submit\(\)/);
-    expect(html).not.toMatch(/fetch\(|<iframe/);
+  test('the portal logout target is a GET URL on the auth host with an encoded app return_url', () => {
+    const url = new URL(PORTAL_LOGOUT);
+    expect(url.origin + url.pathname).toBe('https://auth.titaniumlabs.us/api/auth/logout');
+    expect([...url.searchParams.keys()]).toEqual(['return_url']);
+    expect(url.searchParams.get('return_url')).toBe(`${APP}/#/login?signed_out=1`);
+    expect(PORTAL_LOGOUT).toContain('%23%2Flogin%3Fsigned_out%3D1');
   });
 
-  test('CSP form-action admits exactly the Titanium auth host (needed for /auth/start and the logout POST)', async () => {
+  test('/auth/signed-out (old links) 303s to the same portal GET: no page, form or inline script', async () => {
+    const res = await app().request('/auth/signed-out');
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe(PORTAL_LOGOUT);
+    expect(await res.text()).not.toMatch(/<script|<form|\.submit\(/i);
+  });
+
+  test('CSP form-action admits exactly the Titanium auth host (needed for the 303s after /auth/start and /auth/logout)', async () => {
     const a = new Hono();
     a.use('*', securityHeaders());
     a.get('/x', (c) => c.text('ok'));

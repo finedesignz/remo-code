@@ -33,7 +33,9 @@ export const TITANIUM_PORTAL_BASE = "https://license.titaniumlabs.us";
 /** Canonical browser-facing login host (hosted login page + logout). */
 export const TITANIUM_AUTH_BASE = "https://auth.titaniumlabs.us";
 
-/** Portal logout: a top-level form POST only (its cookies are host-only SameSite=Lax). */
+/** Portal logout: a top-level GET navigation only. Its cookies are host-only SameSite=Lax,
+ *  which a browser sends cross-site on a top-level safe-method navigation, never on a
+ *  cross-site POST. */
 export const TITANIUM_LOGOUT_URL = `${TITANIUM_AUTH_BASE}/api/auth/logout`;
 
 /** Deep-link return for the Tauri shell. Must be listed as `remo-code://auth` in the
@@ -171,6 +173,13 @@ export function getHostedLoginUrl(returnUrl: string): string {
 /** Where the portal sends the browser back after its own logout. */
 export function signedOutReturnUrl(): string {
   return `${appOrigin()}/#/login?signed_out=1`;
+}
+
+/** `GET {auth}/api/auth/logout?return_url=<REMO_PUBLIC_URL>/#/login?signed_out=1`: revokes the
+ *  portal session, clears its cookies and 303s back (allow-listed origins only). Built from the
+ *  configured public origin, never the Host header. */
+export function portalLogoutUrl(): string {
+  return `${TITANIUM_LOGOUT_URL}?return_url=${encodeURIComponent(signedOutReturnUrl())}`;
 }
 
 // ── Pending login / confirm cookies ─────────────────────────────────────────

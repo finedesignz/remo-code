@@ -36,9 +36,9 @@ export const DEFAULT_CSP: CspDirectives = {
   fontSrc: ["'self'", 'data:'],
   frameAncestors: ["'none'"],
   baseUri: ["'self'"],
-  // The Titanium hosted login: POST /auth/start 303s to auth.titaniumlabs.us
-  // (browsers apply form-action to a form's redirect chain) and /auth/signed-out
-  // POSTs to its logout. Exactly that origin, nothing wider.
+  // The Titanium hosted login: POST /auth/start and the SPA's POST /auth/logout
+  // both 303 to auth.titaniumlabs.us (browsers apply form-action to a form's
+  // redirect chain). Exactly that origin, nothing wider.
   formAction: ["'self'", 'https://auth.titaniumlabs.us'],
   objectSrc: ["'none'"],
 };

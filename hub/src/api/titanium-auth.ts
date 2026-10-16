@@ -25,8 +25,8 @@
 //                            client=app, state match, PKCE verifier at exchange.
 //                            Never falls back to a confirmation page.
 //   POST /auth/logout        Clears the hub session + pending cookies (Origin may be
-//                            missing, never foreign) → 303 /auth/signed-out.
-//   GET  /auth/signed-out    Auto-submitting top-level POST to the portal logout.
+//                            missing, never foreign) → 303 GET portal logout.
+//   GET  /auth/signed-out    303 GET portal logout (old links; no page, no script).
 //
 // The dashboard session stays the opaque `auth_sessions` cookie (hub/src/session.ts);
 // local users are linked by hub/src/db/titanium-link-dal.ts.
@@ -41,7 +41,6 @@ import {
   PENDING_CONFIRM_TTL_SECONDS,
   PENDING_LOGIN_COOKIE,
   PENDING_LOGIN_TTL_SECONDS,
-  TITANIUM_LOGOUT_URL,
   exchangeAct,
   getCallbackUrl,
   getHostedLoginUrl,
@@ -56,7 +55,7 @@ import {
   readPendingLogin,
   safeEqual,
   sendTitaniumMagicLink,
-  signedOutReturnUrl,
+  portalLogoutUrl,
 } from "../auth/titanium-login.ts";
 import { linkTitaniumLogin } from "../db/titanium-link-dal.ts";
 import { deleteAuthSession, recordAuthEvent } from "../db/dal.ts";
@@ -373,27 +372,16 @@ titaniumAuthRouter.post("/logout", async (c) => {
   try {
     await recordAuthEvent({ eventType: "logout", ip: ipOf(c), userAgent: c.req.header("user-agent") ?? null, metadata: { via: "titanium_logout" } });
   } catch {}
-  return redirect303(c, "/auth/signed-out");
+  return redirect303(c, portalLogoutUrl());
 });
 
 // ── GET /auth/signed-out ────────────────────────────────────────────────────
-// Ends the Titanium portal session too, so "Continue with Titanium" cannot sign the
-// user straight back in on a shared machine. Top-level form POST (the portal's
-// cookies are host-only SameSite=Lax: a fetch or iframe would not carry them).
+// Kept for links to the old signed-out page: the same server-side 303 (a top-level
+// GET) to the portal logout as POST /auth/logout. No page and no inline script (the
+// hub CSP would block one); a cross-site POST would carry no SameSite=Lax cookies.
 titaniumAuthRouter.get("/signed-out", (c) => {
   c.header("Cache-Control", "no-store");
-  return c.html(
-    page(
-      "Signed out · Remo Code",
-      `<h1>Signed out of Remo Code</h1>
-<p>Ending your Titanium session…</p>
-<form id="titanium-logout" method="POST" action="${escapeHtml(TITANIUM_LOGOUT_URL)}">
-<input type="hidden" name="return_url" value="${escapeHtml(signedOutReturnUrl())}">
-<button type="submit">Sign out of Titanium</button>
-</form>
-<script>document.getElementById('titanium-logout').submit()</script>`,
-    ),
-  );
+  return redirect303(c, portalLogoutUrl());
 });
 
 export const __testing = { APP_DEEP_LINK_CALLBACK, escapeHtml };

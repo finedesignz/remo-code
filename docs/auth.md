@@ -19,7 +19,7 @@ Code: `hub/src/api/titanium-auth.ts` (routes, mounted at `/auth`, root, NOT unde
 | `GET /auth/callback?state&act` | `state` matches `remo_login` (constant time): `POST /api/exchange {act, app_slug:"remo-code", code_verifier?}` → link user → session. **No match** (link opened on another device, or a link someone handed you): exchange, park the identity in `remo_confirm` (signed, 5 min, own key, csrf; email + accountId only, never the license key) and 303 `/auth/confirm`. **No match and the URL carries `code_challenge`** (a hosted, PKCE-bound login: only the starting browser holds the verifier): the exchange is NOT called (it could only fail and would spend the act); a plain 400 page says "Finish signing in in the browser where you started, or start again", nothing minted, no cookie touched. Nothing is minted on a GET without a state match. |
 | `GET /auth/confirm` / `POST /auth/confirm` | "Sign in as a\*\*\*@x.com?" page. The POST mints only with Origin == `REMO_PUBLIC_URL`, a valid `remo_confirm`, and the matching csrf field. Cancel keeps any existing session. |
 | `POST /auth/app-finalize` | Tauri shell deep-link leg (see "App shell" below). |
-| `POST /auth/logout` | Clears the hub session, CSRF and pending cookies (a missing Origin is accepted, a foreign one refused) → 303 `/auth/signed-out`, which auto-submits a top-level POST to `https://auth.titaniumlabs.us/api/auth/logout` with `return_url=<REMO_PUBLIC_URL>/#/login?signed_out=1`, so the portal's own 7-day session ends too. |
+| `POST /auth/logout` | Clears the hub session, CSRF and pending cookies (a missing Origin is accepted, a foreign one refused) → 303 (a top-level GET, no page or script) to `https://auth.titaniumlabs.us/api/auth/logout?return_url=<encoded REMO_PUBLIC_URL/#/login?signed_out=1>`, so the portal's own 7-day session ends too (a cross-site POST would carry no SameSite=Lax portal cookies). `GET /auth/signed-out` is a 303 to the same URL for old links. |
 
 **Exchange checks (fail closed).** Non-2xx or non-JSON → `exchange_failed`; `appSlug` missing
 or not `remo-code` → `wrong_app`; empty email → refused. The email is trimmed + lowercased.
@@ -37,7 +37,7 @@ inbound session row first (the step-up gate keys on `auth_sessions.created_at`).
 is plain http), SameSite=Lax, `Path=/auth`.
 
 **CSP.** `form-action 'self' https://auth.titaniumlabs.us` (browsers apply form-action to the
-303 after `POST /auth/start` and to the logout POST).
+303 after `POST /auth/start` and to the 303 after the SPA's `POST /auth/logout`).
 
 ### User linking (`linkTitaniumLogin`)
 

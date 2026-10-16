@@ -49,9 +49,9 @@ export function titaniumStartAction(): string {
 
 /**
  * Full sign-out: a top-level form POST to the hub's `/auth/logout`, which clears
- * the hub session and lands on `/auth/signed-out`, which in turn POSTs the
- * browser to the Titanium portal logout (its session would otherwise sign the
- * user straight back in on the next "Continue with Titanium").
+ * the hub session and 303s the browser (a top-level GET) to the Titanium portal
+ * logout (its session would otherwise sign the user straight back in on the next
+ * "Continue with Titanium").
  */
 export function submitFullLogout(): void {
   const form = document.createElement('form')

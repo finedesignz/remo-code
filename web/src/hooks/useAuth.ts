@@ -77,7 +77,7 @@ export function useAuth() {
   /**
    * Explicit user sign-out (the Logout menu item): clears the local fallback and
    * top-level POSTs to the hub's /auth/logout, which ends the hub session and then
-   * the Titanium portal session (/auth/signed-out). `signOut` above stays the
+   * the Titanium portal session (303 to the portal's GET logout). `signOut` above stays the
    * LOCAL-only cleanup used for a dead credential (a 401), so a transient error
    * never signs the user out of Titanium itself.
    */
