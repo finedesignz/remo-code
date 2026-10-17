@@ -31,4 +31,10 @@ if (version) {
   }
 }
 
-location.replace(APP_URL);
+// sessionStorage is per-origin, so the hub-origin SPA cannot read the value set
+// above: hand it over in the URL too (web/src/lib/platform.ts captureAppShellMarker).
+// The SPA uses it to start logins on the deep-link leg (remo-code://auth/callback,
+// PKCE), see docs/mobile-client.md.
+const target = new URL(APP_URL);
+target.searchParams.set("remo_shell", version || "1");
+location.replace(target.toString());

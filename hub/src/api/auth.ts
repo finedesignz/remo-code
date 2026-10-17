@@ -1,11 +1,16 @@
-// Phase 07-C: magic-link login + logout, alongside legacy bcrypt path.
+// LEGACY login surfaces + the JSON logout. The live login is the Titanium hosted
+// login in hub/src/api/titanium-auth.ts (mounted at /auth).
 //
 // Endpoints:
-//   POST /api/auth/login         — legacy bcrypt (kept behind allowLegacyLogin)
-//   POST /api/auth/register      — legacy first-user bootstrap (unchanged)
-//   POST /api/auth/login/request-link  — sends magic-link via emails4agents
-//   GET  /api/auth/login/callback      — verifies link, sets session + CSRF
-//   POST /api/auth/logout              — kills session row + clears cookies
+//   POST /api/auth/login         — legacy bcrypt. 404 unless ALLOW_LEGACY_LOGIN=true.
+//   POST /api/auth/register      — legacy first-user bootstrap. Same gate.
+//   POST /api/auth/login/request-link  — legacy OWN magic link (emails4agents).
+//   GET  /api/auth/login/callback      — verifies it, sets session + CSRF.
+//   POST /api/auth/finalize-mobile     — the legacy deep-link handoff it mints.
+//        These three: 404 unless LEGACY_MAGIC_LINK_LOGIN=on (default off).
+//   POST /api/auth/logout              — kills session row + clears cookies (JSON;
+//        the SPA's explicit sign-out uses POST /auth/logout, which also ends the
+//        Titanium portal session).
 //
 // Magic-link tokens: HS256 JWT, MAGIC_LINK_SECRET, 15-min TTL, jti single-use
 // enforced via Redis `magic_link:used:{jti}` EX 900. ALWAYS return 200 on
@@ -31,15 +36,23 @@ import { createAndSetSession, destroySession, readSessionCookie } from "../sessi
 import { deleteAuthSession } from "../db/dal.ts";
 import { issueCsrfToken, setCsrfCookie, clearCsrfCookie } from "../csrf.ts";
 import { sendEmail } from "../lib/email.ts";
+import { setCookie } from "hono/cookie";
+import { PENDING_CONFIRM_COOKIE, PENDING_LOGIN_COOKIE, pendingCookieOptions } from "../auth/titanium-login.ts";
 
 export const authRouter = new Hono();
+
+// Legacy gates: a disabled legacy route answers a plain 404, exactly like a route
+// that does not exist (no "disabled" signal for a scanner to key on).
+const notFound = (c: any) => c.json({ error: "not_found" }, 404);
+authRouter.use("/login", async (c, next) => (config.allowLegacyLogin ? next() : notFound(c)));
+authRouter.use("/register", async (c, next) => (config.allowLegacyLogin ? next() : notFound(c)));
+authRouter.use("/login/request-link", async (c, next) => (config.legacyMagicLinkLogin ? next() : notFound(c)));
+authRouter.use("/login/callback", async (c, next) => (config.legacyMagicLinkLogin ? next() : notFound(c)));
+authRouter.use("/finalize-mobile", async (c, next) => (config.legacyMagicLinkLogin ? next() : notFound(c)));
 
 // ── Legacy bcrypt login (kept alive behind soak flag) ────────────────────────
 
 authRouter.post("/login", async (c) => {
-  if (!config.allowLegacyLogin) {
-    return c.json({ error: "legacy_login_disabled" }, 410);
-  }
   const { email, password } = await c.req.json<{ email: string; password: string }>();
   if (!email || !password) return c.json({ error: "Email and password required" }, 400);
 
@@ -344,6 +357,9 @@ authRouter.post("/logout", async (c) => {
 
   await destroySession(c);
   clearCsrfCookie(c);
+  // Any half-finished Titanium login in this browser goes too.
+  setCookie(c, PENDING_LOGIN_COOKIE, "", pendingCookieOptions(0));
+  setCookie(c, PENDING_CONFIRM_COOKIE, "", pendingCookieOptions(0));
 
   console.log(`[auth] logout user=${userId ?? "anon"} session_row_deleted=true`);
   try { await recordAuthEvent({ userId, eventType: "logout", ip, userAgent: ua }); } catch {}

@@ -10,6 +10,10 @@ const KEYS = [
   'TITANIUM_KEYGEN_ADMIN_TOKEN',
   'TITANIUM_ADMIN_TOKEN',
   'TITANIUM_BYPASS',
+  'ALLOW_LEGACY_LOGIN',
+  'LEGACY_MAGIC_LINK_LOGIN',
+  'REMO_PUBLIC_URL',
+  'REMO_BOOTSTRAP_ADMIN_EMAIL',
 ] as const
 
 async function withEnv<T>(env: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
@@ -85,5 +89,58 @@ describe('Titanium env config', () => {
         expect(config.titanium.adminToken).toBe('')
       },
     )
+  })
+
+  test('ALLOW_LEGACY_LOGIN defaults to FALSE (password login + legacy JWT off unless set)', async () => {
+    await withEnv({}, async () => {
+      const { config } = await importConfig('legacy-default')
+      expect(config.allowLegacyLogin).toBe(false)
+    })
+    await withEnv({ ALLOW_LEGACY_LOGIN: 'true' }, async () => {
+      const { config } = await importConfig('legacy-on')
+      expect(config.allowLegacyLogin).toBe(true)
+    })
+  })
+
+  test('TITANIUM_BYPASS never turns password login on by itself', async () => {
+    await withEnv({ TITANIUM_BYPASS: 'true' }, async () => {
+      const { config } = await importConfig('bypass-no-legacy')
+      expect(config.titaniumBypass).toBe(true)
+      expect(config.allowLegacyLogin).toBe(false)
+    })
+  })
+
+  test('LEGACY_MAGIC_LINK_LOGIN: only on|true|1|yes enables the own magic link', async () => {
+    for (const [v, want] of [[undefined, false], ['', false], ['off', false], ['false', false], ['on', true], ['ON', true], ['1', true], ['true', true]] as const) {
+      await withEnv({ LEGACY_MAGIC_LINK_LOGIN: v }, async () => {
+        const { config } = await importConfig(`mlink-${v}`)
+        expect(config.legacyMagicLinkLogin).toBe(want)
+      })
+    }
+  })
+
+  test('REMO_PUBLIC_URL is reduced to an origin; default is the prod app; garbage refuses boot', async () => {
+    await withEnv({}, async () => {
+      const { config } = await importConfig('pub-default')
+      expect(config.publicUrl).toBe('https://app.remo-code.com')
+    })
+    await withEnv({ REMO_PUBLIC_URL: 'https://staging.remo-code.com/some/path' }, async () => {
+      const { config } = await importConfig('pub-path')
+      expect(config.publicUrl).toBe('https://staging.remo-code.com')
+    })
+    await withEnv({ REMO_PUBLIC_URL: 'not a url' }, async () => {
+      await expect(importConfig('pub-bad')).rejects.toThrow(/REMO_PUBLIC_URL/)
+    })
+  })
+
+  test('REMO_BOOTSTRAP_ADMIN_EMAIL is normalized; unset means no login ever creates a user', async () => {
+    await withEnv({}, async () => {
+      const { config } = await importConfig('boot-unset')
+      expect(config.bootstrapAdminEmail).toBe('')
+    })
+    await withEnv({ REMO_BOOTSTRAP_ADMIN_EMAIL: '  Owner@Example.COM ' }, async () => {
+      const { config } = await importConfig('boot-set')
+      expect(config.bootstrapAdminEmail).toBe('owner@example.com')
+    })
   })
 })

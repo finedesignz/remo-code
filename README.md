@@ -129,7 +129,7 @@ Claude Code CLI / Codex CLI (one process per session)
 
 Three packages in a Bun workspace:
 
-- **hub/** — Bun + Hono server handling auth (Titanium Licensing magic-link + opaque cookie sessions — see [docs/auth.md](docs/auth.md)), message relay, and session management. Broadcasts Claude's activity events (thinking, tool use, text) to subscribed browsers.
+- **hub/** — Bun + Hono server handling auth (Titanium hosted login + opaque cookie sessions — see [docs/auth.md](docs/auth.md)), message relay, and session management. Broadcasts Claude's activity events (thinking, tool use, text) to subscribed browsers.
 - **web/** — React 19 + Vite + Tailwind CSS 4 chat UI with activity feed, session switching, file attachments, light/dark theme, and unread badges.
 - **supervisor/** — Local supervisor source. `supervisor/src/` is compiled by `bun build --compile` into the sidecar binary that `supervisor/tauri/` bundles into a Windows MSI installer (Rust + WebView2 tray app). Each running host has exactly one supervisor; the supervisor hosts every session for that machine.
 
@@ -207,7 +207,7 @@ The Docker image builds the web frontend and serves it from the hub — one cont
 
 ## Security
 
-- **Titanium Licensing magic-link auth** on all user-facing API and WebSocket endpoints (see [docs/auth.md](docs/auth.md)). Agent endpoints (`/ws/agent`) use API keys.
+- **Titanium hosted login** (passkey / email link / Google per portal policy; state-bound, PKCE) on all user-facing API and WebSocket endpoints (see [docs/auth.md](docs/auth.md)). Agent endpoints (`/ws/agent`) use API keys.
 - **Row-Level Security** on all database tables — multi-tenant by default
 - **API keys** stored as SHA-256 hashes with timing-safe comparison
 - **CSP, HSTS, and security headers** on all responses
