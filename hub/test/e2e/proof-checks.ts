@@ -139,10 +139,11 @@ export async function runProofChecks(a: ProofChecksArgs): Promise<void> {
     maxInjects?: number
     maxTokens?: number
     maxWallMs?: number
+    counterKey?: string
     terminalAt?: Date | null
     startedAt?: Date | null
   }) => {
-    const ck = `${P}:raw:${++rawN}`
+    const ck = o.counterKey ?? `${P}:raw:${++rawN}`
     counterKeys.push(ck)
     return sql`
       INSERT INTO orchestrator_proof_runs (
@@ -262,7 +263,18 @@ export async function runProofChecks(a: ProofChecksArgs): Promise<void> {
     const sessE = await newSession(userE)
     const taskE = `${P}-te`
     const repoE = `github://acme/${P}-e`
-    await rawRun({ user: userE, task: taskE, repo: repoE, status: 'running', session: sessE, startedAt: new Date() })
+    // The budget gate checks proof identity first (task:<id> key + proofRunId), so the raw run must
+    // carry the real key and a wall budget the seeding below cannot outlast.
+    await rawRun({
+      user: userE,
+      task: taskE,
+      repo: repoE,
+      status: 'running',
+      session: sessE,
+      startedAt: new Date(),
+      counterKey: `task:${taskE}`,
+      maxWallMs: 3_600_000,
+    })
     const runE = (await sql`SELECT * FROM orchestrator_proof_runs WHERE user_id = ${userE}`)[0] as any
     const seedTokens = (sid: string, b: number[], ageSql: 'old' | 'new') =>
       ageSql === 'old'
@@ -298,6 +310,7 @@ export async function runProofChecks(a: ProofChecksArgs): Promise<void> {
         token: `${P}-e`,
         prompt: '',
         counterKey: runE.counter_key,
+        proofRunId: runE.id,
       }),
     ).toEqual({ ok: false, reason: 'proof_budget_attribution_lost' })
 
