@@ -32,7 +32,7 @@ export function useBrowserNotifications({ subscribe, profile }: Options) {
       const tag: string = msg.run_id || msg.task_id || `${title}:${Date.now()}`
 
       try {
-        const n = new Notification(title, { body, icon: '/favicon.svg', tag })
+        const n = new Notification(title, { body, icon: '/icon-192.png', tag })
         n.onclick = () => {
           try { window.focus() } catch {}
           if (url) {
