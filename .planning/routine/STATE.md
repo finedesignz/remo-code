@@ -8,6 +8,11 @@
      its iteration. -->
 LOCK: none
 
+## Run 23 (2026-10-21)
+- memlog claim OK (routine-run-2026-10-21). Live-read open PRs: #518 (dependabot cargo, lockfile-only), drafts #511-513 (owner). #504/#502/#494 no longer open.
+- Merged #518 (supervisor-build success, mergeable clean, ai-review neutral/infra, Cargo.lock-only diff reviewed) -> 93605e2. Prod /health checked after merge.
+- Not touched: drafts #511-513 (owner drafts, QC BLOCKED). No tool errors. install-gsd.sh not run. Shipped nothing beyond the merge; PTYCAP-05+ drafts need full panel + Postgres, not available this budget.
+
 ## Run 22 (2026-10-15)
 - memlog claim OK (routine-run-2026-10-15). Prod /health = {"ok":true} before and after merges. Live-read: open PRs #514, #513-511 (drafts), #504, #503, #502, #494.
 - Merged #514 (dependabot rustls 0.23.40->46, mobile Cargo.lock only; ai-review success, no threads; zero-CI-status -> independent diff review) -> 6c0589b. Merged #503 (dependabot tauri-plugin-updater/shell + tokio patch bumps, Cargo.lock only; supervisor-build + ai-review success, changelogs benign) -> 5774241. Hub unaffected (no hub deploy change).
