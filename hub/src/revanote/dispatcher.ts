@@ -247,6 +247,7 @@ export async function dispatchAnnotationRow(
   ann: AnnotationRow,
   opts: DispatchOpts = {},
 ): Promise<DispatchOutcome> {
+  if (ann.status === 'archived') return { status: 'noop', skip_reason: 'annotation_archived' }
   const userId = ann.user_id
   const tz = await getUserTimezone(userId)
 
