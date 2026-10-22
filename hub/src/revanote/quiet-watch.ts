@@ -18,6 +18,7 @@
 // Alerts go through the shared notify fan-out (telegram + in-app + email) and
 // are deduped per (user, kind) with a cooldown.
 
+import { notifyIncidentChannels, clearRecoveredIncidents } from './alert-state.ts'
 import { fanOutNotify } from '../orchestrator/notify.ts'
 
 function parsePositiveIntEnv(raw: string | undefined, fallback: number): number {
@@ -61,6 +62,7 @@ export interface QuietStats {
   /** comments waiting longer than QUIET_BACKLOG_MIN_AGE_MS */
   backlog: number
   oldestBacklogAt: Date | null
+  backlogFingerprint?: string
 }
 
 export type QuietKind = 'stalled' | 'silent'
@@ -91,7 +93,8 @@ export function describeQuiet(kind: QuietKind, s: QuietStats): string {
 
 export interface QuietWatchDeps {
   loadStats: (now: number) => Promise<QuietStats[]>
-  notify: typeof fanOutNotify
+  clearRecovered: (monitor: string, activeUsers: string[], observedAt: number) => Promise<void>
+  notify: (input: Parameters<typeof fanOutNotify>[0] & { fingerprint: string; now: number; monitor: string }) => Promise<{ delivered: string[] }>
 }
 
 const REAL_DEPS: QuietWatchDeps = {
@@ -109,6 +112,7 @@ const REAL_DEPS: QuietWatchDeps = {
         received_in_baseline: string
         backlog: string
         oldest_backlog_at: Date | null
+        backlog_fingerprint: string | null
       }[]
     >`
       SELECT m.user_id,
@@ -129,6 +133,10 @@ const REAL_DEPS: QuietWatchDeps = {
                WHERE a.user_id = m.user_id
                  AND a.status IN ('pending', 'dispatched', 'failed_offline')
                  AND a.received_at < ${backlogCutoff}) AS oldest_backlog_at
+             ,(SELECT md5(string_agg(a.id::text || a.status || coalesce(a.current_run_id::text, ''), '|' ORDER BY a.id)) FROM annotations a
+               WHERE a.user_id = m.user_id
+                 AND a.status IN ('pending', 'dispatched', 'failed_offline')
+                 AND a.received_at < ${backlogCutoff}) AS backlog_fingerprint
       FROM (
         SELECT user_id, COUNT(*) AS sites FROM revanote_app_mappings
         WHERE enabled = true GROUP BY user_id
@@ -141,17 +149,14 @@ const REAL_DEPS: QuietWatchDeps = {
       receivedInWindow: Number(r.received_in_window),
       receivedInBaseline: Number(r.received_in_baseline),
       backlog: Number(r.backlog),
+      backlogFingerprint: r.backlog_fingerprint ?? undefined,
       oldestBacklogAt: r.oldest_backlog_at ? new Date(r.oldest_backlog_at) : null,
     }))
   },
-  notify: fanOutNotify,
-}
-
-/** `${userId}\0${kind}` → last alert epoch ms. In-memory; a restart re-alerts once. */
-const lastAlertAt = new Map<string, number>()
-
-export function _resetQuietWatchState(): void {
-  lastAlertAt.clear()
+  clearRecovered: clearRecoveredIncidents,
+  notify: async ({ fingerprint, now, monitor, ...input }) => {
+    return notifyIncidentChannels(input, monitor, fingerprint, now, QUIET_ALERT_COOLDOWN_MS)
+  },
 }
 
 /** One check pass. Returns the alerts fired. Never throws. */
@@ -170,22 +175,23 @@ export async function checkRevanoteQuiet(
     return fired
   }
 
+  try {
+    for (const kind of ['stalled', 'silent'] as const) {
+      await d.clearRecovered(`quiet-${kind}`, stats.filter(s => classifyQuiet(s) === kind).map(s => s.userId), now)
+    }
+  } catch (err) {
+    console.warn('[revanote.quiet] recovery state failed', err)
+    return fired
+  }
   for (const s of stats) {
     const kind = classifyQuiet(s)
-    if (!kind) {
-      // Healthy again: clear both so the next stall alerts immediately.
-      lastAlertAt.delete(`${s.userId}\0stalled`)
-      lastAlertAt.delete(`${s.userId}\0silent`)
-      continue
-    }
-    const key = `${s.userId}\0${kind}`
-    const last = lastAlertAt.get(key)
-    if (last !== undefined && now - last < QUIET_ALERT_COOLDOWN_MS) continue
-    lastAlertAt.set(key, now)
+    if (!kind) continue
     const detail = describeQuiet(kind, s)
-    console.error(`[revanote.quiet] ALERT user=${s.userId} kind=${kind} — ${detail}`)
     try {
-      await d.notify({
+      const result = await d.notify({
+        fingerprint: JSON.stringify([kind, s.sites, kind === 'stalled' ? (s.backlogFingerprint ?? [s.backlog, s.oldestBacklogAt]) : 'silent']),
+        monitor: `quiet-${kind}`,
+        now,
         userId: s.userId,
         sessionId: '',
         event: 'failure',
@@ -193,10 +199,12 @@ export async function checkRevanoteQuiet(
         detail,
         channels: ['telegram', 'inapp', 'email'],
       })
+      if (result.delivered.length === 0) continue
+      console.error(`[revanote.quiet] ALERT user=${s.userId} kind=${kind} - ${detail}`)
+      fired.push({ userId: s.userId, kind })
     } catch (err: any) {
       console.warn(`[revanote.quiet] notify failed user=${s.userId}: ${err?.message ?? err}`)
     }
-    fired.push({ userId: s.userId, kind })
   }
   return fired
 }
