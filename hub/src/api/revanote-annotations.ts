@@ -22,6 +22,7 @@ revanoteAnnotations.use('/*', authMiddleware)
 const VALID_STATUS: Record<string, AnnotationStatus> = {
   pending: 'pending', dispatched: 'dispatched', resolved: 'resolved',
   failed: 'failed', failed_offline: 'failed_offline',
+  archived: 'archived',
 }
 
 revanoteAnnotations.get('/', async (c) => {
@@ -54,6 +55,9 @@ revanoteAnnotations.post('/:id/retry', async (c) => {
   const id = c.req.param('id')
   const ann = await getAnnotationById(id, userId)
   if (!ann) return c.json({ error: 'not_found' }, 404)
+  if (ann.status === 'archived') {
+    return c.json({ error: 'annotation_archived', detail: 'The source annotation was retired; this historical record cannot be retried.' }, 409)
+  }
 
   // R2-2: a reset-to-pending + forceSingle re-dispatch must only ever run
   // against a row the pipeline does NOT currently own. 'pending' / 'failed' /

@@ -15,6 +15,7 @@ export type AnnotationStatus =
   | 'resolved'
   | 'failed'
   | 'failed_offline'
+  | 'archived'
 
 export type AnnotationRunStatus = 'in_flight' | 'success' | 'failed' | 'cancelled'
 
@@ -442,6 +443,7 @@ export async function updateAnnotationStatus(
                dispatched_at = COALESCE(${opts.dispatched_at ?? null}, dispatched_at),
                resolved_at = COALESCE(${opts.resolved_at ?? null}, resolved_at)
          WHERE id = ${id}
+           AND status <> 'archived'
         RETURNING id
       `
   return rows.length > 0
@@ -567,6 +569,7 @@ export async function resetAnnotationToPendingIfStatus(
            skip_reason = ${skip_reason}
      WHERE id = ${id}
        AND status = ${expected}
+       AND status <> 'archived'
      RETURNING id
   `
   return rows.length > 0

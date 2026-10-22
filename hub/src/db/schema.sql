@@ -1150,7 +1150,7 @@ CREATE TABLE IF NOT EXISTS annotations (
   mapping_id               UUID REFERENCES revanote_app_mappings(id) ON DELETE SET NULL,
   session_id               TEXT REFERENCES sessions(id) ON DELETE SET NULL,
   status                   TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending', 'dispatched', 'resolved', 'failed', 'failed_offline')),
+    CHECK (status IN ('pending', 'dispatched', 'resolved', 'failed', 'failed_offline', 'archived')),
   skip_reason              TEXT,
   source_ip                TEXT,
   payload_raw              JSONB NOT NULL,
@@ -1158,6 +1158,21 @@ CREATE TABLE IF NOT EXISTS annotations (
   dispatched_at            TIMESTAMPTZ,
   resolved_at              TIMESTAMPTZ
 );
+-- Retain obsolete source records without counting them as completed fixes.
+-- Upgrade the legacy constraint once; subsequent boots leave it untouched.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'annotations'::regclass
+      AND conname = 'annotations_status_check'
+      AND pg_get_constraintdef(oid) NOT LIKE '%archived%'
+  ) THEN
+    ALTER TABLE annotations DROP CONSTRAINT annotations_status_check;
+    ALTER TABLE annotations ADD CONSTRAINT annotations_status_check
+      CHECK (status IN ('pending', 'dispatched', 'resolved', 'failed', 'failed_offline', 'archived'));
+  END IF;
+END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_annotations_user_external
   ON annotations(user_id, annotation_id_external);
 CREATE INDEX IF NOT EXISTS idx_annotations_user_recv
