@@ -8,6 +8,12 @@
      its iteration. -->
 LOCK: none
 
+## Run 24 (2026-10-22)
+- memlog claim OK (routine-run-2026-10-22). Prod /health = {"ok":true}. Live-read open PRs: drafts #511-513 only (33k-line stacked PTYCAP-05/07/08, QC BLOCKED, unchanged). main head 93605e2.
+- Shipped PR #520 [code-health]: hub/src/hono-env.d.ts (ContextVariableMap). tsc 438 -> 261, zero new errors; schema-lint + check-baseline OK. Non-sensitive, types-only. Woodpecker/ai-review pending at end of run -> MERGE NEXT RUN if qc green and no blocking finding.
+- Next: remaining 261 tsc errors (118 TS18046 test res.json() unknowns -> shared expectJson helper), then PTYCAP drafts need rebase + panel.
+- No tool errors. install-gsd.sh not run.
+
 ## Run 23 (2026-10-21)
 - memlog claim OK (routine-run-2026-10-21). Live-read open PRs: #518 (dependabot cargo, lockfile-only), drafts #511-513 (owner). #504/#502/#494 no longer open.
 - Merged #518 (supervisor-build success, mergeable clean, ai-review neutral/infra, Cargo.lock-only diff reviewed) -> 93605e2. Prod /health checked after merge.
