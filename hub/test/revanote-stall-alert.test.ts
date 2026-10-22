@@ -30,12 +30,12 @@ function deps(overrides: Partial<{
   const lastAlertAt = overrides.lastAlertAt ?? {}
   return {
     loadStalledPerUser: async () => overrides.summaries ?? [],
-    getLastAlertAt: async (userId: string) => lastAlertAt[userId] ?? null,
-    recordAlert: async (userId: string, now: number) => {
-      recordCalls.push([userId, now])
-    },
+    clearRecovered: async () => {},
     notify: async (input: any) => {
+      const previous = lastAlertAt[input.userId]
+      if (previous != null && input.now - previous < STALL_COOLDOWN_MS) return { delivered: [] }
       notifyCalls.push(input)
+      recordCalls.push([input.userId, input.now])
       return { delivered: ['inapp'] }
     },
   }
@@ -225,8 +225,7 @@ describe('stall alert -- dispatched row with no in_flight run', () => {
   }))
 
   const alertDeps = (notifyCalls: any[]) => ({
-    getLastAlertAt: async () => null,
-    recordAlert: async () => {},
+    clearRecovered: async () => {},
     notify: async (input: any) => { notifyCalls.push(input); return { delivered: ['inapp'] } },
   })
 

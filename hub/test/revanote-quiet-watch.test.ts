@@ -1,13 +1,13 @@
+import { shouldNotifyIncident, type IncidentState } from '../src/revanote/alert-state.ts'
 /**
  * fix/revanote-quiet-alert — alert when every client site goes quiet. DB-free.
  */
-import { describe, test, expect, beforeEach } from 'bun:test'
+import { describe, test, expect } from 'bun:test'
 
 import {
   checkRevanoteQuiet,
   classifyQuiet,
   QUIET_ALERT_COOLDOWN_MS,
-  _resetQuietWatchState,
   type QuietStats,
 } from '../src/revanote/quiet-watch.ts'
 
@@ -24,7 +24,7 @@ function stats(over: Partial<QuietStats> = {}): QuietStats {
   }
 }
 
-beforeEach(() => _resetQuietWatchState())
+
 
 describe('classifyQuiet', () => {
   test('backlog waiting and nothing resolved on any site → stalled', () => {
@@ -43,14 +43,18 @@ describe('classifyQuiet', () => {
 })
 
 describe('checkRevanoteQuiet', () => {
-  test('alerts once per cooldown, re-arms after recovery', async () => {
+  test('unchanged backlog stays quiet beyond cooldown, re-arms after recovery', async () => {
     const sent: any[] = []
     let current = stats({ backlog: 4 })
+    const receipts = new Map<string, IncidentState>()
     const deps = {
+      clearRecovered: async (monitor: string, users: string[]) => { if (!users.includes('u1')) receipts.delete(monitor) },
       loadStats: async () => [current],
       notify: (async (input: any) => {
+        if (!shouldNotifyIncident(receipts.get(input.monitor) ?? null, input.fingerprint, input.now, QUIET_ALERT_COOLDOWN_MS)) return { delivered: [] }
         sent.push(input)
-        return { delivered: [] }
+        receipts.set(input.monitor, { fingerprint: input.fingerprint, notifiedAt: input.now })
+        return { delivered: ['email'] }
       }) as any,
     }
     const t0 = 5_000_000
@@ -59,7 +63,7 @@ describe('checkRevanoteQuiet', () => {
     expect(sent[0].level).toBe('blocking')
 
     expect(await checkRevanoteQuiet(t0 + 1, deps)).toEqual([]) // cooldown
-    expect(await checkRevanoteQuiet(t0 + QUIET_ALERT_COOLDOWN_MS, deps)).toHaveLength(1)
+    expect(await checkRevanoteQuiet(t0 + QUIET_ALERT_COOLDOWN_MS, deps)).toHaveLength(0)
 
     current = stats({ backlog: 4, resolvedInWindow: 2 })
     expect(await checkRevanoteQuiet(t0 + QUIET_ALERT_COOLDOWN_MS + 1, deps)).toEqual([])

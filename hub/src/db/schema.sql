@@ -1209,6 +1209,15 @@ CREATE TABLE IF NOT EXISTS revanote_stall_alerts (
   last_alert_at  TIMESTAMPTZ NOT NULL
 );
 
+-- Persistent, change-driven alerts; historical cooldown rows are retained.
+CREATE TABLE IF NOT EXISTS revanote_alert_state (
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  monitor TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  notified_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (user_id, monitor)
+);
+
 -- Callback retry queue. `next_retry_at IS NULL` means terminal (delivered or
 -- dead-lettered). Worker scans the partial index for next_retry_at <= now().
 CREATE TABLE IF NOT EXISTS revanote_callback_attempts (

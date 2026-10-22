@@ -447,8 +447,9 @@ shared notify fan-out (Telegram + in-app + email) when every client site has gon
 - **silent** — nothing received and nothing resolved from any site in the window, although sites
   sent comments in the `REMO_REVANOTE_QUIET_BASELINE_MS` (default 7d) before it — intake broke.
 
-Any resolved comment clears both. Deduped per (user, kind) for `REMO_REVANOTE_QUIET_ALERT_COOLDOWN_MS`
-(default 12h). `REMO_REVANOTE_QUIET_ALERT_DISABLED=1` turns it off.
+Any resolved comment clears both. Durable per-user/kind/channel fingerprints suppress unchanged
+incidents across restarts. Changed incidents respect `REMO_REVANOTE_QUIET_ALERT_COOLDOWN_MS`
+(default 12h); recovery re-arms the next incident. `REMO_REVANOTE_QUIET_ALERT_DISABLED=1` turns it off.
 
 ## WS events
 
@@ -549,17 +550,22 @@ missing alarm.
   - Fan-out reuses the existing orchestrator notify channel
     (`orchestrator/notify.ts` `fanOutNotify` — telegram + in-app + emails4agents
     email, per-user channel opt-in respected). No new transport.
-  - De-dup: ONE row per user in `revanote_stall_alerts` (`last_alert_at`); at
-    most one alert per user per `REMO_REVANOTE_STALL_COOLDOWN_MS` (default 1h)
-    — never one email per annotation (there can be dozens across 23 sites at
-    once).
+  - De-dup: `revanote_alert_state` stores durable fingerprints per user, monitor,
+    and channel. Unchanged records do not generate repeat emails after cooldown
+    or hub restart. Changed membership/status/run generation may alert after
+    the existing cooldown (1h stall, 12h quiet); a healthy sweep re-arms recurrence.
+    Failed channels retry next sweep independently of successful channels. User
+    channel preferences still apply. Age is displayed, never fingerprinted.
+    On first deployment, existing incidents may produce one initial notification.
+    A process crash between send and receipt commit can repeat that delivery.
+    The legacy cooldown table remains for rollback compatibility.
   - Sweep cadence `REMO_REVANOTE_STALL_SWEEP_INTERVAL_MS` (default 5min).
     Escape hatch `REMO_REVANOTE_STALL_DISABLED` (`1|true|yes|on`) — no-op.
   - Wired at boot / graceful-shutdown in `hub/src/index.ts` alongside the other
     reapers.
 - `hub/test/revanote-stall-alert.test.ts` — fires at threshold (both
   signatures independently), does not fire below threshold, cooldown blocks a
-  repeat alert then fires again once elapsed, one user's notify failure never
+  changed incident until elapsed; unchanged incidents stay quiet, one user's notify failure never
   aborts the pass for others, load failure is fail-open.
 
 ## Out of scope (deferred)

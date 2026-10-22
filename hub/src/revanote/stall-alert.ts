@@ -42,6 +42,7 @@
 
 import { sql } from '../db/postgres.ts'
 import { fanOutNotify, type NotifyDeps } from '../orchestrator/notify.ts'
+import { notifyIncidentChannels, clearRecoveredIncidents } from './alert-state.ts'
 import { batchRunMaxMs } from './batch-dispatch.ts'
 
 function parsePositiveIntEnv(raw: string | undefined, fallback: number): number {
@@ -103,17 +104,20 @@ export interface UserStallSummary {
   parked_oldest_ms: number | null
   stuck_run_count: number
   stuck_run_oldest_ms: number | null
+  parked_fingerprint?: string
+  run_fingerprint?: string
 }
 
 /** Injectable seams (tests swap these; defaults are the real adapters). */
 export interface StallAlertDeps {
   loadStalledPerUser: (now: number) => Promise<UserStallSummary[]>
-  getLastAlertAt: (userId: string) => Promise<number | null>
-  recordAlert: (userId: string, now: number) => Promise<void>
+  clearRecovered: (activeUsers: string[], observedAt: number) => Promise<void>
   notify: (input: {
     userId: string
     sessionId: string
     detail: string
+    fingerprint: string
+    now: number
   }) => Promise<{ delivered: string[] }>
 }
 
@@ -124,9 +128,10 @@ const REAL_DEPS: StallAlertDeps = {
     const batchRunCutoff = new Date(now - runStallThresholdMs(true))
 
     const parkedRows = await sql<
-      { user_id: string; cnt: string; oldest: string }[]
+      { user_id: string; cnt: string; oldest: string; fingerprint: string }[]
     >`
-      SELECT user_id, COUNT(*) AS cnt, MIN(COALESCE(dispatched_at, received_at)) AS oldest
+      SELECT user_id, COUNT(*) AS cnt, MIN(COALESCE(dispatched_at, received_at)) AS oldest,
+             md5(string_agg(id::text || status || coalesce(current_run_id::text, ''), '|' ORDER BY id)) AS fingerprint
       FROM annotations
       WHERE (
         (status = 'pending' AND skip_reason = 'session_offline')
@@ -145,9 +150,10 @@ const REAL_DEPS: StallAlertDeps = {
     // single-annotation `singleRunCutoff`, so a healthy multi-hour batch turn
     // never trips this as a false stall.
     const stuckRunRows = await sql<
-      { user_id: string; cnt: string; oldest: string }[]
+      { user_id: string; cnt: string; oldest: string; fingerprint: string }[]
     >`
-      SELECT ar.user_id, COUNT(*) AS cnt, MIN(ar.started_at) AS oldest
+      SELECT ar.user_id, COUNT(*) AS cnt, MIN(ar.started_at) AS oldest,
+             md5(string_agg(ar.id::text, '|' ORDER BY ar.id)) AS fingerprint
       FROM annotation_runs ar
       LEFT JOIN annotations a ON a.id = ar.annotation_id
       WHERE ar.status = 'in_flight'
@@ -164,6 +170,7 @@ const REAL_DEPS: StallAlertDeps = {
       byUser.set(r.user_id, {
         user_id: r.user_id,
         parked_count: Number(r.cnt),
+        parked_fingerprint: r.fingerprint,
         parked_oldest_ms: new Date(r.oldest).getTime(),
         stuck_run_count: 0,
         stuck_run_oldest_ms: null,
@@ -172,6 +179,7 @@ const REAL_DEPS: StallAlertDeps = {
     for (const r of stuckRunRows) {
       const existing = byUser.get(r.user_id)
       if (existing) {
+        existing.run_fingerprint = r.fingerprint
         existing.stuck_run_count = Number(r.cnt)
         existing.stuck_run_oldest_ms = new Date(r.oldest).getTime()
       } else {
@@ -180,6 +188,7 @@ const REAL_DEPS: StallAlertDeps = {
           parked_count: 0,
           parked_oldest_ms: null,
           stuck_run_count: Number(r.cnt),
+          run_fingerprint: r.fingerprint,
           stuck_run_oldest_ms: new Date(r.oldest).getTime(),
         })
       }
@@ -187,31 +196,10 @@ const REAL_DEPS: StallAlertDeps = {
     return [...byUser.values()]
   },
 
-  getLastAlertAt: async (userId: string) => {
-    const rows = await sql<{ last_alert_at: string }[]>`
-      SELECT last_alert_at FROM revanote_stall_alerts WHERE user_id = ${userId}
-    `
-    return rows[0] ? new Date(rows[0].last_alert_at).getTime() : null
-  },
-
-  recordAlert: async (userId: string, now: number) => {
-    await sql`
-      INSERT INTO revanote_stall_alerts (user_id, last_alert_at)
-      VALUES (${userId}, ${new Date(now)})
-      ON CONFLICT (user_id) DO UPDATE SET last_alert_at = EXCLUDED.last_alert_at
-    `
-  },
-
-  notify: async ({ userId, sessionId, detail }) => {
-    return fanOutNotify({
-      userId,
-      sessionId,
-      event: 'failure',
-      level: 'blocking',
-      detail,
-      channels: ['telegram', 'inapp', 'email'],
-    })
-  },
+  clearRecovered: (activeUsers, observedAt) => clearRecoveredIncidents('stall', activeUsers, observedAt),
+  notify: ({ userId, sessionId, detail, fingerprint, now }) =>
+    notifyIncidentChannels({ userId, sessionId, event: 'failure', level: 'blocking', detail,
+      channels: ['telegram', 'inapp', 'email'] }, 'stall', fingerprint, now, STALL_COOLDOWN_MS),
 }
 
 function formatDetail(s: UserStallSummary, now: number): string {
@@ -247,15 +235,20 @@ export async function sweepRevanoteStalls(
     return alerted
   }
 
+  try {
+    await d.clearRecovered(summaries.filter(s => s.parked_count > 0 || s.stuck_run_count > 0).map(s => s.user_id), now)
+  } catch (err) {
+    console.warn('[revanote-stall-alert] recovery state failed', err)
+    return alerted
+  }
+
   for (const s of summaries) {
     if (s.parked_count === 0 && s.stuck_run_count === 0) continue
     try {
-      const lastAlertAt = await d.getLastAlertAt(s.user_id)
-      if (lastAlertAt != null && now - lastAlertAt < STALL_COOLDOWN_MS) continue
-
       const detail = formatDetail(s, now)
-      await d.notify({ userId: s.user_id, sessionId: '', detail })
-      await d.recordAlert(s.user_id, now)
+      const fingerprint = JSON.stringify([s.parked_fingerprint ?? [s.parked_count, s.parked_oldest_ms], s.run_fingerprint ?? [s.stuck_run_count, s.stuck_run_oldest_ms]])
+      const result = await d.notify({ userId: s.user_id, sessionId: '', detail, fingerprint, now })
+      if (result.delivered.length === 0) continue
       alerted.push(s.user_id)
       console.warn(`[revanote-stall-alert] alerted user=${s.user_id}: ${detail}`)
     } catch (err: any) {
