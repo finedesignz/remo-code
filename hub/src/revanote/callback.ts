@@ -96,11 +96,14 @@ async function deliverOne(attempt: CallbackAttemptRow): Promise<{
   retryable: boolean
 }> {
   // Look up annotation + user secret.
-  const rows = await sql<{ user_id: string; callback_url: string }[]>`
-    SELECT user_id, callback_url FROM annotations WHERE id = ${attempt.annotation_id}
+  const rows = await sql<{ user_id: string; callback_url: string; status: string }[]>`
+    SELECT user_id, callback_url, status FROM annotations WHERE id = ${attempt.annotation_id}
   `
   if (!rows[0]) {
     return { delivered: false, status: null, error: 'annotation_gone', retryable: false }
+  }
+  if (rows[0].status === 'archived') {
+    return { delivered: false, status: null, error: 'annotation_archived', retryable: false }
   }
   const { user_id: userId, callback_url: callbackUrl } = rows[0]
   const secret = await getUserRevanoteWebhookSecret(userId)

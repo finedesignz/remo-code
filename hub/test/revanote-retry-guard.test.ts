@@ -125,6 +125,15 @@ describe('GET /api/revanote/annotations — R2-4 unknown ?status= must 400, not 
 })
 
 describe('POST /api/revanote/annotations/:id/retry — R2-2 live-ownership guard', () => {
+  test('archived source work cannot be resurrected by manual retry', async () => {
+    state.annotation.status = 'archived'
+    const res = await app.request('/api/revanote/annotations/ann-1/retry', { method: 'POST' })
+    expect(res.status).toBe(409)
+    expect((await res.json()).error).toBe('annotation_archived')
+    expect(state.updateAnnotationStatusCalls).toHaveLength(0)
+    expect(state.dispatchCalls).toHaveLength(0)
+  })
+
   test('pending row: retry proceeds (reset + forceSingle dispatch), no liveness check needed', async () => {
     const res = await app.request('/api/revanote/annotations/ann-1/retry', { method: 'POST' })
     expect(res.status).toBe(200)

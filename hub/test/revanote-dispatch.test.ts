@@ -279,8 +279,17 @@ mock.module('../src/dispatch/gates.ts', () => ({
 
 // Import AFTER mocks. Pipeline + the revanote adapter (incl. revanoteBudgetGate)
 // are REAL — that's the wiring under test.
-const { dispatchPendingAnnotation } = await import('../src/revanote/dispatcher.ts')
+const { dispatchPendingAnnotation, dispatchAnnotationRow } = await import('../src/revanote/dispatcher.ts')
 const { onSessionReply, _reset } = await import('../src/dispatch/pipeline.ts')
+
+test('archived webhook redelivery never enters the dispatch queue', async () => {
+  const out = await dispatchAnnotationRow(makeAnnotation({ status: 'archived' }))
+  expect(out).toEqual({ status: 'noop', skip_reason: 'annotation_archived' })
+  expect(gateOrder).toHaveLength(0)
+  expect(state.runs).toHaveLength(0)
+  expect(state.sentFrames).toHaveLength(0)
+  expect(state.callbacks).toHaveLength(0)
+})
 
 beforeEach(() => {
   state.runs = []
