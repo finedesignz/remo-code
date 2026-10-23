@@ -1,11 +1,11 @@
 /**
- * Mounts the AgentAutofix click-to-comment widget (directive A) for signed-in
+ * Mounts the Zero Exposure click-to-comment widget (directive A) for signed-in
  * users only. Fetches `{host, public_key}` from the hub's session-gated
  * `/api/agentautofix/token` route, stashes it on `window.__AGENTAUTOFIX_CONFIG__`,
- * then loads the static `agentautofix-widget.js` bundle (web/public) which reads
+ * then loads the static `zeroexposure-widget.js` bundle (web/public) which reads
  * that global instead of hardcoding a public key per build.
  *
- * No-ops entirely when the hub isn't configured for AgentAutofix (404 from the
+ * No-ops entirely when the hub isn't configured for Zero Exposure (404 from the
  * token route) — safe to render unconditionally in every environment.
  */
 import { useEffect } from 'react'
@@ -33,7 +33,7 @@ export function AgentautofixWidget({ token }: { token: string }) {
           tokenUrl: '/api/agentautofix/token',
         }
         const script = document.createElement('script')
-        script.src = '/agentautofix-widget.js'
+        script.src = '/zeroexposure-widget.js'
         script.defer = true
         document.body.appendChild(script)
         scriptLoaded = true

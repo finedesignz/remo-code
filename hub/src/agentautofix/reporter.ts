@@ -271,7 +271,7 @@ export async function reportTriageFindingToAgentautofix(fields: SelfErrorForward
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-agentautofix-key': config.agentautofix.publicKey,
+          'x-zeroexposure-key': config.agentautofix.publicKey,
           authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
@@ -382,7 +382,7 @@ async function sendAggregatedReport(fields: SelfErrorForward, occurrences: numbe
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-agentautofix-key': config.agentautofix.publicKey,
+          'x-zeroexposure-key': config.agentautofix.publicKey,
           authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({

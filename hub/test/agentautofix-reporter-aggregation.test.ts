@@ -7,6 +7,7 @@ process.env.SESSION_SECRET = process.env.SESSION_SECRET || 'session-secret-at-le
 process.env.MAGIC_LINK_SECRET = process.env.MAGIC_LINK_SECRET || 'magic-link-secret-at-least-32-chars-x';
 
 import { describe, test, expect, afterEach, beforeEach } from 'bun:test';
+import jwt from 'jsonwebtoken';
 import {
   reportSelfErrorToAgentautofix,
   _flushPendingForTest,
@@ -20,12 +21,12 @@ const { config } = (await import('../src/config')) as any;
 const originalAgentautofix = { ...config.agentautofix };
 
 const originalFetch = globalThis.fetch;
-let calls: Array<{ body: any }> = [];
+let calls: Array<{ body: any; headers: Record<string, string>; url: string }> = [];
 
 beforeEach(() => {
   config.agentautofix = {
     configured: true,
-    host: 'https://agentautofix.titaniumlabs.us',
+    host: 'https://app.zeroexposure.io',
     appId: 'app_test',
     publicKey: 'pk_test',
     signingSecret: 'signing-secret-at-least-32-chars-long-x',
@@ -33,8 +34,8 @@ beforeEach(() => {
   };
   calls = [];
   // @ts-expect-error test stub
-  globalThis.fetch = async (_url: string, init: any) => {
-    calls.push({ body: JSON.parse(init.body) });
+  globalThis.fetch = async (url: string, init: any) => {
+    calls.push({ body: JSON.parse(init.body), headers: init.headers, url });
     return new Response(JSON.stringify({ ok: true }), { status: 200 });
   };
   _resetForTest();
@@ -83,6 +84,23 @@ describe('reportSelfErrorToAgentautofix aggregation', () => {
   });
 });
 
+describe('reportSelfErrorToAgentautofix wire names (Zero Exposure)', () => {
+  test('posts to the configured host with the x-zeroexposure-key header and the zero-exposure-plugin JWT pair', async () => {
+    await reportSelfErrorToAgentautofix({ fingerprint: 'fp-wire', errorType: 'Error', errorValue: 'boom', source: 'hono' });
+    _flushPendingForTest('fp-wire');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(calls.length).toBe(1);
+    expect(calls[0].url).toBe('https://app.zeroexposure.io/api/plugin/v1/comments');
+    expect(calls[0].headers['x-zeroexposure-key']).toBe('pk_test');
+
+    const bearer = calls[0].headers.authorization.replace(/^Bearer /, '');
+    const claims = jwt.decode(bearer) as Record<string, unknown>;
+    expect(claims.iss).toBe('zero-exposure-plugin');
+    expect(claims.aud).toBe('zero-exposure-plugin-ingest');
+  });
+});
+
 describe('reportSelfErrorToAgentautofix in-flight-send race (double-send regression)', () => {
   test('a slow/hanging fetch does not let a second window double-send the same fingerprint', async () => {
     const fields = { fingerprint: 'fp-slow', errorType: 'Error', errorValue: 'boom', source: 'hono' };
@@ -99,7 +117,7 @@ describe('reportSelfErrorToAgentautofix in-flight-send race (double-send regress
         // First send hangs (e.g. degraded network) until we release it below.
         await firstFetchGate;
       }
-      calls.push({ body: JSON.parse(init.body) });
+      calls.push({ body: JSON.parse(init.body), headers: init.headers, url: _url });
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     };
 
@@ -136,7 +154,7 @@ describe('reportSelfErrorToAgentautofix in-flight-send race (double-send regress
       if (callCount === 1) {
         throw new Error('network down');
       }
-      calls.push({ body: JSON.parse(init.body) });
+      calls.push({ body: JSON.parse(init.body), headers: init.headers, url: _url });
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     };
 
@@ -165,7 +183,7 @@ describe('reportSelfErrorToAgentautofix in-flight-send race (double-send regress
     globalThis.fetch = async (_url: string, init: any) => {
       fetchCallCount += 1;
       if (fetchCallCount === 1) await firstFetchGate;
-      calls.push({ body: JSON.parse(init.body) });
+      calls.push({ body: JSON.parse(init.body), headers: init.headers, url: _url });
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     };
 
@@ -209,7 +227,7 @@ describe('reportSelfErrorToAgentautofix in-flight-send race (double-send regress
         // First send is rate-limited by the server — rolls back.
         return new Response(JSON.stringify({ ok: false }), { status: 429 });
       }
-      calls.push({ body: JSON.parse(init.body) });
+      calls.push({ body: JSON.parse(init.body), headers: init.headers, url: _url });
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     };
 
@@ -254,7 +272,7 @@ describe('reportSelfErrorToAgentautofix in-flight-send race (double-send regress
         await firstFetchGate;
         throw new Error('network down');
       }
-      calls.push({ body: JSON.parse(init.body) });
+      calls.push({ body: JSON.parse(init.body), headers: init.headers, url: _url });
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     };
 
@@ -413,7 +431,7 @@ describe('reportSelfErrorToAgentautofix fetch timeout (deferral 1)', () => {
     // occurrence, against a fetch that succeeds normally, must go through.
     // @ts-expect-error test stub
     globalThis.fetch = async (_url: string, init: any) => {
-      calls.push({ body: JSON.parse(init.body) });
+      calls.push({ body: JSON.parse(init.body), headers: init.headers, url: _url });
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     };
     await reportSelfErrorToAgentautofix(fields);
@@ -440,7 +458,7 @@ describe('reportSelfErrorToAgentautofix day-window rollback identity (Finding 2)
         await firstFetchGate;
         return new Response(JSON.stringify({ ok: false }), { status: 429 });
       }
-      calls.push({ body: JSON.parse(init.body) });
+      calls.push({ body: JSON.parse(init.body), headers: init.headers, url: _url });
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     };
 

@@ -1,7 +1,7 @@
-/* AgentAutofix click-to-comment widget.
-   Contract: agentautofix/docs/widget-contract.md. Ctrl/Cmd+click an element to file a comment.
+/* Zero Exposure click-to-comment widget.
+   Contract: Zero Exposure docs/widget-contract.md. Ctrl/Cmd+click an element to file a comment.
    Config comes from `window.__AGENTAUTOFIX_CONFIG__` (set by the React app right before this
-   script loads) instead of being hardcoded — remo-code provisions AgentAutofix per environment,
+   script loads) instead of being hardcoded — remo-code provisions Zero Exposure per environment,
    not per build. */
 (function () {
   var cfg = window.__AGENTAUTOFIX_CONFIG__;
@@ -10,7 +10,7 @@
   var HOST = cfg.host;
   var SITE_KEY = cfg.publicKey;
   var TOKEN_URL = cfg.tokenUrl || '/api/agentautofix/token';
-  var NS = 'agentautofix';
+  var NS = 'zeroexposure';
 
   var caps = null;
   var booting = null;
@@ -33,7 +33,7 @@
     if (caps) return Promise.resolve(caps);
     if (booting) return booting;
     booting = fetch(HOST + '/api/plugin/v1/config', {
-      headers: { 'x-agentautofix-key': SITE_KEY },
+      headers: { 'x-zeroexposure-key': SITE_KEY },
     })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (c) { caps = c; return c; })
@@ -157,7 +157,7 @@
         return fetch(HOST + '/api/plugin/v1/comments', {
           method: 'POST',
           headers: Object.assign(
-            { 'content-type': 'application/json', 'x-agentautofix-key': SITE_KEY },
+            { 'content-type': 'application/json', 'x-zeroexposure-key': SITE_KEY },
             token ? { authorization: 'Bearer ' + token } : {},
           ),
           body: JSON.stringify({
@@ -197,7 +197,7 @@
       'px;width:320px;padding:12px;border-radius:10px;background:#111;color:#eee;' +
       'font:13px/1.45 system-ui,sans-serif;box-shadow:0 8px 32px rgba(0,0,0,.45)';
     box.innerHTML =
-      '<div style="font-weight:600;margin-bottom:8px">AgentAutofix</div>' +
+      '<div style="font-weight:600;margin-bottom:8px">Zero Exposure</div>' +
       '<textarea id="' + NS + '-text" rows="4" placeholder="What is wrong with this element?" ' +
       'style="width:100%;box-sizing:border-box;background:#1c1c1c;color:#eee;border:1px solid #333;' +
       'border-radius:6px;padding:8px;font:inherit;resize:vertical"></textarea>' +

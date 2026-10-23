@@ -24,7 +24,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const WIDGET_PATH = join(import.meta.dir, "..", "public", "agentautofix-widget.js");
+const WIDGET_PATH = join(import.meta.dir, "..", "public", "zeroexposure-widget.js");
 const src = readFileSync(WIDGET_PATH, "utf8");
 
 /** Extract a top-level `function name(...) { ... }` block from the widget
@@ -59,7 +59,7 @@ function loadWithLocation(loc: { origin: string; pathname: string; hash: string;
   return factory(loc, URL) as { hashRoute: () => string; sanitizeHref: (raw: unknown) => string | null };
 }
 
-describe("agentautofix-widget page_url", () => {
+describe("zeroexposure-widget page_url", () => {
   test("never sends the raw location.href as page_url", () => {
     expect(src).not.toMatch(/page_url:\s*location\.href/);
   });
@@ -122,7 +122,7 @@ describe("agentautofix-widget page_url", () => {
   });
 });
 
-describe("agentautofix-widget href sanitization", () => {
+describe("zeroexposure-widget href sanitization", () => {
   const loc = {
     origin: "https://app.remo-code.com",
     pathname: "/",

@@ -29,18 +29,18 @@ async function renderedCsp(): Promise<string> {
 
 describe('agentautofix CSP wiring (finding 4)', () => {
   test('never adds the host when agentautofix is not configured', async () => {
-    config.agentautofix = { ...originalAgentautofix, configured: false, host: 'https://agentautofix.titaniumlabs.us' };
+    config.agentautofix = { ...originalAgentautofix, configured: false, host: 'https://app.zeroexposure.io' };
     expect(agentautofixConnectSrcEntry()).toBeNull();
     const value = await renderedCsp();
-    expect(value).not.toContain('agentautofix.titaniumlabs.us');
+    expect(value).not.toContain('app.zeroexposure.io');
   });
 
   test('adds the host to connect-src when configured with a valid origin', async () => {
-    config.agentautofix = { ...originalAgentautofix, configured: true, host: 'https://agentautofix.titaniumlabs.us' };
-    expect(agentautofixConnectSrcEntry()).toBe('https://agentautofix.titaniumlabs.us');
+    config.agentautofix = { ...originalAgentautofix, configured: true, host: 'https://app.zeroexposure.io' };
+    expect(agentautofixConnectSrcEntry()).toBe('https://app.zeroexposure.io');
     const value = await renderedCsp();
     const connectSrc = value.split(';').find((p) => p.trim().startsWith('connect-src'))!;
-    expect(connectSrc).toContain('agentautofix.titaniumlabs.us');
+    expect(connectSrc).toContain('app.zeroexposure.io');
     // Existing entries must survive, not be replaced.
     for (const existing of DEFAULT_CSP.connectSrc) expect(connectSrc).toContain(existing);
   });
@@ -67,7 +67,7 @@ describe('agentautofix CSP wiring (finding 4)', () => {
 
   // Deferral 2 (#413): a wildcard-shaped host must never widen connect-src.
   const cases: Array<{ host: string; expectAllowed: boolean; label: string }> = [
-    { host: 'https://agentautofix.titaniumlabs.us', expectAllowed: true, label: 'valid concrete host' },
+    { host: 'https://app.zeroexposure.io', expectAllowed: true, label: 'valid concrete host' },
     { host: 'http://localhost:9106', expectAllowed: true, label: 'valid localhost with port' },
     { host: 'https://127.0.0.1', expectAllowed: true, label: 'valid bare IPv4 host' },
     { host: 'https://*', expectAllowed: false, label: 'bare wildcard host' },
