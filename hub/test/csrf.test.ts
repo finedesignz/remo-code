@@ -53,9 +53,9 @@ describe('isCsrfAllowlisted', () => {
   test('allows coolify webhook', () => {
     expect(isCsrfAllowlisted('/api/coolify/webhook/user-123')).toBe(true);
   });
-  test('allows login + logout', () => {
-    expect(isCsrfAllowlisted('/api/auth/login/request-link')).toBe(true);
-    expect(isCsrfAllowlisted('/api/auth/login/callback')).toBe(true);
+  test('allows logout only; the removed /api/auth/login/* routes are not allowlisted', () => {
+    expect(isCsrfAllowlisted('/api/auth/login/request-link')).toBe(false);
+    expect(isCsrfAllowlisted('/api/auth/login/callback')).toBe(false);
     expect(isCsrfAllowlisted('/api/auth/logout')).toBe(true);
   });
   test('does NOT allow scheduled-tasks (must enforce CSRF)', () => {
