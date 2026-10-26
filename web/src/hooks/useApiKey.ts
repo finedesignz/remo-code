@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback } from 'react'
 import { hubFetch, HubFetchError } from '../lib/api'
 
-export type Scope = 'agent' | 'ext:read' | 'ext:ask' | 'cloud:hook' | 'settings:read' | 'settings:write'
+export type Scope = 'agent' | 'ext:read' | 'ext:ask' | 'ext:launch' | 'cloud:hook' | 'settings:read' | 'settings:write'
 
 export const SCOPE_LABELS: Record<Scope, string> = {
   agent: 'agent',
   'ext:read': 'ext:read',
   'ext:ask': 'ext:ask',
+  'ext:launch': 'ext:launch',
   'cloud:hook': 'cloud:hook',
   'settings:read': 'settings:read',
   'settings:write': 'settings:write',
@@ -16,6 +17,7 @@ export const SCOPE_HELP: Record<Scope, string> = {
   agent: 'Connect a Remo Code Supervisor / agent (can spawn CLI processes on that host).',
   'ext:read': 'Read sessions, transcripts and state through the external API.',
   'ext:ask': 'Ask a session a question through the external API (spends tokens).',
+  'ext:launch': 'Start and stop your existing sessions through the external API (no prompt, no path).',
   'cloud:hook': 'Post a claude.ai cloud session\'s replies into Remo (the cloud Stop hook). Use on its own.',
   'settings:read': 'Read your settings (profile, usage and cost controls, notifications, roots, orchestrator).',
   'settings:write': 'Change those settings too. Cannot manage API keys or webhook secrets.',
