@@ -6,9 +6,8 @@
  * non-HttpOnly `csrf_token` cookie, which is also our "user is signed in"
  * signal (see `hasSessionCookie`).
  *
- * Legacy password login and the own magic link are kept behind hub flags
- * (ALLOW_LEGACY_LOGIN / LEGACY_MAGIC_LINK_LOGIN, both default off); the login
- * page shows them only when `/api/client-config` says they are enabled.
+ * There is no in-app login form: the login page only sends the user to the
+ * Titanium Labs hosted login (`titaniumStartAction` / `startAppLogin`).
  */
 
 import { hubFetch, hubUrl, hasSessionCookie } from './api'
@@ -23,23 +22,20 @@ export interface AuthUser {
 }
 
 /**
- * Titanium hosted login, email path. The hub (`POST /auth/email`) sets the
- * short-lived `remo_login` state cookie and asks the Titanium portal to mail a
- * sign-in link that returns to `/auth/callback`. Same answer for every address,
- * so the caller always renders "check your inbox". `client: 'app'` is the Tauri
- * shell (deep-link return, PKCE). Throws only on a config/transport failure that
- * says nothing about the address (invalid email format, misconfigured server).
+ * App shell (Tauri WebView, deep-link return): ask the hub to start the hosted login
+ * (`POST /auth/start {client:"app"}`: sets the PKCE pending cookie in this WebView's jar)
+ * and return the Titanium Labs login URL to navigate to. Throws a hub error code.
  */
-export async function requestTitaniumLink(email: string, client: 'web' | 'app' = 'web'): Promise<void> {
-  const res = await fetch(`${HUB_URL}/auth/email`, {
+export async function startAppLogin(): Promise<string> {
+  const res = await fetch(`${HUB_URL}/auth/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, client }),
+    body: JSON.stringify({ client: 'app' }),
     credentials: 'include',
   })
-  if (res.ok) return
-  const body = (await res.json().catch(() => null)) as { error?: string } | null
-  throw new Error(body?.error || 'send_failed')
+  const body = (await res.json().catch(() => null)) as { url?: string; error?: string } | null
+  if (!res.ok || !body?.url) throw new Error(body?.error || 'server_misconfigured')
+  return body.url
 }
 
 /** Form action of the "Continue with Titanium" button (hosted login, PKCE). */
@@ -62,45 +58,6 @@ export function submitFullLogout(): void {
   form.submit()
 }
 
-/**
- * LEGACY own magic link (hub `LEGACY_MAGIC_LINK_LOGIN=on` only; the route 404s
- * otherwise). Kept for one release as a rollback.
- */
-export async function requestMagicLink(email: string): Promise<void> {
-  await fetch(`${HUB_URL}/api/auth/login/request-link`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email }),
-    credentials: 'include',
-  }).catch(() => null)
-}
-
-/**
- * Legacy password login — preserved during dual-auth soak. Returns the user
- * object on success (the cookie is set by the hub via Set-Cookie). The token
- * field is returned for backward-compatibility with the soak-mode bearer flow;
- * post-cutover the cookie is the only credential needed.
- */
-export async function legacyPasswordLogin(
-  email: string,
-  password: string,
-): Promise<{ token?: string; user: AuthUser }> {
-  const res = await fetch(`${HUB_URL}/api/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
-    credentials: 'include',
-  })
-  if (!res.ok) {
-    if (res.status === 404 || res.status === 410) {
-      throw new Error('Password sign-in is disabled. Use the email link or Continue with Titanium.')
-    }
-    const err = await res.json().catch(() => ({ error: 'Login failed' }))
-    throw new Error(err.error || 'Login failed')
-  }
-  return res.json()
-}
-
 /** Logout — clears the session cookie server-side. CSRF-exempt by design. */
 export async function apiLogout(): Promise<void> {
   await fetch(`${HUB_URL}/api/auth/logout`, {
@@ -119,34 +76,9 @@ export async function fetchCurrentUser(): Promise<AuthUser | null> {
   }
 }
 
-/**
- * Legacy localStorage shims — preserved during the soak window so the legacy
- * password path still hydrates the in-memory app state. Post-cutover these
- * become no-ops and the cookie + `/api/profile` round-trip is authoritative.
- */
+/** Stale localStorage keys from the retired password login; only ever cleared. */
 const LS_TOKEN = 'remo_token'
 const LS_USER = 'remo_user'
-
-export function getStoredToken(): string | null {
-  try { return localStorage.getItem(LS_TOKEN) } catch { return null }
-}
-
-export function getStoredUser(): AuthUser | null {
-  try {
-    const raw = localStorage.getItem(LS_USER)
-    if (!raw) return null
-    return JSON.parse(raw)
-  } catch {
-    return null
-  }
-}
-
-export function storeAuth(token: string | null, user: AuthUser): void {
-  try {
-    if (token) localStorage.setItem(LS_TOKEN, token)
-    localStorage.setItem(LS_USER, JSON.stringify(user))
-  } catch {}
-}
 
 export function clearAuth(): void {
   try {

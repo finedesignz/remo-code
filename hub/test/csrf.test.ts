@@ -62,8 +62,8 @@ describe('isCsrfAllowlisted', () => {
     expect(isCsrfAllowlisted('/api/scheduled-tasks')).toBe(false);
     expect(isCsrfAllowlisted('/api/scheduled-tasks/abc-123')).toBe(false);
   });
-  test('allows setup + plugin + github callback + health', () => {
-    expect(isCsrfAllowlisted('/api/setup')).toBe(true);
+  test('allows plugin + github callback + health; no password-setup route is allowlisted', () => {
+    expect(isCsrfAllowlisted('/api/setup')).toBe(false);
     expect(isCsrfAllowlisted('/api/plugin/foo')).toBe(true);
     expect(isCsrfAllowlisted('/api/github/callback')).toBe(true);
     expect(isCsrfAllowlisted('/health')).toBe(true);

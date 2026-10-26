@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext, type ReactNode, createElement } from 'react'
-import { getStoredToken, hasSessionCookie, clearAuth } from '../lib/auth.ts'
+import { hasSessionCookie, clearAuth } from '../lib/auth.ts'
 import { readCookie } from '../lib/api'
 
 /** WS messages that mutate server state — must carry csrf_token (cookie echo). */
@@ -103,13 +103,12 @@ export function useWebSocket(token: string | null) {
   }
 
   const connect = useCallback(() => {
-    // Cookie auth requires no token; legacy bearer auth needs one. If neither
-    // signal is present, defer the connect — useAuth will retry once it has
-    // either bootstrapped a user via cookie or hydrated from localStorage.
+    // Session auth is the HttpOnly cookie. If there is no session signal, defer the
+    // connect: useAuth retries once it has bootstrapped a user via the cookie.
     const cookieAuth = hasSessionCookie()
-    const authToken = token || getStoredToken()
+    const authToken = token
     if (!cookieAuth && !authToken) {
-      // No cookie session AND no bearer token — don't open the WS at all.
+      // No cookie session — don't open the WS at all.
       // Surfaces a clean disconnected state and lets the app shell redirect
       // to login. Prevents the "open → 4001 → reconnect" loop from ever
       // starting on first paint after a token expiry.

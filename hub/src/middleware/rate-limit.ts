@@ -7,8 +7,8 @@
 //   - `RateLimitBackend` interface: in-memory default; Redis when
 //     `TITANIUM_REDIS_URL` is set (pluggable; tests can inject).
 //   - `rateLimitMulti({ buckets: [...], silent?: boolean })`: enforces N
-//     bucket-windows simultaneously. Used for `request-link` (3/min/IP
-//     + 5/hr/email). `silent: true` swallows the 429 and lets the route
+//     bucket-windows simultaneously. Used for `/api/feedback` (per-token
+//     + per-IP). `silent: true` swallows the 429 and lets the route
 //     respond normally (login-enumeration prevention) — the caller checks
 //     `c.get('rateLimited')` to decide whether to skip the side-effect.
 //   - `Retry-After` always set when 429 is returned.

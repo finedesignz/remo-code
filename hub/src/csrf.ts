@@ -35,7 +35,6 @@ const CSRF_PATH_ALLOWLIST: Array<string | RegExp> = [
   /^\/api\/auth\/login\//, // login itself gated by magic-link
   /^\/api\/auth\/logout$/, // logout reads cookie, kills it — no CSRF needed
   /^\/api\/github\/callback$/, // GitHub redirect
-  /^\/api\/setup\b/, // first-user setup (pre-auth)
   /^\/api\/plugin\//, // api-key authed
   /^\/api\/ext\//, // api-key authed (milestone ASK external agent surface)
   /^\/health$/,

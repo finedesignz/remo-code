@@ -52,21 +52,7 @@ const titaniumAccountId = process.env.TITANIUM_KEYGEN_ACCOUNT_ID || "";
 const titaniumProductId = process.env.TITANIUM_KEYGEN_PRODUCT_ID || "";
 const titaniumPortalToken = process.env.TITANIUM_KEYGEN_PORTAL_TOKEN || "";
 const titaniumAdminToken = process.env.TITANIUM_KEYGEN_ADMIN_TOKEN || titaniumPortalToken;
-const magicLinkSecret = requireMinLenIfSet("MAGIC_LINK_SECRET", process.env.MAGIC_LINK_SECRET, 32);
 const sessionSecret = requireMinLenIfSet("SESSION_SECRET", process.env.SESSION_SECRET, 32);
-// Titanium hosted login (2026-10): the bcrypt `/api/auth/login` + `/register`
-// routes, the `/api/setup/create-admin` password bootstrap and the legacy Bearer
-// JWT (REST + /ws/client) are OFF unless ALLOW_LEGACY_LOGIN=true is set
-// explicitly. The default was `true`, which kept password login live in prod.
-const allowLegacyLogin = parseBool(process.env.ALLOW_LEGACY_LOGIN, false);
-// The hub's OWN HS256 magic link (`/api/auth/login/request-link`, `/login/callback`
-// and the `finalize-mobile` handoff it mints) is replaced by the Titanium hosted
-// login (`hub/src/api/titanium-auth.ts`). It stays in the code for one release as a
-// rollback, reachable only with LEGACY_MAGIC_LINK_LOGIN=on (routes 404 otherwise).
-function parseOnFlag(v: string | undefined): boolean {
-  return /^(1|true|yes|on)$/i.test((v ?? "").trim());
-}
-const legacyMagicLinkLogin = parseOnFlag(process.env.LEGACY_MAGIC_LINK_LOGIN);
 // Public origin of this hub (the SPA + the Titanium callback). Taken from env,
 // NEVER from the request Host header: it is the return_url the Titanium portal
 // redirects to and the origin every state-setting POST must come from.
@@ -95,9 +81,7 @@ const licenseRequired = parseBool(process.env.LICENSE_REQUIRED, true);
 // Phase 07 escape hatch (2026-05-26): TITANIUM_BYPASS=true disables the Keygen
 // JWKS warm at boot and short-circuits the LICENSE gate (Keygen CE JWKS outage).
 // It is a LICENSE switch only (2026-10): it does NOT touch login. The Titanium
-// hosted login keeps working under bypass, and bypass NEVER turns password login
-// on: that needs ALLOW_LEGACY_LOGIN=true, set explicitly. (It still 503s the
-// legacy own magic link, which is itself off unless LEGACY_MAGIC_LINK_LOGIN=on.)
+// hosted login is the only login and keeps working under bypass.
 const titaniumBypass = parseBool(process.env.TITANIUM_BYPASS, false);
 // Bug B (2026-05-28) — when the last web subscriber for a session leaves, wait
 // this many seconds before sending `shutdown` to the agent so its runner is
@@ -251,10 +235,7 @@ export const config = {
     redisUrl: process.env.TITANIUM_REDIS_URL || "",
     licenseCacheTtlSeconds: titaniumLicenseCacheTtlSeconds,
   },
-  magicLinkSecret,
   sessionSecret,
-  allowLegacyLogin,
-  legacyMagicLinkLogin,
   publicUrl,
   bootstrapAdminEmail,
   titaniumWebhookSecret,
