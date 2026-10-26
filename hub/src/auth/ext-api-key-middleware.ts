@@ -31,10 +31,21 @@ export const EXT_ACTOR = 'external-ask'
  */
 export const EXT_WORK_ACTOR = 'external-work'
 
+/**
+ * Milestone LAUNCH (gsd-console Phase 8). The actor for a start/stop of an existing session
+ * through /api/ext - SERVER-INFERRED from the route, never from the request body.
+ */
+export const EXT_LAUNCH_ACTOR = 'external-launch'
+
 export const SCOPE_READ = 'ext:read'
 export const SCOPE_ASK = 'ext:ask'
 /** Writes code + can publish. Strictly more dangerous than ext:ask — its own scope. */
 export const SCOPE_WORK = 'ext:work'
+/** Starts/stops a process on the owner's machine - its own, EXPLICIT-only scope. */
+export const SCOPE_LAUNCH = 'ext:launch'
+
+/** POST /api/ext/sessions/<id>/launch | /stop - the only routes behind ext:launch. */
+const LAUNCH_PATH = /\/sessions\/[^/]+\/(?:launch|stop)\/?$/
 
 export async function extApiKeyMiddleware(c: Context, next: Next) {
   const authHeader = c.req.header('Authorization') ?? ''
@@ -74,9 +85,17 @@ export async function extApiKeyMiddleware(c: Context, next: Next) {
     return c.json({ error: 'insufficient_scope', required: SCOPE_WORK }, 403)
   }
 
+  // LAUNCH: starting or stopping a session spawns/kills a process on the owner's machine.
+  // Explicit-only like ext:work: a legacy/NULL-scopes key (every supervisor's own spawn
+  // credential) must never acquire it, and ext:ask/ext:work are not sufficient.
+  const isLaunchRoute = c.req.method === 'POST' && LAUNCH_PATH.test(c.req.path)
+  if (isLaunchRoute && !hasExplicitScope(key.scopes, SCOPE_LAUNCH)) {
+    return c.json({ error: 'insufficient_scope', required: SCOPE_LAUNCH }, 403)
+  }
+
   c.set('userId', key.user_id)
   c.set('apiKeyId', key.id)
-  c.set('actor', c.req.path.includes('/work') ? EXT_WORK_ACTOR : EXT_ACTOR)
+  c.set('actor', isLaunchRoute ? EXT_LAUNCH_ACTOR : c.req.path.includes('/work') ? EXT_WORK_ACTOR : EXT_ACTOR)
 
   await next()
 }

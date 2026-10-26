@@ -2,7 +2,7 @@
  * PTYCAP-04-07 (D-09d): enumerating pin over every launchSessionForUser caller.
  *
  * launchSessionForUser is shared by MACHINE callers (orchestrator autospawn, scheduler agent
- * lazy launch, ext ask / work ensureOnline) and HUMAN callers (Telegram /doctor and
+ * lazy launch, ext ask / work ensureOnline, ext launch) and HUMAN callers (Telegram /doctor and
  * /commands). Machine callers must pass `machine: true` so the kill switch refuses them
  * during a halt; human callers must never mention it (they must not be blocked by
  * automation controls). Default deny: a call site in any other file fails until classified.
@@ -18,6 +18,7 @@ const MACHINE = new Set([
   'scheduler/senders/agent.ts', //     maybeLaunchOfflineSession
   'ask/dispatch.ts', //                ensureOnline closure
   'work/dispatch.ts', //               ensureOnline closure
+  'api/ext.ts', //                     POST /api/ext/sessions/:id/launch (scope ext:launch)
 ])
 const HUMAN = new Set([
   'telegram/doctor.ts', //             /doctor autoheal relaunch
@@ -59,8 +60,8 @@ function sites(): Site[] {
 describe('launchSessionForUser caller classification', () => {
   const all = sites()
 
-  test('self-check: the scanner finds all six known call sites', () => {
-    expect(all.length).toBeGreaterThanOrEqual(6)
+  test('self-check: the scanner finds all seven known call sites', () => {
+    expect(all.length).toBeGreaterThanOrEqual(7)
     const files = new Set(all.map((s) => s.file))
     for (const f of [...MACHINE, ...HUMAN]) expect(files.has(f)).toBe(true)
   })

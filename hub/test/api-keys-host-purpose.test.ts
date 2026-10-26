@@ -74,6 +74,15 @@ describe('cloud-host api keys', () => {
     expect(state.pushes).toEqual([])
   })
 
+  it('ext:read + ext:launch (no agent) is minted as purpose=external and pushes to nobody', async () => {
+    const res = await post('/api/api-keys', { name: 'GSD Console launch', scopes: ['ext:read', 'ext:launch'] })
+    expect(res.status).toBe(201)
+    const body: any = await res.json()
+    expect(body.purpose).toBe('external')
+    expect(body.scopes).toEqual(['ext:read', 'ext:launch'])
+    expect(state.pushes).toEqual([])
+  })
+
   it('host:true without agent scope is rejected', async () => {
     const res = await post('/api/api-keys', { scopes: ['ext:read'], host: true })
     expect(res.status).toBe(400)
