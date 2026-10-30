@@ -97,7 +97,7 @@ The agent (`agent/src/index.ts`) runs on the same machine as Codex. It:
 
 Uses **PostgreSQL** (self-hosted). Schema in `hub/src/db/schema.sql` — run once on a fresh database.
 
-Tables: `users` (email + bcrypt password, role), `sessions` (Codex sessions), `messages` (chat history), `api_keys` (agent authentication). All queries are scoped by `user_id` with explicit WHERE clauses.
+Tables: `users` (email, role, Titanium link; legacy `password_hash` column inert), `sessions` (Codex sessions), `messages` (chat history), `api_keys` (agent authentication). All queries are scoped by `user_id` with explicit WHERE clauses.
 
 ## WebSocket Protocol
 
@@ -249,35 +249,34 @@ When adding a new triage payload field, post-run action, or webhook event type: 
 
 ## Phase 07: Titanium Licensing Auth Cutover
 
-Replaces bcrypt + JWT user-auth with **Titanium Licensing** (Keygen-backed) magic-link login + opaque cookie sessions, and gates feature endpoints on a synced `license_status` mirror. The legacy path stays alive behind `ALLOW_LEGACY_LOGIN` for one release as the rollback. Full architecture in [docs/auth.md](docs/auth.md).
+Replaces bcrypt + JWT user-auth with **Titanium Licensing** (Keygen-backed) Titanium hosted login (redirect to auth.titaniumlabs.us, exchange at `/auth/callback`) + opaque cookie sessions, and gates feature endpoints on a synced `license_status` mirror. The password, own-magic-link and Bearer-JWT paths were deleted (2026-10-25). Full architecture in [docs/auth.md](docs/auth.md).
 
 **File map (hub):**
 
-- `hub/src/config.ts` — typed `config.titanium.*`, `config.magicLinkSecret`, `config.sessionSecret`, `config.allowLegacyLogin` parsed from env at boot. Missing required vars = fatal.
+- `hub/src/config.ts` — typed `config.titanium.*`, `config.sessionSecret` parsed from env at boot. Missing required vars = fatal.
 - `hub/src/titanium-client.ts` — JWKS-cached EdDSA verifier for Keygen tokens + license `validate` calls. Tests live in `hub/test/titanium-client.test.ts` (offline vectors at `hub/test/fixtures/titanium-vectors.json`).
 - `hub/src/session.ts` — opaque cookie sessions (random token, sha-256 in DB, sliding refresh). `createAuthSession`, `verifyAuthSessionCookie`, `revokeAuthSession`. Persists to the `auth_sessions` table.
 - `hub/src/csrf.ts` — double-submit cookie + `X-CSRF-Token` header check on all state-changing routes.
 - `hub/src/license-gate.ts` — middleware factory. Reads `license_status` from `users` via `getUserLicenseFields`, refreshes through `titanium-client` if stale (TTL `TITANIUM_LICENSE_CACHE_TTL_SECONDS`), 402s when not `active`. **Exclusion list** (NEVER license-gated): `/api/auth/*`, `/api/profile/license`, `/api/profile`, `/healthz`, the Sentry intake, the Coolify webhook, the Titanium license-changed webhook, and `/ws/agent` (agent traffic is keyed by `api_keys`, not user license).
-- `hub/src/auth/middleware.ts` — dual-auth. Tries cookie first, falls back to `Authorization: Bearer <jwt>` ONLY when `config.allowLegacyLogin === true`. Sets `c.set('userId')` and `c.set('authMethod')` (`session_cookie` | `legacy_jwt`).
+- `hub/src/auth/middleware.ts` — Cookie session first, then `Authorization: Bearer remokey_<key>` (settings-scoped api key); no Bearer-JWT login. Sets `c.set('userId')` and `c.set('authMethod')` (`session_cookie` | `legacy_jwt`).
 - `hub/src/auth/reauth.ts` — short-window step-up gate. Required by sensitive ops (api-key creation, email change, account delete).
-- `hub/src/api/auth.ts` — new routes: `POST /request-link`, `GET /callback`, `POST /logout`. Legacy `POST /login` + `POST /register` are still mounted but return 410 when `!config.allowLegacyLogin`.
+- `hub/src/api/auth.ts` — only `POST /logout` (login lives in `hub/src/api/titanium-auth.ts`, mounted at `/auth`).
 - `hub/src/api/profile.ts` — plain Hono. Excluded from license gate.
 - `hub/src/api/_openapi.ts` — `GET /api/profile/cost-today` and `GET /api/profile/license` are OpenAPI-aware (zod schemas). Both are mounted ahead of the plain `profile.ts` twin and excluded from license gating.
 - `hub/src/api/webhooks-titanium.ts` — `POST /webhooks/titanium/license-changed`. HMAC over `${ts}.${rawBody}`, raw body read BEFORE JSON parse. Returns 503 when `TITANIUM_WEBHOOK_SECRET` is unset.
-- `hub/scripts/migrate-users-to-titanium.ts` — one-shot script: looks up each user in the Titanium portal, writes `titanium_subject` + initial `license_status`, marks unmatched rows `titanium_link_status='pending_verify'`.
 - `hub/src/db/schema.sql` — additive only this phase: `users.titanium_subject`, `users.license_status`, `users.license_id`, `users.license_checked_at`, `users.titanium_link_status`, `users.candidate_subject`; new `auth_sessions` table; new `auth_events` audit table. `password_hash` STAYS.
 - `hub/src/db/dal.ts` — `getUserByTitaniumSubject`, `linkTitaniumSubject`, `setPendingVerify`, `promoteCandidateSubject`, `getUserLicenseFields`, `updateLicenseStatus`, `updateUserEmail`, `createAuthSession`, `getAuthSessionByToken`, `touchAuthSession`, `deleteAuthSession`, `purgeExpiredAuthSessions`, `recordAuthEvent`.
 
 **File map (web):**
 
-- `web/src/lib/auth.ts` — cookie-aware fetch helpers; magic-link `requestLink` + `completeCallback`; portal URL helper reading `VITE_TITANIUM_PORTAL_URL`.
+- `web/src/lib/auth.ts` — cookie-aware fetch helpers; `startAppLogin` (app shell) + `titaniumStartAction` (web button); portal URL helper reading `VITE_TITANIUM_PORTAL_URL`.
 - `web/src/hooks/useLicense.ts` — polls `GET /api/profile/license` every 5 min; returns `'active' | 'expired' | 'suspended' | 'banned' | 'none' | 'unknown'`. 404 is treated silently as `unknown` (back-compat with pre-endpoint deploys); 402 maps to `expired`.
 - `web/src/components/Layout.tsx` — renders the license badge (color + tooltip) from `useLicense`.
-- `web/src/App.tsx` — magic-link request page + callback route; "Manage account" link to the Titanium portal.
+- `web/src/App.tsx` — logged-out Login page (button to the Titanium Labs login); "Manage account" link to the Titanium portal.
 
 **Key invariants:**
 
-- **Legacy path is gated, NOT deleted this phase.** `ALLOW_LEGACY_LOGIN`, `password_hash`, `bcrypt`, `hub/src/auth/password.ts`, and `JWT_SECRET` all stay alive through the soak. Phase 07.5 deletes them.
+- **Legacy login is deleted** (2026-10-25): no `ALLOW_LEGACY_LOGIN`, `bcrypt`, `hub/src/auth/password.ts` or password route; `users.password_hash` stays inert. `JWT_SECRET` remains for non-login signed tokens.
 - **`SESSION_SECRET` is never rotated as part of a routine cutover** — that would log out every Titanium-cookie user. D14's force-reissue rotates `JWT_SECRET` (kills legacy bearer JWTs) and leaves `SESSION_SECRET` alone.
 - **`/api/profile/license` is auth-gated, NOT license-gated** — it IS the license-status endpoint; gating it on itself is a circular dep. Same exclusion applies to `/api/auth/*`, `/healthz`, and webhooks.
 - **`/ws/agent` traffic is keyed by `api_keys`, never by user license.** A user with `license_status='expired'` can still observe agent traffic in read-only mode; only user-initiated mutations are blocked.

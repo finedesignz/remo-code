@@ -2,7 +2,7 @@
 // protections of titanium-licensing README §3.3 / §3.3.1 / §3.3.2 and tauri.md.
 //
 // Every test here is written so it FAILS if the protection it names is removed:
-//   - Origin required on every state-setting POST (/auth/email, /auth/start) and on
+//   - Origin required on every state-setting POST (/auth/start, web form and app leg) and on
 //     the minting POSTs (/auth/confirm, /auth/app-finalize); logout refuses only a
 //     foreign Origin.
 //   - state mismatch / missing state cookie → confirmation page, no session.
@@ -53,7 +53,6 @@ globalThis.fetch = (async (input: any, init?: any) => {
   const body = init?.body ? JSON.parse(init.body) : null;
   calls.push({ url, body });
   if (url === `${PORTAL}/api/exchange`) return exchangeReply();
-  if (url === `${PORTAL}/api/auth/send-magic-link`) return json({ ok: true });
   return new Response('unexpected', { status: 599 });
 }) as any;
 afterAll(() => { globalThis.fetch = realFetch; });
@@ -99,14 +98,17 @@ function hasSession(res: Response): boolean {
   return setCookies(res).some((c) => c.startsWith('__Host-remo_sid=') && !/Max-Age=0/i.test(c) && !c.startsWith('__Host-remo_sid=;'));
 }
 
-async function startEmail(opts: { origin?: string | null; email?: string; client?: string } = {}) {
+// App-shell leg: POST /auth/start {client:"app"} answers the hosted-login URL as JSON.
+async function startApp(opts: { origin?: string | null } = {}) {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (opts.origin !== null) headers.origin = opts.origin ?? APP;
-  return app().request('/auth/email', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ email: opts.email ?? 'owner@example.com', ...(opts.client ? { client: opts.client } : {}) }),
-  });
+  return app().request('/auth/start', { method: 'POST', headers, body: JSON.stringify({ client: 'app' }) });
+}
+function hostedReturnUrl(url: string): URL {
+  const u = new URL(url);
+  expect(`${u.origin}${u.pathname}`).toBe('https://auth.titaniumlabs.us/login');
+  expect(u.searchParams.get('app_id')).toBe('remo-code');
+  return new URL(u.searchParams.get('return_url')!);
 }
 async function startHosted(origin: string | null = APP) {
   const headers: Record<string, string> = {};
@@ -117,15 +119,15 @@ async function startHosted(origin: string | null = APP) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('login START requires Origin == hub origin (planted-state defense)', () => {
-  test('/auth/email: missing Origin → 403, no state cookie, no portal call', async () => {
-    const res = await startEmail({ origin: null });
+  test('/auth/start (app leg): missing Origin → 403, no state cookie, no portal call', async () => {
+    const res = await startApp({ origin: null });
     expect(res.status).toBe(403);
     expect(cookieValue(res, 'remo_login')).toBeNull();
     await flush();
     expect(calls).toHaveLength(0);
   });
-  test('/auth/email: foreign Origin → 403, no state cookie', async () => {
-    const res = await startEmail({ origin: 'https://evil.example' });
+  test('/auth/start (app leg): foreign Origin → 403, no state cookie', async () => {
+    const res = await startApp({ origin: 'https://evil.example' });
     expect(res.status).toBe(403);
     expect(cookieValue(res, 'remo_login')).toBeNull();
   });
@@ -139,50 +141,17 @@ describe('login START requires Origin == hub origin (planted-state defense)', ()
   });
 });
 
-describe('POST /auth/email (web)', () => {
-  test('sets remo_login (HttpOnly, Secure, SameSite=Lax, Path=/auth, 15 min) and mails a link bound to that state', async () => {
-    const res = await startEmail();
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
-    const h = cookieHeader(res, 'remo_login')!;
-    expect(h).toMatch(/HttpOnly/);
-    expect(h).toMatch(/Secure/);
-    expect(h).toMatch(/SameSite=Lax/);
-    expect(h).toMatch(/Path=\/auth(;|$)/);
-    expect(h).toMatch(/Max-Age=900/);
-
-    await flush();
-    const send = calls.find((c) => c.url === `${PORTAL}/api/auth/send-magic-link`)!;
-    expect(send.body.appId).toBe('remo-code');
-    expect(send.body.email).toBe('owner@example.com');
-    const ret = new URL(send.body.returnUrl);
-    expect(ret.origin + ret.pathname).toBe(`${APP}/auth/callback`);
-    const pending = await tl.readPendingLogin(cookieValue(res, 'remo_login'));
-    expect(ret.searchParams.get('state')).toBe(pending!.state);
-    // No PKCE on the web email path (cross-device links must still work via confirm).
-    expect(ret.searchParams.get('code_challenge')).toBeNull();
-    expect(pending!.client).toBe('web');
-  });
-
-  test('same answer for every address; a rate-limited request sends nothing', async () => {
-    const a = await startEmail({ email: 'known@example.com' });
-    const b = await startEmail({ email: 'nobody-here@example.com' });
-    expect(await a.json()).toEqual(await b.json());
-
-    const limited = new Hono();
-    limited.use('/auth/email', async (c, next) => { c.set('rateLimited' as never, true as never); await next(); });
-    limited.route('/auth', titaniumAuthRouter);
-    calls = [];
-    const r = await limited.request('/auth/email', { method: 'POST', headers: { origin: APP, 'content-type': 'application/json' }, body: JSON.stringify({ email: 'x@example.com' }) });
-    expect(await r.json()).toEqual({ ok: true });
+describe('there is no in-app email login: the portal sends every sign-in email', () => {
+  test('POST /auth/email no longer exists and never calls the portal', async () => {
+    const res = await app().request('/auth/email', {
+      method: 'POST',
+      headers: { origin: APP, 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'owner@example.com' }),
+    });
+    expect(res.status).toBe(404);
+    expect(cookieValue(res, 'remo_login')).toBeNull();
     await flush();
     expect(calls).toHaveLength(0);
-  });
-
-  test('invalid email → 400, no cookie', async () => {
-    const res = await startEmail({ email: 'not-an-email' });
-    expect(res.status).toBe(400);
-    expect(cookieValue(res, 'remo_login')).toBeNull();
   });
 });
 
@@ -448,15 +417,17 @@ function appFinalize(body: unknown, opts: { origin?: string | null; cookie?: str
 }
 
 describe('Tauri shell leg (remo-code:// deep link, PKCE + app_slug)', () => {
-  test('/auth/email {client:"app"} → remo-code://auth/callback return with an S256 challenge', async () => {
-    const res = await startEmail({ client: 'app' });
-    await flush();
-    const send = calls.find((c) => c.url.endsWith('/send-magic-link'))!;
-    const ret = new URL(send.body.returnUrl);
+  test('/auth/start {client:"app"} → hosted login URL returning to remo-code://auth/callback with an S256 challenge', async () => {
+    const res = await startApp();
+    expect(res.status).toBe(200);
+    const ret = hostedReturnUrl(((await res.json()) as { url: string }).url);
     expect(`${ret.protocol}//${ret.host}${ret.pathname}`).toBe('remo-code://auth/callback');
     const pending = await tl.readPendingLogin(cookieValue(res, 'remo_login'));
     expect(pending!.client).toBe('app');
+    expect(ret.searchParams.get('state')).toBe(pending!.state);
     expect(ret.searchParams.get('code_challenge')).toBe(tl.pkceChallenge(pending!.verifier!));
+    await flush();
+    expect(calls).toHaveLength(0); // the hub never calls the portal to send mail
   });
 
   test('matching state → exchange with code_verifier + app_slug → session', async () => {
@@ -511,8 +482,8 @@ describe('Tauri shell leg (remo-code:// deep link, PKCE + app_slug)', () => {
     expect(calls).toHaveLength(0);
   });
 
-  test('/auth/email {client:"app"} from the Tauri origin → 200; remo_login is SameSite=None; Secure; Partitioned (cross-site jar)', async () => {
-    const res = await startEmail({ client: 'app', origin: 'tauri://localhost' });
+  test('/auth/start {client:"app"} from the Tauri origin → 200; remo_login is SameSite=None; Secure; Partitioned (cross-site jar)', async () => {
+    const res = await startApp({ origin: 'tauri://localhost' });
     expect(res.status).toBe(200);
     const h = cookieHeader(res, 'remo_login')!;
     expect(h).toMatch(/SameSite=None/);
@@ -521,15 +492,11 @@ describe('Tauri shell leg (remo-code:// deep link, PKCE + app_slug)', () => {
     expect(h).toMatch(/HttpOnly/);
     expect(h).toMatch(/Path=\/auth/);
     expect(res.headers.get('access-control-allow-origin')).toBe('tauri://localhost');
-    await flush();
-    const send = calls.find((c) => c.url.endsWith('/send-magic-link'))!;
-    expect(send.body.returnUrl.startsWith('remo-code://auth/callback?')).toBe(true);
+    const ret = hostedReturnUrl(((await res.json()) as { url: string }).url);
+    expect(ret.toString().startsWith('remo-code://auth/callback?')).toBe(true);
   });
 
-  test('the Tauri origin is NOT a web-leg origin: /auth/email (web), /auth/start, /auth/confirm refuse it', async () => {
-    const web = await startEmail({ origin: 'tauri://localhost' });
-    expect(web.status).toBe(403);
-    expect(cookieHeader(web, 'remo_login')).toBeUndefined();
+  test('the Tauri origin is NOT a web-leg origin: the /auth/start web form and /auth/confirm refuse it', async () => {
     const start = await startHosted('tauri://localhost');
     expect(start.headers.get('location')).toBe('/#/login?error=origin_not_allowed');
     expect(cookieHeader(start, 'remo_login')).toBeUndefined();
@@ -548,8 +515,8 @@ describe('Tauri shell leg (remo-code:// deep link, PKCE + app_slug)', () => {
       const p = await pendingCookie({ pkce: true, client: 'app' });
       const res = await appFinalize({ state: p.state, act: 'a' }, { origin: 'tauri://localhost', cookie: `remo_login=${p.token}` });
       expect(res.status).toBe(403);
-      const email = await startEmail({ client: 'app', origin: 'tauri://localhost' });
-      expect(email.status).toBe(403);
+      const start = await startApp({ origin: 'tauri://localhost' });
+      expect(start.status).toBe(403);
       expect(calls).toHaveLength(0);
     } finally {
       (config as any).mobileTauriOriginsEnabled = prev;
@@ -559,14 +526,14 @@ describe('Tauri shell leg (remo-code:// deep link, PKCE + app_slug)', () => {
   test('CORS preflight: allowed only for the exact Tauri origins, never a foreign one, never on web-leg routes', async () => {
     const pre = (path: string, origin: string) =>
       app().request(path, { method: 'OPTIONS', headers: { origin, 'access-control-request-method': 'POST', 'access-control-request-headers': 'content-type' } });
-    for (const path of ['/auth/email', '/auth/app-finalize']) {
+    for (const path of ['/auth/start', '/auth/app-finalize']) {
       const ok = await pre(path, 'tauri://localhost');
       expect(ok.headers.get('access-control-allow-origin')).toBe('tauri://localhost');
       expect(ok.headers.get('access-control-allow-credentials')).toBe('true');
       const bad = await pre(path, 'https://evil.example');
       expect(bad.headers.get('access-control-allow-origin')).toBeNull();
     }
-    for (const path of ['/auth/start', '/auth/confirm', '/auth/logout']) {
+    for (const path of ['/auth/confirm', '/auth/logout']) {
       const r = await pre(path, 'tauri://localhost');
       expect(r.headers.get('access-control-allow-origin')).toBeNull();
     }
@@ -754,16 +721,6 @@ describe('login and logout POSTs accept an exact HUB_ALLOWED_ORIGINS SPA origin'
   afterAll(() => { (config as any).allowedOrigins = savedOrigins; });
   const restore = () => { (config as any).allowedOrigins = savedOrigins; };
 
-  test('POST /auth/email from the SPA origin → accepted, state cookie, CORS for that origin', async () => {
-    try {
-      const res = await startEmail({ origin: SPA });
-      expect(res.status).toBe(200);
-      expect(cookieValue(res, 'remo_login')).not.toBeNull();
-      expect(res.headers.get('access-control-allow-origin')).toBe(SPA);
-      expect(res.headers.get('access-control-allow-credentials')).toBe('true');
-    } finally { restore(); }
-  });
-
   test('POST /auth/start and /auth/logout from the SPA origin → accepted', async () => {
     try {
       const start = await startHosted(SPA);
@@ -784,16 +741,16 @@ describe('login and logout POSTs accept an exact HUB_ALLOWED_ORIGINS SPA origin'
         const out = await app().request('/auth/logout', { method: 'POST', headers: { origin, cookie: '__Host-remo_sid=remo_x' } });
         expect(out.status).toBe(403);
       }
-      const email = await startEmail({ origin: 'https://evil.example' });
-      expect(email.status).toBe(403);
-      expect(email.headers.get('access-control-allow-origin')).toBeNull();
+      const app1 = await startApp({ origin: 'https://evil.example' });
+      expect(app1.status).toBe(403);
+      expect(app1.headers.get('access-control-allow-origin')).toBeNull();
       expect(dalMocks.deleteAuthSession).not.toHaveBeenCalled();
     } finally { restore(); }
   });
 
   test('a missing Origin: login start refused, logout still accepted', async () => {
     try {
-      expect((await startEmail({ origin: null })).status).toBe(403);
+      expect((await startApp({ origin: null })).status).toBe(403);
       expect((await startHosted(null)).headers.get('location')).toBe('/#/login?error=origin_not_allowed');
       const out = await app().request('/auth/logout', { method: 'POST' });
       expect(out.status).toBe(303);

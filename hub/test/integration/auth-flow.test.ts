@@ -4,7 +4,7 @@
  * Exercises the 4 HAPPY-PATH scenarios from
  * `.planning/phases/07-titanium-auth-cutover/TEST-MATRIX.md`:
  *
- *   1. Magic-link login (request-link → callback → session cookie)
+ *   1. Hosted login (/auth/start -> Titanium Labs page -> /auth/callback -> session cookie)
  *   2. License check passes for ACTIVE user (GET /api/profile)
  *   3. Mutating REST with valid CSRF token (PUT /api/profile)
  *   4. Logout invalidates the session cookie
@@ -58,8 +58,6 @@ if (!READY) {
     process.env.JWT_SECRET || 'e2e-jwt-secret-at-least-32-chars-long-x';
   process.env.SESSION_SECRET =
     process.env.SESSION_SECRET || 'e2e-session-secret-at-least-32-chars-x';
-  process.env.MAGIC_LINK_SECRET =
-    process.env.MAGIC_LINK_SECRET || 'e2e-magic-link-secret-at-least-32-chars';
 
   describe('auth-flow integration smoke (Phase 07 cutover)', () => {
     /**
@@ -68,18 +66,15 @@ if (!READY) {
      * `fetch` calls; the assertions are the contract.
      */
 
-    test('row 1 — magic-link happy path mints session cookie', async () => {
-      // POST /api/auth/login/request-link { email }
-      //   → 200 OK
-      //   → emails4agents delivers a callback URL with ?token=<jwt>
-      //
-      // Mock the email sender for the e2e: capture the token from the
-      // outbound email payload instead of polling an inbox.
-      //
-      // GET /api/auth/login/callback?token=<jwt>
-      //   → 302 to /
-      //   → Set-Cookie: __Host-remo_session=…; Secure; HttpOnly; SameSite=Lax
-      expect.assertions(0); // contract placeholder — implement when harness lands
+    test('row 1 - hosted login happy path mints session cookie', async () => {
+      // POST /auth/start (Origin = REMO_PUBLIC_URL)
+      //   -> 303 to https://auth.titaniumlabs.us/login?app_id=remo-code&return_url=...
+      // The user signs in on the Titanium Labs page; the portal returns to
+      // GET /auth/callback?state=<state>&act=<one-time token>
+      //   -> exchange at the portal, link the user
+      //   -> 302 to /
+      //   -> Set-Cookie: __Host-remo_sid=...; Secure; HttpOnly; SameSite=Lax
+      expect.assertions(0); // contract placeholder - implement when harness lands
     });
 
     test('row 5 — license ACTIVE permits GET /api/profile', async () => {

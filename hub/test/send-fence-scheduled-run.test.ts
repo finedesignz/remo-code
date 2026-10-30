@@ -13,7 +13,6 @@ process.env.TITANIUM_KEYGEN_ACCOUNT_ID = process.env.TITANIUM_KEYGEN_ACCOUNT_ID 
 process.env.TITANIUM_KEYGEN_PRODUCT_ID = process.env.TITANIUM_KEYGEN_PRODUCT_ID || 'prod_test_remo'
 process.env.TITANIUM_BYPASS = 'true' // bypass license gate — focus on the fence
 process.env.LICENSE_REQUIRED = 'false'
-process.env.ALLOW_LEGACY_LOGIN = 'true'
 
 import { describe, test, expect, mock, beforeEach } from 'bun:test'
 
@@ -57,7 +56,7 @@ mock.module('../src/auth/jwt.ts', () => ({
 const realSession = await import('../src/session')
 mock.module('../src/session.ts', () => ({
   ...realSession,
-  verifyAuthSessionToken: async (_t: string) => null,
+  verifyAuthSessionToken: async (_t: string) => ({ userId: 'user-1', user: { email: 'a@b.com', role: 'admin' } }),
   verifyAuthSessionCookie: async (_c: any) => null,
 }))
 mock.module('../src/usage/threshold.ts', () => ({
@@ -76,7 +75,7 @@ const { createClientWsData, handleClientMessage } = await import('../src/ws/clie
 
 function fakeWs() {
   const sent: any[] = []
-  const data = createClientWsData()
+  const data = { ...createClientWsData(), cookieToken: 'session-token', csrfCookie: 'abcd1234' }
   const ws: any = {
     data,
     send: (s: string) => { sent.push(JSON.parse(s)); return s.length },
@@ -87,7 +86,7 @@ function fakeWs() {
 }
 
 async function authenticate(ws: any) {
-  await handleClientMessage(ws, JSON.stringify({ type: 'auth', token: 'fake-jwt' }))
+  await handleClientMessage(ws, JSON.stringify({ type: 'auth' }))
 }
 
 beforeEach(() => {
@@ -103,7 +102,7 @@ describe('Bundle 5 fallback: send_message fence while scheduled run active', () 
     await authenticate(ws)
     sent.length = 0
     await handleClientMessage(ws, JSON.stringify({
-      type: 'send_message',
+      type: 'send_message', csrf_token: 'abcd1234',
       id: '11111111-1111-4111-8111-111111111111',
       session_id: 'sess-fence',
       content: 'hello',
@@ -121,7 +120,7 @@ describe('Bundle 5 fallback: send_message fence while scheduled run active', () 
     await authenticate(ws)
     sent.length = 0
     await handleClientMessage(ws, JSON.stringify({
-      type: 'send_message',
+      type: 'send_message', csrf_token: 'abcd1234',
       id: '22222222-2222-4222-8222-222222222222',
       session_id: 'sess-fence',
       content: 'manual reply',

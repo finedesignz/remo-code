@@ -1336,10 +1336,9 @@ CREATE TABLE IF NOT EXISTS telegram_inbound_log (
 CREATE INDEX IF NOT EXISTS idx_telegram_inbound_log_user_recv
   ON telegram_inbound_log(user_id, received_at DESC);
 -- ── Phase 12.1: mobile auth handoff tokens ────────────────────────────────────
--- One-time tokens minted at /api/auth/login/callback?platform=ios|android.
--- The opaque token is delivered to the Tauri shell via `remo-code://auth/callback`
--- deep link; the shell exchanges it via POST /api/auth/finalize-mobile for a
--- normal cookie session. Single-use, 60s TTL.
+-- RETIRED: no route mints or consumes these any more (the own magic link and
+-- /api/auth/finalize-mobile were removed; the Tauri shell logs in through the
+-- Titanium hosted login + POST /auth/app-finalize). Table kept inert, never dropped.
 CREATE TABLE IF NOT EXISTS auth_handoff_tokens (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,

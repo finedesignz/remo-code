@@ -44,7 +44,7 @@ export interface AuthSessionContext {
 // Phase 12.1: detect Tauri WebView origins on the request so we can emit a
 // cross-origin-safe cookie variant (`SameSite=None; Secure; Partitioned`).
 // Browser requests (no Tauri origin) keep the strict `__Host-` + `SameSite=Lax`
-// default. Centralized so the auth callback, finalize-mobile, and re-login
+// default. Centralized so the Titanium callback, app-finalize, and re-login
 // flows make the same decision.
 export function isTauriOrigin(origin: string | null | undefined): boolean {
   if (!origin) return false;

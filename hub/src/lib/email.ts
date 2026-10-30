@@ -1,7 +1,7 @@
 // Minimal emails4agents sender (global rule #7). Pulled out of post-run/email.ts
-// because Phase 07-C needs it from auth too. Returns true on 2xx, false otherwise
-// (never throws — magic-link path tolerates email outages, see request-link
-// always-200 enumeration policy).
+// because notifications need it outside the post-run chain too. Returns true on
+// 2xx, false otherwise (never throws). Sign-in mail is NOT sent from here: the
+// Titanium portal sends it, branded by app_id.
 
 export interface SendEmailInput {
   to: string;

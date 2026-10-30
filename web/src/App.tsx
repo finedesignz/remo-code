@@ -2,8 +2,6 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAuth } from './hooks/useAuth'
 import { useProfile } from './hooks/useProfile'
 import { Login } from './pages/Login'
-import { AuthCallback } from './pages/AuthCallback'
-import { SetupForm } from './components/SetupForm'
 import { HomePage } from './pages/HomePage'
 import { TasksPage } from './pages/TasksPage'
 import { ActivityPage } from './pages/ActivityPage'
@@ -28,7 +26,6 @@ type Route =
   | 'dev-chat-surface'
   | 'dev-mobile-accordion'
   | 'login'
-  | 'auth-callback'
 
 function LoadingScreen() {
   return (
@@ -98,7 +95,6 @@ function resolveHashWithRedirects(): string {
 // hashchange — never inside a render-phase state initializer.
 function getRoute(): Route {
   const hash = window.location.hash || '#/'
-  if (hash.startsWith('#/auth/callback')) return 'auth-callback'
   if (hash.startsWith('#/login')) return 'login'
   if (hash.startsWith('#/tasks')) return 'tasks'
   if (hash.startsWith('#/activity')) return 'activity'
@@ -124,9 +120,8 @@ function getGridTabId(): string | undefined {
 }
 
 export default function App() {
-  const { user, token, loading, signIn, signOut, logout } = useAuth()
+  const { user, token, loading, signOut, logout } = useAuth()
   const { profile, loading: profileLoading, updateProfile } = useProfile(token)
-  const [needsSetup, setNeedsSetup] = useState<boolean | null>(null)
   const [route, setRoute] = useState<Route>(getRoute)
   const [gridTabId, setGridTabId] = useState<string | undefined>(getGridTabId)
   const [licenseRequired, setLicenseRequired] = useState(false)
@@ -136,14 +131,6 @@ export default function App() {
   // re-login can sign out again. Does NOT change the self-terminating behavior:
   // signOut still fires, just not N times per dead-credential burst.
   const signingOut = useRef(false)
-
-  useEffect(() => {
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    fetch(`${hubUrl}/api/setup/status`)
-      .then(r => r.json())
-      .then(data => setNeedsSetup(data.needs_setup))
-      .catch(() => setNeedsSetup(false))
-  }, [])
 
   // Hash-based routing
   useEffect(() => {
@@ -162,9 +149,9 @@ export default function App() {
         // fell through to the authenticated render block, which has no
         // 'login' case → blank screen. signOut() also sets hash=#/login, so
         // the redirect is preserved. Guarded by route so we don't loop while
-        // already on login/auth-callback. apiLogout() inside signOut uses a
+        // already on the login page. apiLogout() inside signOut uses a
         // bare fetch (NOT hubFetch), so it can't re-fire this handler.
-        if (!signingOut.current && route !== 'login' && route !== 'auth-callback') {
+        if (!signingOut.current && route !== 'login') {
           signingOut.current = true
           signOut()
         }
@@ -200,16 +187,8 @@ export default function App() {
     window.location.hash = hash
   }, [])
 
-  if (route === 'auth-callback') {
-    return <AuthCallback />
-  }
-
-  if (loading || needsSetup === null) {
+  if (loading) {
     return <LoadingScreen />
-  }
-
-  if (needsSetup) {
-    return <SetupForm onComplete={() => setNeedsSetup(false)} />
   }
 
   // Defensive: the login route is self-sufficient regardless of token state.
@@ -217,11 +196,11 @@ export default function App() {
   // Login page — never fall through to the authenticated block (which has no
   // 'login' case and would render a blank <WebSocketProvider>).
   if (route === 'login') {
-    return <Login onLegacyAuth={signIn} />
+    return <Login />
   }
 
   if (!token || !user) {
-    return <Login onLegacyAuth={signIn} />
+    return <Login />
   }
 
   if (profileLoading) {
@@ -234,7 +213,7 @@ export default function App() {
     // between useProfile's fetch effect and App's onAuthEvent effect). Treat as
     // unauthenticated and render Login deterministically rather than trapping
     // on LoadingScreen forever. The effect below clears the dead credential.
-    return <Login onLegacyAuth={signIn} />
+    return <Login />
   }
 
   return (

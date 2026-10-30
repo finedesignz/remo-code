@@ -1,7 +1,6 @@
 import type { ServerWebSocket } from 'bun'
 import { ClientInbound, SUBSCRIBE_MAX } from './protocol'
 import { TermFrame, isTermFrameType, isClientToHubTermType } from './term-protocol'
-import { verifyJwt } from '../auth/jwt.ts'
 import { verifyAuthSessionToken } from '../session.ts'
 import { verifyCsrfPair } from '../csrf.ts'
 import { config } from '../config.ts'
@@ -66,7 +65,7 @@ interface ClientWsData {
   cookieToken?: string | null
   csrfCookie?: string | null
   // Auth method (set after auth succeeds) — drives CSRF enforcement decisions.
-  authMethod?: 'session_cookie' | 'legacy_jwt' | null
+  authMethod?: 'session_cookie' | null
   // Phase 07-D parity: license cache on the WS connection. Mirrors the HTTP
   // license-gate semantics on /api/* — mutating WS messages refuse when
   // status !== 'active'. Refreshed opportunistically when stale (TTL matches
@@ -383,19 +382,8 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     }
 
     if (!resolvedUserId) {
-      // Legacy bearer path — gated by soak flag.
-      if (!config.allowLegacyLogin || !msg.token) {
-        ws.close(4001, 'Unauthorized')
-        return
-      }
-      try {
-        const payload = verifyJwt(msg.token)
-        resolvedUserId = payload.sub
-        data.authMethod = 'legacy_jwt'
-      } catch {
-        ws.close(4001, 'Unauthorized')
-        return
-      }
+      ws.close(4001, 'Unauthorized')
+      return
     }
 
     data.userId = resolvedUserId
@@ -457,9 +445,8 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
 
   if (!data.authenticated || !data.userId || !data.clientEntry) return
 
-  // Phase 07-C: CSRF on mutating message types when authed via cookie.
-  // Legacy bearer connections (during soak) are exempt — no csrf cookie was
-  // ever set for them. `subscribe` is read-only and is exempt.
+  // CSRF on mutating message types (the connection is always cookie-authed).
+  // `subscribe` is read-only and is exempt.
   const MUTATING_WS_TYPES = new Set(['send_message', 'permission_response', 'question_response'])
   if (data.authMethod === 'session_cookie' && MUTATING_WS_TYPES.has(msg.type)) {
     const supplied = (msg as any).csrf_token as string | undefined
