@@ -4555,6 +4555,289 @@ To perform this operation, you must be authenticated by means of one of the foll
 apiKeyAuth
 </aside>
 
+## Start an existing offline session (requires ext:read + explicit ext:launch)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/ext/sessions/{id}/launch \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/ext/sessions/{id}/launch',
+{
+  method: 'POST',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/ext/sessions/{id}/launch`
+
+Launches the session's runner on its supervisor through the shared machine-caller primitive: the automation kill switch is consulted first and again immediately before the send, the supervisor is pinned by the session's hostname, and the concurrency slot is reserved atomically. No body: no prompt, path, branch or CLI kind is accepted. The `ext:launch` scope is EXPLICIT-only (a legacy NULL-scope key never has it). Audited as `ext_launch` with actor `external-launch`.
+
+<h3 id="start-an-existing-offline-session-(requires-ext:read-+-explicit-ext:launch)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+
+> Example responses
+
+> 202 Response
+
+```json
+{
+  "launching": true,
+  "run_id": "string"
+}
+```
+
+<h3 id="start-an-existing-offline-session-(requires-ext:read-+-explicit-ext:launch)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|202|[Accepted](https://tools.ietf.org/html/rfc7231#section-6.3.3)|Launch dispatched to the supervisor|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks ext:read or an explicit ext:launch|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such session for this key's user|Inline|
+|409|[Conflict](https://tools.ietf.org/html/rfc7231#section-6.5.8)|Refused (already online, orchestrator, no supervisor, ambiguous supervisor, no project dir, automation halted)|Inline|
+|429|[Too Many Requests](https://tools.ietf.org/html/rfc6585#section-4)|Supervisor concurrency cap reached, or the /api/ext rate limit (30/min)|Inline|
+|500|[Internal Server Error](https://tools.ietf.org/html/rfc7231#section-6.6.1)|Internal error|Inline|
+|503|[Service Unavailable](https://tools.ietf.org/html/rfc7231#section-6.6.4)|The session.start could not be sent to the supervisor|Inline|
+
+<h3 id="start-an-existing-offline-session-(requires-ext:read-+-explicit-ext:launch)-responseschema">Response Schema</h3>
+
+Status Code **202**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» launching|boolean|true|none|none|
+|» run_id|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|launching|true|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» required|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|error|insufficient_scope|
+|required|ext:read|
+|required|ext:launch|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **409**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» scope|string|false|none|automation_halted only: global | user | session|
+|» detail|string|false|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|error|already_online|
+|error|use_orchestrator_start|
+|error|supervisor_offline|
+|error|supervisor_ambiguous|
+|error|no_project_dir|
+|error|automation_halted|
+
+Status Code **429**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» running|integer|false|none|none|
+|» cap|integer|false|none|none|
+
+Status Code **500**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **503**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## Stop a session, keeping its row (requires ext:read + explicit ext:launch)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/ext/sessions/{id}/stop \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/ext/sessions/{id}/stop',
+{
+  method: 'POST',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/ext/sessions/{id}/stop`
+
+The human Disconnect, shared: shutdown sent to the runner, open runs ended with the user-disconnect reason (so the orphan-resume path never restarts it), status offline, row kept. Idempotent. Never blocked by the automation kill switch. Audited as `ext_stop` with actor `external-launch`.
+
+<h3 id="stop-a-session,-keeping-its-row-(requires-ext:read-+-explicit-ext:launch)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "stopped": true,
+  "already_offline": true
+}
+```
+
+<h3 id="stop-a-session,-keeping-its-row-(requires-ext:read-+-explicit-ext:launch)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Stopped; `already_offline` is true when there was nothing to stop|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks ext:read or an explicit ext:launch|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such session for this key's user|Inline|
+|409|[Conflict](https://tools.ietf.org/html/rfc7231#section-6.5.8)|Orchestrator session (use POST /api/orchestrator/start)|Inline|
+
+<h3 id="stop-a-session,-keeping-its-row-(requires-ext:read-+-explicit-ext:launch)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» stopped|boolean|true|none|none|
+|» already_offline|boolean|false|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|stopped|true|
+|already_offline|true|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» required|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|error|insufficient_scope|
+|required|ext:read|
+|required|ext:launch|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **409**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|error|use_orchestrator_start|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
 ## Poll an ask (no new tokens)
 
 > Code samples

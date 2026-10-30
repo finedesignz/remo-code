@@ -61,6 +61,8 @@ catch-all in `hub/src/index.ts` (asserted by `hub/test/mount-order.test.ts`).
 | `GET` | `/api/ext/sessions/:id/state` | active / runner_type / last assistant message / open runs |
 | `POST` | `/api/ext/sessions/:id/ask` | `{question, context?, wait_ms?≤120000, include_transcript?, include_memory?}` → `202 {ask_id, status, answer?…}` |
 | `GET` | `/api/ext/sessions/:id/ask/:ask_id` | `{status, answer, confidence, evidence, reason}` |
+| `POST` | `/api/ext/sessions/:id/launch` | `ext:launch`. No body. `202 {launching: true, run_id}` - see "Launch and stop (ext:launch)" |
+| `POST` | `/api/ext/sessions/:id/stop` | `ext:launch`. No body. `200 {stopped: true}` or `{stopped: true, already_offline: true}` |
 
 `:id` accepts a **session id**, a **repo_ident** (`github://owner/repo`, `path://<abs>`),
 or a bare repo name — Desktop does not have to memorize UUIDs.
@@ -83,12 +85,67 @@ plus an **additive, NULLABLE** `api_keys.scopes TEXT[]`:
   **EXPLICIT-only** — a legacy/NULL-scopes key does NOT satisfy it (gate uses
   `hasExplicitScope`, not the NULL-permissive `hasScope`). Mint a scoped key. See
   [remo-work.md](remo-work.md).
+- `ext:launch` ⇒ start or stop an **existing** session (`POST …/launch`, `POST …/stop`).
+  **EXPLICIT-only**, like `ext:work`, and it must be held **together with `ext:read`**
+  (every `/api/ext` route needs `ext:read` first). See "Launch and stop (ext:launch)".
 
 Mint a read-only key for a checker task:
 
 ```sql
 UPDATE api_keys SET scopes = ARRAY['ext:read'] WHERE id = '<key id>';
 ```
+
+## Launch and stop (ext:launch)
+
+Lets an external server (GSD Console links such a key to the owner's account) start and stop
+the owner's **existing** remo-code sessions with no prompt, path, branch or CLI kind on the
+wire.
+
+**Scope rule.** `ext:launch` is EXPLICIT-only (`hasExplicitScope`): a legacy/NULL-scopes key
+(which includes every supervisor's own spawn credential), an empty-scopes key, and a key with
+only `ext:ask` / `ext:work` are all refused. The key also needs `ext:read`. Mint it from
+Settings > Credentials with the "Start and stop your existing sessions" scope plus `ext:read`;
+a key without `agent` is minted as purpose `external`. A missing scope answers
+`403 {error: "insufficient_scope", required: "ext:read" | "ext:launch"}`.
+
+**`:id` is an exact session id** owned by the key's user and not soft-deleted. Unlike the read
+routes it is NOT resolved by repo_ident or bare repo name: launching the wrong session is worse
+than reading the wrong one. Unknown or another user's id: `404 {error: "session_not_found"}`.
+
+**`POST /api/ext/sessions/:id/launch`** calls the shared machine-caller primitive
+`launchSessionForUser({ userId, sessionId, machine: true })`: the automation kill switch is
+consulted first and again right before the send, the supervisor is pinned by the session's
+hostname, and the concurrency slot is reserved atomically.
+
+| Case | Status | Body |
+|---|---|---|
+| accepted | 202 | `{launching: true, run_id}` |
+| unknown / foreign id | 404 | `{error: "session_not_found"}` |
+| orchestrator session | 409 | `{error: "use_orchestrator_start"}` (use `POST /api/orchestrator/start`) |
+| already running (online, mid-turn or live channel) | 409 | `{error: "already_online"}` |
+| no online supervisor for the session's host | 409 | `{error: "supervisor_offline"}` |
+| several supervisors, none bound | 409 | `{error: "supervisor_ambiguous", detail}` |
+| session has no project dir | 409 | `{error: "no_project_dir"}` |
+| kill switch engaged | 409 | `{error: "automation_halted", scope}` |
+| supervisor at its concurrency cap | 429 | `{error: "at_capacity", running, cap}` |
+| `session.start` could not be sent | 503 | `{error: "dispatch_failed"}` |
+| unexpected failure | 500 | `{error: "internal_error"}` |
+
+**`POST /api/ext/sessions/:id/stop`** is the human `POST /api/sessions/:id/disconnect`, shared:
+both call `disconnectSession` in `hub/src/sessions/disconnect.ts`, so they cannot drift. It
+sends `shutdown` to the runner, ends open runs with the `user_disconnect` reason (the
+orphan-resume path treats it as non-resumable, so a stopped session stays stopped), marks the
+session `offline` and **keeps the row**. It is idempotent (`already_offline: true` when there
+was nothing to stop), is **never** blocked by the kill switch, and refuses an orchestrator
+session with `409 use_orchestrator_start`.
+
+**Audit.** Every launch and stop writes an `auth_events` row (`ext_launch` / `ext_stop`) with
+the key owner as `user_id` and metadata `{key_id, session_id, actor, outcome}`. The actor
+`external-launch` is inferred from the route, never from the request.
+
+Tests: `hub/test/ext-launch.test.ts` (scope matrix, every response above, audit, stop
+semantics), `hub/test/launch-callers-guard.test.ts` (`api/ext.ts` is a classified MACHINE
+caller), `hub/test/api-keys-scopes.test.ts`, `hub/test/api-keys-host-purpose.test.ts`.
 
 ## Reply envelope
 

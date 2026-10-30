@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { createSession, getSession, deleteSession, updateSessionToken, markSessionDisconnected, markSessionOffline, getPendingPrompts, dismissLocalSession, setSessionAutoNudge, setSessionRunnerType, getSessionPtyIdentity, setSessionSkipPermissions, getSessionSkipPermissions, getSessionSkipPermissionsByRepo, getCoolifyAppByRepoKey } from '../db/dal'
+import { createSession, getSession, deleteSession, updateSessionToken, markSessionDisconnected, getPendingPrompts, dismissLocalSession, setSessionAutoNudge, setSessionRunnerType, getSessionPtyIdentity, setSessionSkipPermissions, getSessionSkipPermissions, getSessionSkipPermissionsByRepo, getCoolifyAppByRepoKey } from '../db/dal'
 import { parseGitRemote } from '../lib/repo-key.ts'
 import { getMessagesForSessions } from '../db/chat-tabs-dal.ts'
 import { hashToken } from '../lib/crypto'
@@ -18,6 +18,7 @@ import {
   findSupervisorForSession,
 } from '../ws/supervisor-registry.ts'
 import { releaseSessionSlot, reserveSessionSlot } from '../sessions/budget.ts'
+import { disconnectSession } from '../sessions/disconnect.ts'
 import { listSessionsForUserEnriched } from '../sessions/enrich.ts'
 import { probeGithubAppScope } from '../lib/github-scope.ts'
 import { enqueueCreateGithubRepoJob } from '../lib/github-repo-job.ts'
@@ -238,35 +239,9 @@ sessions.post('/:id/disconnect', async (c) => {
   const session = await getSession(sessionId, userId)
   if (!session) return c.json({ error: 'not_found' }, 404)
 
-  // Tell the runner to shut down (best-effort; offline sessions have no channel).
-  const channel = getChannel(sessionId)
-  if (channel) {
-    try {
-      channel.ws.send(JSON.stringify({ type: 'shutdown', reason: 'user_disconnect' }))
-    } catch {}
-  }
-
-  // End open runs so the slot is freed. Best-effort — never blocks the offline
-  // transition (the supervisor's runner.exit / #223 reconcile is the backstop).
-  try {
-    const { endOpenRunsForSession } = await import('../db/supervisor-dal.ts')
-    await endOpenRunsForSession(sessionId, userId, 'user_disconnect')
-  } catch (err: any) {
-    console.error('[sessions.disconnect] failed to end open runs', err?.message)
-  }
-
-  // KEEP the row — status offline only, never soft-delete.
-  await markSessionOffline(sessionId, userId)
-
-  // Give the runner ~5s to exit gracefully before forcibly closing the socket.
-  if (channel) {
-    setTimeout(() => {
-      const ch = getChannel(sessionId)
-      if (ch) {
-        try { ch.ws.close(4011, 'session disconnected by user') } catch {}
-      }
-    }, 5_000)
-  }
+  // Shutdown, end open runs (user_disconnect), mark offline, delayed socket close -
+  // shared with POST /api/ext/sessions/:id/stop so the two cannot drift.
+  await disconnectSession({ sessionId, userId, status: (session as any).status })
 
   return c.json({ ok: true, status: 'offline' as const })
 })
