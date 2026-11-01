@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext, type ReactNode, createElement } from 'react'
 import { hasSessionCookie, clearAuth } from '../lib/auth.ts'
 import { readCookie } from '../lib/api'
+import { shouldReloadNow } from '../lib/reload-guard'
 
 /** WS messages that mutate server state — must carry csrf_token (cookie echo). */
 const CSRF_REQUIRED_TYPES = new Set([
@@ -250,7 +251,9 @@ export function useWebSocket(token: string | null) {
           if (typeof window !== 'undefined') {
             // Hard reload so React state resets and ProtectedRoute kicks the
             // user to /login. Hash-router-safe.
-            try { window.location.reload() } catch {}
+            try {
+              if (shouldReloadNow(window.sessionStorage, Date.now())) window.location.reload()
+            } catch {}
           }
         }
         return
