@@ -8,8 +8,6 @@
 // Ensure config validation passes BEFORE importing anything that pulls
 // config.ts (the account router → DAL → postgres → config).
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-at-least-32-chars-long-aaaaaaaa'
-// This suite authenticates with a legacy Bearer JWT; that path is opt-in (default off).
-process.env.ALLOW_LEGACY_LOGIN = 'true'
 if (process.env.REMO_E2E_DB_URL) {
   process.env.DATABASE_URL = process.env.REMO_E2E_DB_URL
 }
@@ -28,8 +26,11 @@ let unauthedApp: Hono
 maybe('coolify-webhook-secret endpoints', () => {
   beforeAll(async () => {
     const { account } = await import('../src/api/account.ts')
-    const { signJwt } = await import('../src/auth/jwt.ts')
+    const { createAuthSession } = await import('../src/db/dal.ts')
     const { sql } = await import('../src/db/postgres.ts')
+    const { runMigrations } = await import('../src/db/migrate.ts')
+    // Full schema (users + auth_sessions) so the real cookie-session auth path works.
+    await runMigrations()
 
     // Ensure schema columns exist (idempotent; cheap).
     await sql`CREATE EXTENSION IF NOT EXISTS pgcrypto`
@@ -62,7 +63,8 @@ maybe('coolify-webhook-secret endpoints', () => {
       RETURNING id
     `
     userId = rows[0].id
-    token = signJwt({ sub: userId, email, role: 'user' })
+    // Authenticate as the hosted login does: a real auth_sessions row + the session cookie.
+    token = (await createAuthSession({ userId, ip: '127.0.0.1', userAgent: 'bun-test', ttlSeconds: 300 })).token
 
     app = new Hono()
     app.route('/api/account', account)
@@ -73,12 +75,12 @@ maybe('coolify-webhook-secret endpoints', () => {
 
   async function get(path: string, withAuth: boolean): Promise<Response> {
     const headers: Record<string, string> = {}
-    if (withAuth) headers.Authorization = `Bearer ${token}`
+    if (withAuth) headers.Cookie = `__Host-remo_sid=${token}`
     return app.request(path, { method: 'GET', headers })
   }
   async function post(path: string, withAuth: boolean): Promise<Response> {
     const headers: Record<string, string> = {}
-    if (withAuth) headers.Authorization = `Bearer ${token}`
+    if (withAuth) headers.Cookie = `__Host-remo_sid=${token}`
     return app.request(path, { method: 'POST', headers })
   }
 

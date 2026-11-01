@@ -53,17 +53,17 @@ describe('isCsrfAllowlisted', () => {
   test('allows coolify webhook', () => {
     expect(isCsrfAllowlisted('/api/coolify/webhook/user-123')).toBe(true);
   });
-  test('allows login + logout', () => {
-    expect(isCsrfAllowlisted('/api/auth/login/request-link')).toBe(true);
-    expect(isCsrfAllowlisted('/api/auth/login/callback')).toBe(true);
+  test('allows logout only; the removed /api/auth/login/* routes are not allowlisted', () => {
+    expect(isCsrfAllowlisted('/api/auth/login/request-link')).toBe(false);
+    expect(isCsrfAllowlisted('/api/auth/login/callback')).toBe(false);
     expect(isCsrfAllowlisted('/api/auth/logout')).toBe(true);
   });
   test('does NOT allow scheduled-tasks (must enforce CSRF)', () => {
     expect(isCsrfAllowlisted('/api/scheduled-tasks')).toBe(false);
     expect(isCsrfAllowlisted('/api/scheduled-tasks/abc-123')).toBe(false);
   });
-  test('allows setup + plugin + github callback + health', () => {
-    expect(isCsrfAllowlisted('/api/setup')).toBe(true);
+  test('allows plugin + github callback + health; no password-setup route is allowlisted', () => {
+    expect(isCsrfAllowlisted('/api/setup')).toBe(false);
     expect(isCsrfAllowlisted('/api/plugin/foo')).toBe(true);
     expect(isCsrfAllowlisted('/api/github/callback')).toBe(true);
     expect(isCsrfAllowlisted('/health')).toBe(true);

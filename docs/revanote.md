@@ -316,6 +316,16 @@ single-annotation path below.
   `REVANOTE_FINALIZE_TIMEOUT_MS`, which only decides when the next message force-finalizes), for batch
   members `REMO_REVANOTE_BATCH_RUN_MAX_MS`. After a successful reset the superseded `in_flight` run is
   closed (`superseded_by_retry`).
+- **A Revanote re-send reopens a stranded row** (`hub/src/revanote/reopen.ts`, shared with manual retry).
+  Revanote re-sends a comment when no callback arrives within its own 180-minute reclaim window. The
+  webhook upsert keeps the hub row's status, and the send-time claim only takes `pending`, so a re-sent
+  comment whose row was `dispatched` (dead turn), `failed` or `failed_offline` used to dispatch nothing
+  and send no callback while the hub still answered 202 — Revanote then looped to its 5-attempt cap
+  (2026-10: 22 client comments stuck as `stale_in_progress_lease`). The webhook now runs the same
+  liveness checks as manual retry (in-memory owner, then durable `in_flight` run within its ceiling) and
+  CAS-resets the row to `pending` (`skip_reason='source_redelivered'`) before dispatch. A live turn, a
+  `resolved` row and an `archived` row are never reopened by a re-send. Test:
+  `hub/test/revanote-redelivery-reopen.test.ts`.
 - **Offline grace replay re-gathers the batch.** A batch parked offline is registered once per token, so a
   later arrival with the same `batch_id` is deduped away. The replay therefore no longer re-sends the
   captured member list: it re-reads the CURRENT pending members of that (user, session, mapping,

@@ -1,8 +1,7 @@
 import type { ServerWebSocket } from 'bun'
 import { ClientInbound, SUBSCRIBE_MAX } from './protocol'
 import { TermFrame, isTermFrameType, isClientToHubTermType } from './term-protocol'
-import { verifyJwt } from '../auth/jwt.ts'
-import { verifyAuthSessionToken } from '../session.ts'
+import { verifyAuthSessionToken, parseSessionCookieFromHeader } from '../session.ts'
 import { verifyCsrfPair } from '../csrf.ts'
 import { config } from '../config.ts'
 import { insertMessage, getSession, getUserLicenseFields, canWriteTerminal, getSessionRunnerType, updateSessionStatus } from '../db/dal'
@@ -66,7 +65,7 @@ interface ClientWsData {
   cookieToken?: string | null
   csrfCookie?: string | null
   // Auth method (set after auth succeeds) — drives CSRF enforcement decisions.
-  authMethod?: 'session_cookie' | 'legacy_jwt' | null
+  authMethod?: 'session_cookie' | null
   // Phase 07-D parity: license cache on the WS connection. Mirrors the HTTP
   // license-gate semantics on /api/* — mutating WS messages refuse when
   // status !== 'active'. Refreshed opportunistically when stale (TTL matches
@@ -76,6 +75,32 @@ interface ClientWsData {
   // Phase 20: stable per-connection writer id for the PTY turn lock. A web
   // xterm panel is one writer; Telegram injection is the other ('telegram').
   writerId?: string
+}
+
+/**
+ * Build the per-connection data for a /ws/client upgrade. The session + CSRF
+ * cookies are parsed from the upgrade request's Cookie header so auth works
+ * from the cookie alone. Cookie fields MUST be applied AFTER the defaults:
+ * spreading createClientWsData() last silently reset them to null, so every
+ * cookie-authenticated socket was closed 4001 (the post-Titanium-login reload loop).
+ */
+export function buildClientWsData(cookieHeader: string | null | undefined): ClientWsData {
+  let csrfCookie: string | null = null
+  if (cookieHeader) {
+    for (const part of cookieHeader.split(/;\s*/)) {
+      const eq = part.indexOf('=')
+      if (eq < 0) continue
+      if (part.slice(0, eq) === 'csrf_token') {
+        csrfCookie = decodeURIComponent(part.slice(eq + 1))
+        break
+      }
+    }
+  }
+  return {
+    ...createClientWsData(),
+    cookieToken: parseSessionCookieFromHeader(cookieHeader),
+    csrfCookie,
+  }
 }
 
 export function createClientWsData(): ClientWsData {
@@ -383,19 +408,8 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     }
 
     if (!resolvedUserId) {
-      // Legacy bearer path — gated by soak flag.
-      if (!config.allowLegacyLogin || !msg.token) {
-        ws.close(4001, 'Unauthorized')
-        return
-      }
-      try {
-        const payload = verifyJwt(msg.token)
-        resolvedUserId = payload.sub
-        data.authMethod = 'legacy_jwt'
-      } catch {
-        ws.close(4001, 'Unauthorized')
-        return
-      }
+      ws.close(4001, 'Unauthorized')
+      return
     }
 
     data.userId = resolvedUserId
@@ -457,9 +471,8 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
 
   if (!data.authenticated || !data.userId || !data.clientEntry) return
 
-  // Phase 07-C: CSRF on mutating message types when authed via cookie.
-  // Legacy bearer connections (during soak) are exempt — no csrf cookie was
-  // ever set for them. `subscribe` is read-only and is exempt.
+  // CSRF on mutating message types (the connection is always cookie-authed).
+  // `subscribe` is read-only and is exempt.
   const MUTATING_WS_TYPES = new Set(['send_message', 'permission_response', 'question_response'])
   if (data.authMethod === 'session_cookie' && MUTATING_WS_TYPES.has(msg.type)) {
     const supplied = (msg as any).csrf_token as string | undefined

@@ -120,7 +120,7 @@ machine. Connects to `/ws/agent` with an API key; hosts one CLI subprocess per a
 **PostgreSQL** (self-hosted, on Coolify). Schema in `hub/src/db/schema.sql` — idempotent DDL
 only; **it re-runs in full every hub boot**, so data backfills MUST be one-shot scripts in
 `hub/scripts/`, never inline in schema.sql. Core tables: `users` (identity + Titanium
-`license_status` mirror; `titanium_account_id` login link; legacy `password_hash` behind `ALLOW_LEGACY_LOGIN`), `auth_sessions`
+`license_status` mirror; `titanium_account_id` login link; legacy `password_hash` column kept inert, no login reads it), `auth_sessions`
 (opaque cookie sessions), `sessions`, `messages`, `api_keys`. All queries scoped by `user_id`.
 Subsystem tables are documented in their respective `docs/*.md`.
 
@@ -158,8 +158,7 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
 - **`/ws/agent`** — auth `{ api_key, project_dir, hostname }` (SHA-256 hash); supervisor sends
   `thinking`/`text_delta`/`tool_use`/`tool_result`/`status`/`assistant_message`; hub sends
   `user_message`/`cancel`/`ping`; 30s heartbeat. Keyed by `api_keys`, **never** user license.
-- **`/ws/client`** — auth `{ token }` (opaque session cookie; legacy JWT only when
-  `ALLOW_LEGACY_LOGIN=true`, default false); client sends `send_message`/`subscribe`; hub sends
+- **`/ws/client`** — auth `{}` (identity = the opaque session cookie on the upgrade; no bearer login); client sends `send_message`/`subscribe`; hub sends
   `message`/`session_status`/`session_list` + activity events.
 - Both: 5s auth timeout, 20 conns/IP, per-conn rate limits. `subscribe` accepts single
   `session_id` or multi `session_ids` (cap 12, for grid view).
@@ -187,13 +186,11 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
 - **Supervisor:** Tauri wizard → `%APPDATA%\remo-code\supervisor.json`.
 - **Optional:** `REMO_SESSION_IDLE_GRACE_SECONDS` (default 14400 = 4h; `0` disables idle teardown),
   `REMO_ORCHESTRATOR_AUTOLAUNCH` (`false` disables auto-launch), `TITANIUM_BYPASS` (currently
-  `true` in prod; a LICENSE switch only, it never enables password login — see docs/auth.md),
+  `true` in prod; a LICENSE switch only — see docs/auth.md),
   `COOLIFY_TOKEN`, `E4A_*`.
 - **Login (Titanium hosted login, docs/auth.md):** `REMO_PUBLIC_URL` (hub origin; callback + the
   required `Origin` of every login POST), `REMO_BOOTSTRAP_ADMIN_EMAIL` (first user only, empty
-  users table; no self-signup), `ALLOW_LEGACY_LOGIN` (default **false**: bcrypt login, setup
-  create-admin and Bearer JWTs 404/refused), `LEGACY_MAGIC_LINK_LOGIN` (default off: the own magic
-  link + `finalize-mobile` 404). `SESSION_SECRET` (min 32) also keys the pending-login cookies (HKDF).
+  users table; no self-signup), The Titanium hosted login is the ONLY login (no password, no own magic link, no in-app email form). `SESSION_SECRET` (min 32) also keys the pending-login cookies (HKDF).
 - **Dispatch queue depth + silent-hook ceiling** (`hub/src/dispatch/pipeline.ts`, fix/revanote-session-busy):
   **`REMO_DISPATCH_MAX_WAITERS`** (default **50**) — FIFO waiters per session behind the in-flight run (was 1,
   which dropped every Revanote comment past the second in a burst as `session_busy`); **`REMO_DISPATCH_HOOK_MAX_MS`**
@@ -423,7 +420,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 | Chat UI architecture | [chat-ui-architecture.md](docs/chat-ui-architecture.md) | Reusable `ChatSurface` spec: component tree, hooks, the transport-adapter seam (portable core vs remo-code WS), attachments/mic/streaming/permissions/slash, theming. Canonical chat-UI pattern for all apps. |
 | Codex + rootless | [codex-and-rootless.md](docs/codex-and-rootless.md) | Phase 05 — Codex CLI runner, rootless ambient sessions, instructions sync. |
 | Coolify self-heal | [coolify-webhook-migration.md](docs/coolify-webhook-migration.md) | Phase 06 — Coolify webhook → triage run → optional `github_issue`. |
-| Auth (Titanium) | [auth.md](docs/auth.md) | Titanium hosted login (`hub/src/api/titanium-auth.ts`, state cookie + PKCE + confirm page, appSlug fail-closed, accountId linking, portal logout) + opaque cookie sessions + license gate. Own magic link / bcrypt are legacy flags (off). `TITANIUM_BYPASS` (license only) active in prod. |
+| Auth (Titanium) | [auth.md](docs/auth.md) | Titanium hosted login (`hub/src/api/titanium-auth.ts`, state cookie + PKCE + confirm page, appSlug fail-closed, accountId linking, portal logout) + opaque cookie sessions + license gate. The hosted login is the only login: no password, own magic link, Bearer JWT or in-app email form exists. `TITANIUM_BYPASS` (license only) active in prod. |
 | Revanote | [revanote.md](docs/revanote.md) | Phase 08 — visual-annotation webhook → session → `<<JSON>>` callback (retry curve). **feat/revanote-batch-dispatch:** annotations sharing `payload_raw.batch_id` are coalesced by a DB-state-driven poll (`hub/src/revanote/batch-dispatch.ts` `startBatchSweep`, boot-started) into ONE turn/branch/PR instead of one per comment — `REMO_REVANOTE_BATCH_DEBOUNCE_MS` (default 30000 = 30s, measured from the group's latest arrival), `REMO_REVANOTE_BATCH_POLL_MS` (default 5000), `REMO_REVANOTE_BATCH_RUN_MAX_MS` (default 7200000 = 2h, the batch turn's own finalize/hook ceiling — longer than a single annotation's 20min default). `REMO_REVANOTE_PENDING_REDISPATCH_MS` (default 120000 = 2min — the same sweep also re-dispatches stale `pending` NON-batch annotations that no in-memory queue owns, e.g. after a hub restart). Manual retry (`POST /api/revanote/annotations/:id/retry`, a DB CAS reset) always dispatches one annotation immediately (`forceSingle`), bypassing coalescing. |
 | Orchestrator session | [claude-architecture-notes.md](docs/claude-architecture-notes.md) | Auto-launching root-folder coordinator session; exactly one open per user. |
 | Telegram bridge | [telegram-bridge.md](docs/telegram-bridge.md) | Phase 12 → **Phase 20 transcript-tail**: bidirectional Telegram ↔ session re-sourced from each backend's on-disk transcript (Claude projects JSONL / Codex rollout JSONL + scrape fallback) after the Phase-17 stream-json rip; fail-closed permission/`user_question` keystroke-injection keyed by `(sessionId,requestId)`; per-session PTY write-arbitration turn lock; human-only guard (no automation drives the PTY); no API key. |
