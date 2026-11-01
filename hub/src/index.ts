@@ -80,9 +80,9 @@ import { csrfGuard } from './csrf'
 import { requireRecentAuth } from './auth/reauth'
 import { requireAdmin } from './auth/require-admin'
 import { adminRouter } from './api/admin'
-import { parseSessionCookieFromHeader } from './session'
+
 import {
-  createClientWsData, handleClientOpen, handleClientMessage, handleClientClose,
+  createClientWsData, buildClientWsData, handleClientOpen, handleClientMessage, handleClientClose,
 } from './ws/client'
 import { isAllowedClientWsOrigin } from './ws/origin-guard'
 import {
@@ -615,20 +615,7 @@ const server = Bun.serve({
         // Phase 07-C: extract __Host-remo_sid + csrf_token cookies at the
         // upgrade so /ws/client can authenticate from cookie alone (preferred
         // path) and enforce CSRF on mutating WS messages.
-        const cookieHeader = req.headers.get('cookie')
-        const cookieToken = parseSessionCookieFromHeader(cookieHeader)
-        let csrfCookie: string | null = null
-        if (cookieHeader) {
-          for (const part of cookieHeader.split(/;\s*/)) {
-            const eq = part.indexOf('=')
-            if (eq < 0) continue
-            if (part.slice(0, eq) === 'csrf_token') {
-              csrfCookie = decodeURIComponent(part.slice(eq + 1))
-              break
-            }
-          }
-        }
-        wsData = { type: 'client' as const, ip, cookieToken, csrfCookie, ...createClientWsData() }
+        wsData = { type: 'client' as const, ip, ...buildClientWsData(req.headers.get('cookie')) }
       }
 
       const upgraded = server.upgrade(req, { data: wsData })

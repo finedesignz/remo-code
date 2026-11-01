@@ -1,7 +1,7 @@
 import type { ServerWebSocket } from 'bun'
 import { ClientInbound, SUBSCRIBE_MAX } from './protocol'
 import { TermFrame, isTermFrameType, isClientToHubTermType } from './term-protocol'
-import { verifyAuthSessionToken } from '../session.ts'
+import { verifyAuthSessionToken, parseSessionCookieFromHeader } from '../session.ts'
 import { verifyCsrfPair } from '../csrf.ts'
 import { config } from '../config.ts'
 import { insertMessage, getSession, getUserLicenseFields, canWriteTerminal, getSessionRunnerType, updateSessionStatus } from '../db/dal'
@@ -75,6 +75,32 @@ interface ClientWsData {
   // Phase 20: stable per-connection writer id for the PTY turn lock. A web
   // xterm panel is one writer; Telegram injection is the other ('telegram').
   writerId?: string
+}
+
+/**
+ * Build the per-connection data for a /ws/client upgrade. The session + CSRF
+ * cookies are parsed from the upgrade request's Cookie header so auth works
+ * from the cookie alone. Cookie fields MUST be applied AFTER the defaults:
+ * spreading createClientWsData() last silently reset them to null, so every
+ * cookie-authenticated socket was closed 4001 (the post-Titanium-login reload loop).
+ */
+export function buildClientWsData(cookieHeader: string | null | undefined): ClientWsData {
+  let csrfCookie: string | null = null
+  if (cookieHeader) {
+    for (const part of cookieHeader.split(/;\s*/)) {
+      const eq = part.indexOf('=')
+      if (eq < 0) continue
+      if (part.slice(0, eq) === 'csrf_token') {
+        csrfCookie = decodeURIComponent(part.slice(eq + 1))
+        break
+      }
+    }
+  }
+  return {
+    ...createClientWsData(),
+    cookieToken: parseSessionCookieFromHeader(cookieHeader),
+    csrfCookie,
+  }
 }
 
 export function createClientWsData(): ClientWsData {

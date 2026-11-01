@@ -77,6 +77,11 @@ export function onAuthEvent(handler: AuthEventHandler | null) {
   authEventHandler = handler
 }
 
+/** Raise an auth event from outside hubFetch (e.g. a terminal ws 4001 whose reload was suppressed). */
+export function emitAuthEvent(kind: AuthEventKind): void {
+  authEventHandler?.(kind, { status: 401, body: null, path: '/ws/client', method: 'WS' })
+}
+
 export async function hubFetch<T = any>(
   token: string | null,
   path: string,
