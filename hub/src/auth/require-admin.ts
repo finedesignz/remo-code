@@ -1,6 +1,6 @@
 // Phase 07-G: admin role gate.
 //
-// Assumes authMiddleware (cookie or legacy bearer) already ran and populated
+// Assumes authMiddleware (cookie session) already ran and populated
 // c.var.userRole. Returns 403 if missing/non-admin. No DB lookup — role is
 // already in context.
 

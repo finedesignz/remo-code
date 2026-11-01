@@ -2,10 +2,9 @@ import { z } from 'zod'
 
 // -- Client <-> Hub --
 
-// Phase 07-C: token is now OPTIONAL. When the upgrade carried a valid
-// `__Host-remo_sid` cookie, the client sends `{ type: 'auth' }` (empty) and
-// the server resolves identity from the cookie. Legacy bearer remains supported
-// (gated by ALLOW_LEGACY_LOGIN) for the dual-auth soak window.
+// The client sends `{ type: 'auth' }` (empty) and the server resolves identity from
+// the `__Host-remo_sid` session cookie on the upgrade. A `token` field is accepted
+// for wire compatibility but IGNORED: there is no bearer login.
 export const ClientAuth = z.object({
   type: z.literal('auth'),
   token: z.string().min(1).optional(),

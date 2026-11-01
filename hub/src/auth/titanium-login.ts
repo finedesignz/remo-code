@@ -8,17 +8,18 @@
 // app_slug mandatory).
 //
 // Flow (web):
-//   start   : POST /auth/email (the SPA email form) or POST /auth/start (the
-//             "Continue with Titanium" button) sets the 15-minute `remo_login`
-//             cookie {state[, verifier]} and either asks the portal to email a link
-//             (server-side) or 303s to the hosted login with PKCE.
-//   callback: GET /auth/callback?state&act — state matches the cookie: exchange
+//   start   : POST /auth/start (the "Continue with Titanium" button) sets the
+//             15-minute `remo_login` cookie {state, verifier} and 303s to the hosted
+//             login with PKCE. The portal (not this hub) sends any sign-in email,
+//             branded by app_id.
+//   callback: GET /auth/callback?state&act - state matches the cookie: exchange
 //             (+ code_verifier) and mint; no match: exchange, park the result in the
 //             5-minute `remo_confirm` cookie and ask "Sign in as a***@x?".
-//   confirm : POST /auth/confirm — same Origin + valid cookie + csrf → mint.
-// Flow (app shell, remo-code:// deep link): POST /auth/email {client:"app"} sets the
-//   pending cookie with PKCE and a remo-code://auth/callback return_url; the shell
-//   POSTs {state, act} to /auth/app-finalize from the WebView (same cookie jar).
+//   confirm : POST /auth/confirm - same Origin + valid cookie + csrf -> mint.
+// Flow (app shell, remo-code:// deep link): POST /auth/start {client:"app"} sets the
+//   pending cookie with PKCE and answers the hosted-login URL (remo-code://auth/callback
+//   return_url); the shell POSTs {state, act} to /auth/app-finalize from the WebView
+//   (same cookie jar).
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { config } from "../config.ts";
@@ -27,7 +28,7 @@ import { signPurposeToken, verifyPurposeToken } from "./purpose-tokens.ts";
 /** The Titanium app slug this hub signs in as (registered in the Titanium registry). */
 export const TITANIUM_APP_SLUG = "remo-code";
 
-/** Portal host for the server-to-server calls (send-magic-link, exchange). */
+/** Portal host for the server-to-server exchange call. */
 export const TITANIUM_PORTAL_BASE = "https://license.titaniumlabs.us";
 
 /** Canonical browser-facing login host (hosted login page + logout). */
@@ -70,7 +71,7 @@ export function cookieSecure(): boolean {
  * MOBILE_TAURI_ORIGINS_ENABLED is on (the same first-party list the /api CORS and
  * the Tauri session-cookie variant use, hub/src/session.ts isTauriOrigin). A remote
  * web page cannot send these origins (`tauri:` is not a web scheme, `*.localhost`
- * is loopback-only). Admitted ONLY on the app-shell leg (/auth/email
+ * is loopback-only). Admitted ONLY on the app-shell leg (/auth/start
  * {client:"app"} and /auth/app-finalize), never on a web-leg route.
  */
 export function isAppShellOrigin(origin: string | null | undefined): boolean {
@@ -264,34 +265,6 @@ export async function readPendingConfirm(token: string | undefined | null): Prom
 }
 
 // ── Portal calls ────────────────────────────────────────────────────────────
-
-export type SendMagicLinkResult = { ok: true } | { ok: false; error: "rate_limited" | "send_failed" };
-
-export async function sendTitaniumMagicLink(email: string, returnUrl: string): Promise<SendMagicLinkResult> {
-  let res: Response;
-  try {
-    res = await fetch(`${TITANIUM_PORTAL_BASE}/api/auth/send-magic-link`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, appId: TITANIUM_APP_SLUG, returnUrl }),
-      signal: AbortSignal.timeout(PORTAL_TIMEOUT_MS),
-    });
-  } catch {
-    return { ok: false, error: "send_failed" };
-  }
-  if (res.status === 429) return { ok: false, error: "rate_limited" };
-  if (!res.ok) {
-    // The body is a fixed code (invalid_app_id | invalid_return_url | unknown_app ...);
-    // log the code only, never the email.
-    const code = await res
-      .json()
-      .then((b: any) => (typeof b?.error === "string" ? b.error : "unknown"))
-      .catch(() => "unknown");
-    console.error("[titanium] send-magic-link refused", { status: res.status, code });
-    return { ok: false, error: "send_failed" };
-  }
-  return { ok: true };
-}
 
 export type ExchangeResult =
   | { ok: true; email: string; accountId?: string; licenseKey: string | null }

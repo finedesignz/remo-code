@@ -6,7 +6,6 @@ import { sessions } from './api/sessions'
 import { messages } from './api/messages'
 import { apiKeys } from './api/api-keys'
 import { plugin } from './api/plugin'
-import { setup } from './api/setup'
 import { authRouter } from './api/auth'
 import { titaniumAuthRouter } from './api/titanium-auth'
 import { profile } from './api/profile'
@@ -81,7 +80,6 @@ import { csrfGuard } from './csrf'
 import { requireRecentAuth } from './auth/reauth'
 import { requireAdmin } from './auth/require-admin'
 import { adminRouter } from './api/admin'
-import { recordAuthEvent } from './db/dal'
 import { parseSessionCookieFromHeader } from './session'
 import {
   createClientWsData, handleClientOpen, handleClientMessage, handleClientClose,
@@ -202,69 +200,13 @@ app.route('/', introspectApi)
 // /api/* middleware so Apple/Google can fetch them anonymously.
 app.route('/.well-known', wellKnown)
 
-// Phase 07-G: rate-limit auth endpoints BEFORE mounting the router.
-// request-link: 3/min/IP + 5/hr/email — `silent: true` so the response still
-// looks identical to a normal 200 (login-enumeration prevention). The handler
-// itself checks `c.get('rateLimited')` to skip the email send if needed.
-async function readEmailForRateLimit(c: any): Promise<string | null> {
-  try {
-    const body = await c.req.json()
-    const email = body?.email?.toLowerCase?.().trim?.()
-    return typeof email === 'string' && email.includes('@') ? email : null
-  } catch { return null }
-}
 function ipKey(c: any): string {
   return c.req.header('cf-connecting-ip') || c.req.header('x-real-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'anon'
 }
 
-app.use('/api/auth/login/request-link', async (c, next) => {
-  // We need to read the body but Hono lets us re-read via `c.req.json()` again.
-  const email = await readEmailForRateLimit(c)
-  const mw = rateLimitMulti({
-    silent: true,
-    buckets: [
-      { bucket: 'request-link-ip', windowMs: 60_000, max: 3, keyFn: () => ipKey(c) },
-      { bucket: 'request-link-email', windowMs: 3_600_000, max: 5, keyFn: () => email },
-    ],
-    onLimit: async (cc, bucket) => {
-      try {
-        await recordAuthEvent({
-          eventType: 'rate_limited',
-          ip: ipKey(cc),
-          userAgent: cc.req.header('user-agent') ?? null,
-          metadata: { route: 'request-link', bucket: bucket.bucket, email },
-        })
-      } catch {}
-    },
-  })
-  return mw(c, next)
-})
-
-app.use('/api/auth/login/callback', rateLimit({
-  bucket: 'login-callback',
-  windowMs: 60_000,
-  max: 10,
-  keyFn: ipKey,
-}))
-
 // Titanium hosted login (hub/src/api/titanium-auth.ts). Root-mounted top-level
 // navigations + form posts (NOT /api/*): they do their own Origin / state / CSRF
-// checks. Rate limits mirror the legacy request-link + callback limits; the email
-// start is `silent` so a limited request gets the identical {ok:true} answer and
-// simply sends nothing.
-app.use('/auth/email', async (c, next) => {
-  // A CORS preflight from the Tauri shell sends no email: it must not spend the
-  // 3/min per-IP budget of the real request.
-  if (c.req.method === 'OPTIONS') return next()
-  const email = await readEmailForRateLimit(c)
-  return rateLimitMulti({
-    silent: true,
-    buckets: [
-      { bucket: 'titanium-email-ip', windowMs: 60_000, max: 3, keyFn: () => ipKey(c) },
-      { bucket: 'titanium-email-addr', windowMs: 3_600_000, max: 5, keyFn: () => email },
-    ],
-  })(c, next)
-})
+// checks.
 for (const p of ['/auth/start', '/auth/callback', '/auth/confirm', '/auth/app-finalize']) {
   app.use(p, rateLimit({ bucket: `titanium-${p.slice(6)}`, windowMs: 60_000, max: 10, keyFn: ipKey }))
 }
@@ -272,9 +214,6 @@ app.route('/auth', titaniumAuthRouter)
 
 // Auth routes (no auth required)
 app.route('/api/auth', authRouter)
-
-// Setup routes (no auth required — guarded internally by user count check)
-app.route('/api/setup', setup)
 
 // Public client bootstrap config (single feature-gate boolean, no secrets).
 // Exposes the hub's REMO_PTY_INTERACTIVE flag so the SPA's default human surface
@@ -357,11 +296,9 @@ app.use('/api/*', async (c, next) => {
   // Milestone ASK: /api/ext/* authenticates with an api_key Bearer (already
   // enforced by extApiKeyMiddleware above), never a cookie.
   if (c.req.path.startsWith('/api/ext/')) return next()
-  // Phase 07: public auth endpoints (login request-link, callback, logout, me).
+  // Phase 07: public auth endpoints (logout).
   // The authRouter handles its own auth state internally where needed.
   if (c.req.path.startsWith('/api/auth/')) return next()
-  // Public setup bootstrap (guarded by user-count check inside).
-  if (c.req.path.startsWith('/api/setup')) return next()
   // Public client bootstrap config (single feature-gate boolean, no secrets).
   if (c.req.path.startsWith('/api/client-config')) return next()
   return authMiddleware(c, next)
@@ -383,7 +320,6 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/cloud-hook/')) return next()
   if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
   if (c.req.path.startsWith('/api/auth/')) return next()
-  if (c.req.path.startsWith('/api/setup')) return next()
   if (c.req.path.startsWith('/api/client-config')) return next()
   return requireActiveLicense({ readOnlyOk: true })(c, next)
 })
@@ -569,12 +505,8 @@ function decrementIp(ip: string) {
 // should never take production down. Auth-gated routes fail closed at request
 // time via `verifyLicenseJwt`, which lazily warms on first use. We log
 // loudly so misconfiguration is still obvious in deploy logs.
-if (config.allowLegacyLogin) {
-  console.warn('[auth] ALLOW_LEGACY_LOGIN=true — legacy bcrypt login, /api/setup/create-admin and Bearer JWTs are ENABLED (rollback mode)')
-}
 if (config.titaniumBypass) {
-  // License-only switch: login is unaffected (Titanium hosted login keeps working)
-  // and bypass never enables password login on its own.
+  // License-only switch: login is unaffected (Titanium hosted login keeps working).
   console.warn('[titanium] BYPASS mode active — JWKS warm skipped, license gate disabled (login unaffected)')
 } else if (config.titanium.keygenApiUrl) {
   try {

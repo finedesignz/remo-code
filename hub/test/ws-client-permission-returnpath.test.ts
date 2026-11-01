@@ -19,7 +19,6 @@ process.env.TITANIUM_KEYGEN_PRODUCT_ID = process.env.TITANIUM_KEYGEN_PRODUCT_ID 
 // License gate OPEN for this test — we exercise the forward path, not the gate.
 process.env.TITANIUM_BYPASS = 'true'
 process.env.LICENSE_REQUIRED = 'false'
-process.env.ALLOW_LEGACY_LOGIN = 'true'
 
 import { describe, test, expect, mock, beforeEach } from 'bun:test'
 
@@ -28,7 +27,6 @@ mock.restore()
 const { config } = await import('../src/config') as any
 config.titaniumBypass = true
 config.licenseRequired = false
-config.allowLegacyLogin = true
 
 const getUserLicenseFields = mock(async (_userId: string) => ({
   license_status: 'active',
@@ -53,7 +51,7 @@ mock.module('../src/auth/jwt.ts', () => ({
 const realSession = await import('../src/session')
 mock.module('../src/session.ts', () => ({
   ...realSession,
-  verifyAuthSessionToken: async (_t: string) => null,
+  verifyAuthSessionToken: async (_t: string) => ({ userId: 'user-1', user: { email: 'a@b.com', role: 'admin' } }),
   verifyAuthSessionCookie: async (_c: any) => null,
 }))
 
@@ -70,7 +68,7 @@ _setWriterForTest((line: string) => { try { logLines.push(JSON.parse(line)) } ca
 
 function fakeWs() {
   const sent: any[] = []
-  const data = createClientWsData()
+  const data = { ...createClientWsData(), cookieToken: 'session-token', csrfCookie: 'abcd1234' }
   const ws: any = {
     data,
     send: (s: string) => { sent.push(JSON.parse(s)); return s.length },
@@ -88,7 +86,7 @@ function fakeChannelWs() {
 }
 
 async function authenticate(ws: any) {
-  await handleClientMessage(ws, JSON.stringify({ type: 'auth', token: 'fake-jwt' }))
+  await handleClientMessage(ws, JSON.stringify({ type: 'auth' }))
 }
 
 beforeEach(() => {
@@ -105,7 +103,7 @@ describe('permission/question return-path: web → hub → supervisor channel', 
     registerChannel('sess-1', 'user-1', chWs)
     try {
       await handleClientMessage(ws, JSON.stringify({
-        type: 'permission_response', session_id: 'sess-1',
+        type: 'permission_response', csrf_token: 'abcd1234', session_id: 'sess-1',
         request_id: 'req-abc', approved: true,
       }))
       const fwd = recv.find((m) => m.type === 'permission_response')
@@ -131,7 +129,7 @@ describe('permission/question return-path: web → hub → supervisor channel', 
     registerChannel('sess-1', 'user-1', chWs)
     try {
       await handleClientMessage(ws, JSON.stringify({
-        type: 'question_response', session_id: 'sess-1',
+        type: 'question_response', csrf_token: 'abcd1234', session_id: 'sess-1',
         request_id: 'req-q', answer: 'option-2',
       }))
       const fwd = recv.find((m) => m.type === 'question_response')

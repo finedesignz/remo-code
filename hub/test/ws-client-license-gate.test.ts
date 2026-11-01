@@ -15,7 +15,6 @@ process.env.TITANIUM_KEYGEN_PRODUCT_ID = process.env.TITANIUM_KEYGEN_PRODUCT_ID 
 // Force the gate ON (prod runs with TITANIUM_BYPASS=true; tests must not).
 process.env.TITANIUM_BYPASS = 'false'
 process.env.LICENSE_REQUIRED = 'true'
-process.env.ALLOW_LEGACY_LOGIN = 'true' // permit bearer JWT auth path
 // Short TTL so opportunistic-refresh test runs quickly.
 process.env.TITANIUM_LICENSE_CACHE_TTL_SECONDS = '1'
 
@@ -46,7 +45,6 @@ mock.restore()
 const { config } = await import('../src/config') as any
 config.titaniumBypass = false
 config.licenseRequired = true
-config.allowLegacyLogin = true // bearer JWT auth path used by tests below
 if (!config.titanium) {
   config.titanium = {
     keygenApiUrl: process.env.TITANIUM_KEYGEN_API_URL,
@@ -120,7 +118,7 @@ mock.module('../src/auth/jwt.ts', () => ({
 const realSession = await import('../src/session')
 mock.module('../src/session.ts', () => ({
   ...realSession,
-  verifyAuthSessionToken: async (_t: string) => null,
+  verifyAuthSessionToken: async (_t: string) => ({ userId: 'user-1', user: { email: 'a@b.com', role: 'admin' } }),
   verifyAuthSessionCookie: async (_c: any) => null,
 }))
 
@@ -139,7 +137,7 @@ const { createClientWsData, handleClientMessage } = await import('../src/ws/clie
 
 function fakeWs() {
   const sent: any[] = []
-  const data = createClientWsData()
+  const data = { ...createClientWsData(), cookieToken: 'session-token', csrfCookie: 'abcd1234' }
   const ws: any = {
     data,
     send: (s: string) => { sent.push(JSON.parse(s)); return s.length },
@@ -150,7 +148,7 @@ function fakeWs() {
 }
 
 async function authenticate(ws: any) {
-  await handleClientMessage(ws, JSON.stringify({ type: 'auth', token: 'fake-jwt' }))
+  await handleClientMessage(ws, JSON.stringify({ type: 'auth' }))
 }
 
 
@@ -171,7 +169,7 @@ describe('Bundle 4: WS client license gate', () => {
     await authenticate(ws)
     sent.length = 0
     await handleClientMessage(ws, JSON.stringify({
-      type: 'send_message', id: '11111111-1111-4111-8111-111111111111', session_id: 'sess-1', content: 'hi',
+      type: 'send_message', csrf_token: 'abcd1234', id: '11111111-1111-4111-8111-111111111111', session_id: 'sess-1', content: 'hi',
     }))
     const refused = sent.find(m => m.type === 'send_refused' && m.reason === 'license_inactive')
     expect(refused).toBeUndefined()
@@ -184,7 +182,7 @@ describe('Bundle 4: WS client license gate', () => {
     await authenticate(ws)
     sent.length = 0
     await handleClientMessage(ws, JSON.stringify({
-      type: 'send_message', id: '11111111-1111-4111-8111-111111111111', session_id: 'sess-1', content: 'hi',
+      type: 'send_message', csrf_token: 'abcd1234', id: '11111111-1111-4111-8111-111111111111', session_id: 'sess-1', content: 'hi',
     }))
     const refused = sent.find(m => m.type === 'send_refused')
     expect(refused).toBeDefined()
@@ -214,7 +212,7 @@ describe('Bundle 4: WS client license gate', () => {
     await authenticate(ws)
     sent.length = 0
     await handleClientMessage(ws, JSON.stringify({
-      type: 'permission_response', session_id: 'sess-1', request_id: 'r1', approved: true,
+      type: 'permission_response', csrf_token: 'abcd1234', session_id: 'sess-1', request_id: 'r1', approved: true,
     }))
     const refused = sent.find(m => m.type === 'send_refused')
     expect(refused).toBeDefined()
@@ -228,7 +226,7 @@ describe('Bundle 4: WS client license gate', () => {
     await authenticate(ws)
     sent.length = 0
     await handleClientMessage(ws, JSON.stringify({
-      type: 'question_response', session_id: 'sess-1', request_id: 'r1', answer: 'x',
+      type: 'question_response', csrf_token: 'abcd1234', session_id: 'sess-1', request_id: 'r1', answer: 'x',
     }))
     const refused = sent.find(m => m.type === 'send_refused')
     expect(refused).toBeDefined()
@@ -243,7 +241,7 @@ describe('Bundle 4: WS client license gate', () => {
     await authenticate(ws)
     sent.length = 0
     await handleClientMessage(ws, JSON.stringify({
-      type: 'send_message', id: '11111111-1111-4111-8111-111111111111', session_id: 'sess-1', content: 'first',
+      type: 'send_message', csrf_token: 'abcd1234', id: '11111111-1111-4111-8111-111111111111', session_id: 'sess-1', content: 'first',
     }))
     expect(sent.find(m => m.type === 'send_refused' && m.reason === 'license_inactive')).toBeDefined()
 
@@ -257,7 +255,7 @@ describe('Bundle 4: WS client license gate', () => {
 
     sent.length = 0
     await handleClientMessage(ws, JSON.stringify({
-      type: 'send_message', id: '22222222-2222-4222-8222-222222222222', session_id: 'sess-1', content: 'second',
+      type: 'send_message', csrf_token: 'abcd1234', id: '22222222-2222-4222-8222-222222222222', session_id: 'sess-1', content: 'second',
     }))
     expect(sent.find(m => m.type === 'send_refused' && m.reason === 'license_inactive')).toBeUndefined()
   })

@@ -1,8 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
-  getStoredToken,
-  getStoredUser,
-  storeAuth,
   clearAuth,
   hasSessionCookie,
   apiLogout,
@@ -14,11 +11,8 @@ import {
 interface AuthState {
   user: AuthUser | null
   /**
-   * Bearer token — preserved for the soak window so existing useWebSocket /
-   * useChat call sites that still take a `token` keep functioning. Once cookie
-   * auth is sole source of truth, callers can ignore it. We continue to return
-   * a non-null sentinel ('cookie') when cookie-only so token-truthy checks
-   * still pass.
+   * Always the 'cookie' sentinel when signed in (the session is an HttpOnly
+   * cookie; JS holds no credential), so existing token-truthy checks still pass.
    */
   token: string | null
   loading: boolean
@@ -32,8 +26,7 @@ export function useAuth() {
   useEffect(() => {
     let cancelled = false
     const init = async () => {
-      // Cookie path first — magic-link auth sets the cookie; we hydrate user
-      // from /api/profile.
+      // The hub's /auth/callback sets the session cookie; hydrate the user from /api/profile.
       if (hasSessionCookie()) {
         const user = await fetchCurrentUser()
         if (!cancelled && user) {
@@ -41,28 +34,12 @@ export function useAuth() {
           return
         }
       }
-      // Soak fallback — legacy localStorage bearer flow.
-      const token = getStoredToken()
-      const user = getStoredUser()
-      if (!cancelled) setState({ user, token, loading: false })
+      // No session cookie (or a dead one): signed out. The Titanium hosted login is
+      // the only way in.
+      if (!cancelled) setState({ user: null, token: null, loading: false })
     }
     init()
     return () => { cancelled = true }
-  }, [])
-
-  const signIn = useCallback((token: string | null, user: AuthUser) => {
-    storeAuth(token, user)
-    setState({ user, token: token ?? COOKIE_SENTINEL, loading: false })
-    // Navigate off the login route. The legacy password flow (unlike the
-    // magic-link flow, which redirects through /auth/callback → /) never
-    // changes the hash, so without this the route stays 'login' and App's
-    // `route === 'login'` gate re-renders <Login> forever despite valid auth
-    // — the "clicking Sign in does nothing" trap. Only redirect when actually
-    // sitting on the login route so we never clobber a deliberate deep link.
-    try {
-      const h = window.location.hash
-      if (h === '' || h === '#' || h.startsWith('#/login')) window.location.hash = '#/'
-    } catch {}
   }, [])
 
   const signOut = useCallback(() => {
@@ -87,5 +64,5 @@ export function useAuth() {
     submitFullLogout()
   }, [])
 
-  return { ...state, signIn, signOut, logout }
+  return { ...state, signOut, logout }
 }

@@ -12,6 +12,7 @@ const KEYS = [
   'TITANIUM_BYPASS',
   'ALLOW_LEGACY_LOGIN',
   'LEGACY_MAGIC_LINK_LOGIN',
+  'MAGIC_LINK_SECRET',
   'REMO_PUBLIC_URL',
   'REMO_BOOTSTRAP_ADMIN_EMAIL',
 ] as const
@@ -91,32 +92,13 @@ describe('Titanium env config', () => {
     )
   })
 
-  test('ALLOW_LEGACY_LOGIN defaults to FALSE (password login + legacy JWT off unless set)', async () => {
-    await withEnv({}, async () => {
-      const { config } = await importConfig('legacy-default')
-      expect(config.allowLegacyLogin).toBe(false)
+  test('no password / own-magic-link login switch exists: the legacy env vars are inert', async () => {
+    await withEnv({ ALLOW_LEGACY_LOGIN: 'true', LEGACY_MAGIC_LINK_LOGIN: 'on', MAGIC_LINK_SECRET: 'x'.repeat(40), TITANIUM_BYPASS: 'true' }, async () => {
+      const { config } = await importConfig('no-legacy-login')
+      expect('allowLegacyLogin' in config).toBe(false)
+      expect('legacyMagicLinkLogin' in config).toBe(false)
+      expect('magicLinkSecret' in config).toBe(false)
     })
-    await withEnv({ ALLOW_LEGACY_LOGIN: 'true' }, async () => {
-      const { config } = await importConfig('legacy-on')
-      expect(config.allowLegacyLogin).toBe(true)
-    })
-  })
-
-  test('TITANIUM_BYPASS never turns password login on by itself', async () => {
-    await withEnv({ TITANIUM_BYPASS: 'true' }, async () => {
-      const { config } = await importConfig('bypass-no-legacy')
-      expect(config.titaniumBypass).toBe(true)
-      expect(config.allowLegacyLogin).toBe(false)
-    })
-  })
-
-  test('LEGACY_MAGIC_LINK_LOGIN: only on|true|1|yes enables the own magic link', async () => {
-    for (const [v, want] of [[undefined, false], ['', false], ['off', false], ['false', false], ['on', true], ['ON', true], ['1', true], ['true', true]] as const) {
-      await withEnv({ LEGACY_MAGIC_LINK_LOGIN: v }, async () => {
-        const { config } = await importConfig(`mlink-${v}`)
-        expect(config.legacyMagicLinkLogin).toBe(want)
-      })
-    }
   })
 
   test('REMO_PUBLIC_URL is reduced to an origin; default is the prod app; garbage refuses boot', async () => {

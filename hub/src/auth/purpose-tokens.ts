@@ -10,7 +10,7 @@
 //
 // The dashboard session itself is NOT one of these: it stays the opaque
 // `remo_<random>` token stored as a sha-256 hash in `auth_sessions`
-// (hub/src/session.ts). The legacy own magic link keeps its own MAGIC_LINK_SECRET.
+// (hub/src/session.ts).
 
 import { hkdfSync } from "node:crypto";
 import { SignJWT, jwtVerify, type JWTPayload } from "jose";

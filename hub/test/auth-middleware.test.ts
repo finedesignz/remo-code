@@ -28,7 +28,6 @@ mock.module('../src/auth/jwt.ts', () => ({
 }));
 
 const { authMiddleware } = await import('../src/auth/middleware');
-const { config } = await import('../src/config');
 
 function buildApp() {
   const app = new Hono();
@@ -42,7 +41,6 @@ beforeEach(() => {
   verifyJwt.mockClear();
   verifyAuthSessionCookie.mockImplementation(async () => null);
   verifyJwt.mockImplementation(() => ({ sub: 'u-1', email: 'a@b.com', role: 'admin' }));
-  (config as any).allowLegacyLogin = true;
 });
 
 describe('authMiddleware dual-auth', () => {
@@ -59,28 +57,14 @@ describe('authMiddleware dual-auth', () => {
     expect(body.method).toBe('session_cookie');
   });
 
-  test('no cookie + valid bearer + soak flag on → pass, method=legacy_jwt', async () => {
-    const res = await buildApp().request('/me', { headers: { Authorization: 'Bearer xyz' } });
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.userId).toBe('u-1');
-    expect(body.method).toBe('legacy_jwt');
-  });
-
-  test('no cookie + valid bearer + soak flag OFF → 401', async () => {
-    (config as any).allowLegacyLogin = false;
+  test('a Bearer JWT is never an identity (no legacy bearer login) → 401, never verified', async () => {
     const res = await buildApp().request('/me', { headers: { Authorization: 'Bearer xyz' } });
     expect(res.status).toBe(401);
+    expect(verifyJwt).not.toHaveBeenCalled();
   });
 
   test('no auth at all → 401', async () => {
     const res = await buildApp().request('/me');
-    expect(res.status).toBe(401);
-  });
-
-  test('tampered bearer → 401', async () => {
-    verifyJwt.mockImplementation(() => { throw new Error('bad'); });
-    const res = await buildApp().request('/me', { headers: { Authorization: 'Bearer xyz' } });
     expect(res.status).toBe(401);
   });
 
