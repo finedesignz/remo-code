@@ -34,6 +34,9 @@ import { dispatchAnnotationRow, previewComment } from '../revanote/dispatcher.ts
 import { broadcastRevanoteEvent } from '../ws/registry.ts'
 import { sourceIpFromHeaders } from '../lib/cidr.ts'
 
+/** Hub states a Revanote re-send may reopen (see step 8). */
+const REOPEN_ON_REDELIVERY = new Set<string>(['dispatched', 'failed', 'failed_offline'])
+
 export const revanoteWebhookRoutes = new Hono()
 
 const SKEW_SECONDS = 300
@@ -184,7 +187,24 @@ revanoteWebhookRoutes.post('/webhook/:user_id/:token', async (c) => {
     received_at: toIsoString(ann.received_at),
   })
 
-  void dispatchAnnotationRow(ann).catch((err: any) =>
+  // (8) A re-delivery of a comment the hub already holds. Revanote re-sends when it
+  // got no callback within its reclaim window, so a row left 'dispatched' by a dead
+  // turn, or 'failed', must be reopened; otherwise the send-time claim (pending
+  // only) drops it with no callback and Revanote re-sends again until its attempt
+  // cap. A live turn, a resolved row and an archived row are left alone.
+  let toDispatch = ann
+  if (REOPEN_ON_REDELIVERY.has(ann.status)) {
+    try {
+      const { reopenAnnotationForRedispatch } = await import('../revanote/reopen.ts')
+      const reopen = await reopenAnnotationForRedispatch(ann, userId, 'source_redelivered', { allowResolved: false })
+      if (reopen.reopened) toDispatch = { ...ann, status: 'pending' }
+      else console.log(`[revanote-webhook] redelivery not reopened id=${ann.id} status=${ann.status} reason=${reopen.reason}`)
+    } catch (err: any) {
+      console.warn(`[revanote-webhook] reopen failed id=${ann.id}: ${err?.message ?? err}`)
+    }
+  }
+
+  void dispatchAnnotationRow(toDispatch).catch((err: any) =>
     console.warn(`[revanote-webhook] dispatch failed: ${err?.message ?? err}`),
   )
 
