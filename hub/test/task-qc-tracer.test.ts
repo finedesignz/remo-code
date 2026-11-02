@@ -203,7 +203,7 @@ describe('round 2 (codex new MAJOR 3): only findings the digest RENDERED are mar
     expect(n).toBeGreaterThanOrEqual(TOTAL) // every finding was recorded (a row each)
     const marks = h.fake.state.updatesTo('task_qc_findings')
     expect(marks).toHaveLength(1)
-    const ids: string[] = marks[0]!.values.find((v: any) => Array.isArray(v))
+    const ids = marks[0]!.values.find((v: any) => Array.isArray(v)) as string[]
     // exactly as many rows are marked as blocks were rendered; the cut findings stay unmarked
     expect(ids).toHaveLength(rendered)
     expect(ids.length).toBeLessThan(n)

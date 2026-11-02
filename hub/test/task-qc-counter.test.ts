@@ -101,7 +101,7 @@ beforeEach(() => {
 
 describe('lifetime counter reservation (D-22)', () => {
   test('reserves exactly once with the exact argument object, before the engine', async () => {
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     expect(reserveCalls).toEqual([
       { userId: USER, sessionId: `taskqc:${USER}`, token: RUN, counterKey: `taskqc:${USER}`, actor: 'task-qc' },
     ])
@@ -112,7 +112,7 @@ describe('lifetime counter reservation (D-22)', () => {
 
   test('an exhausted counter finalizes skipped with the returned reason; engine never starts; no email', async () => {
     reserveResult = { ok: false, reason: 'lifetime_inject_exhausted:50>=50' }
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     expect(engineCalls).toHaveLength(0)
     expect(emails).toHaveLength(0)
     expect(finalized).toHaveLength(1)
@@ -122,7 +122,7 @@ describe('lifetime counter reservation (D-22)', () => {
 
   test('a counter error (fail closed) also skips before the engine', async () => {
     reserveResult = { ok: false, reason: 'lifetime_counter_error' }
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     expect(engineCalls).toHaveLength(0)
     expect(finalized[0]).toMatchObject({ status: 'skipped', error: 'lifetime_counter_error' })
   })
@@ -132,17 +132,17 @@ describe('lifetime counter reservation (D-22)', () => {
       throw new Error('statement timeout')
     }
     fake.onInsert(/INSERT INTO task_qc_findings/, [{ id: 'e1' }])
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     expect(releaseCalls).toEqual([{ counterKey: `taskqc:${USER}`, token: RUN }])
     expect(events.indexOf('release')).toBeGreaterThan(events.indexOf('engine'))
     releaseCalls.length = 0
     engine = async () => withFinding()
-    await sendTaskQcTask(TASK, { runId: 'run-78', userId: USER })
+    await sendTaskQcTask(TASK, { runId: 'run-78', userId: USER, claimedAt: Date.now() })
     expect(releaseCalls).toHaveLength(0)
   })
 
   test('the sender takes no per-session rate: reservation is not rate enforced and uses the user key as the session id', async () => {
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     expect(reserveCalls[0].sessionId).toBe(reserveCalls[0].counterKey)
   })
 })
@@ -154,7 +154,7 @@ describe('injected kill-switch check (D-21, F2-B6)', () => {
       expect(r).toEqual({ halted: false })
       return empty()
     }
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     expect(haltCalls).toEqual([{ userId: USER }])
     expect('sessionId' in haltCalls[0]).toBe(false)
   })
@@ -166,7 +166,7 @@ describe('injected kill-switch check (D-21, F2-B6)', () => {
       seen = await a.deps.haltCheck()
       return withFinding()
     }
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     expect(seen).toEqual({ halted: true })
     expect(emails).toHaveLength(1)
     expect(finalized[0]).toMatchObject({ status: 'success' })
@@ -174,8 +174,8 @@ describe('injected kill-switch check (D-21, F2-B6)', () => {
   })
 
   test('origin follows the trigger', async () => {
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, isManual: true })
-    await sendTaskQcTask(TASK, { runId: 'r2', userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, isManual: true, claimedAt: Date.now() })
+    await sendTaskQcTask(TASK, { runId: 'r2', userId: USER, claimedAt: Date.now() })
     expect(engineCalls.map((c) => c.origin)).toEqual(['run_now', 'schedule'])
   })
 })
@@ -183,7 +183,7 @@ describe('injected kill-switch check (D-21, F2-B6)', () => {
 describe('digest and finalize', () => {
   test('a run with findings sends one digest and finalizes success with counts only', async () => {
     engine = async () => withFinding()
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     expect(emails).toHaveLength(1)
     expect(emails[0].to).toBe('owner@example.com')
     expect(finalized).toHaveLength(1)
@@ -193,7 +193,7 @@ describe('digest and finalize', () => {
   })
 
   test('zero findings: zero emails, success', async () => {
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     expect(emails).toHaveLength(0)
     expect(JSON.parse(finalized[0].output_snippet)).toEqual({ findings: 0, proposals: 0, digest_delivered: false })
   })
@@ -206,7 +206,7 @@ describe('digest and finalize', () => {
       truncated: false,
       applied: [{ finding: f, fix: 'normalize_timezone', taskId: 'audited-1', before: { timezone: 'X' }, after: { timezone: 'UTC' }, rollbackSql: "UPDATE scheduled_tasks SET timezone = 'X' WHERE id = 'audited-1'" }],
     })
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     expect(emails).toHaveLength(1)
     expect(emails[0].text).toContain("UPDATE scheduled_tasks SET timezone = 'X'")
   })
@@ -214,7 +214,7 @@ describe('digest and finalize', () => {
   test('email returning false finalizes success with digest_delivered false and a warn; no retry', async () => {
     engine = async () => withFinding()
     emailOk = false
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     expect(emails).toHaveLength(1)
     expect(finalized[0].status).toBe('success')
     expect(JSON.parse(finalized[0].output_snippet).digest_delivered).toBe(false)
