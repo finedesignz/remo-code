@@ -71,8 +71,11 @@ export async function deliverOwnerEmailForRun(runId: string, deps: OwnerEmailDep
   try {
     if (!(await deps.hasObligation(runId))) return false;
   } catch (err: any) {
-    log(`obligation probe failed run=${runId}: ${err?.message ?? err}`);
-    return false;
+    // Fail toward suppression: if an obligation exists the sweep delivers it, and returning false
+    // here would also send the legacy default email (a duplicate). The obligation is written only
+    // when the default failure email applies, so suppression never drops a notification.
+    log(`obligation probe failed run=${runId} (suppressing the legacy email; the sweep delivers any obligation): ${err?.message ?? err}`);
+    return true;
   }
   try {
     const claimed = await deps.claimByRun(runId);

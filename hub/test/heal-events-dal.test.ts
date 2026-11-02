@@ -188,6 +188,11 @@ describe('pruneHealEvents', () => {
     expect(calls[0].text).toMatch(/DELETE FROM heal_events WHERE id IN \(\s*SELECT id FROM heal_events WHERE created_at </)
     expect(calls[0].text).toMatch(/LIMIT 100/)
   })
+  test('never deletes a row whose owner-email obligation is undelivered', async () => {
+    const { exec, calls } = fake()
+    await pruneHealEvents(48, exec, NOW)
+    expect(calls[0].text).toMatch(/NOT \(owner_email IS NOT NULL AND owner_email_delivered_at IS NULL\)/)
+  })
   test('non-finite retention falls back to the 24h floor', async () => {
     const { exec, calls } = fake()
     await pruneHealEvents(Number.NaN, exec, NOW)
