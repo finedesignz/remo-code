@@ -10,6 +10,7 @@
  *   scopes = {'agent'}         → may authenticate a supervisor/agent socket + /api/plugin
  *   scopes = {'ext:read'}      → may read the external /api/ext surface
  *   scopes = {'ext:ask'}       → may spend tokens via POST /api/ext/…/ask
+ *   scopes = {'ext:launch'}    → (with ext:read) may start/stop an existing session; EXPLICIT-only
  *
  * SECURITY: the whole point of the milestone is that a Claude-Desktop-style
  * external consumer gets an `ext:*`-only key and therefore CANNOT spawn CLI
@@ -27,6 +28,14 @@ export const SCOPE_EXT_WORK = 'ext:work'
  * legacy/NULL key must never double as it, and it can do nothing else.
  */
 export const SCOPE_CLOUD_HOOK = 'cloud:hook'
+/**
+ * Start or stop the user's EXISTING sessions through POST /api/ext/sessions/:id/launch
+ * and /stop. EXPLICIT-only (`hasExplicitScope`): launching spawns a CLI process on the
+ * owner's machine, so a legacy/NULL key (which includes every supervisor's own spawn
+ * credential) must never acquire it implicitly. Narrow by design: no prompt, path, branch
+ * or CLI kind travels with the request - only an exact session id the key's user owns.
+ */
+export const SCOPE_EXT_LAUNCH = 'ext:launch'
 
 /**
  * Read / change the user's Settings (profile, usage + cost controls, notify prefs,
@@ -42,6 +51,7 @@ export const ALL_SCOPES = [
   SCOPE_EXT_READ,
   SCOPE_EXT_ASK,
   SCOPE_EXT_WORK,
+  SCOPE_EXT_LAUNCH,
   SCOPE_CLOUD_HOOK,
   SCOPE_SETTINGS_READ,
   SCOPE_SETTINGS_WRITE,

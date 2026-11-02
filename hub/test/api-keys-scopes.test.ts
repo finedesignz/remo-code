@@ -10,7 +10,7 @@ import { describe, it, expect, afterAll, mock } from 'bun:test'
 import { Hono } from 'hono'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { hasScope, hasExplicitScope, normalizeScopes, SCOPE_AGENT, SCOPE_EXT_ASK, SCOPE_EXT_READ, SCOPE_EXT_WORK } from '../src/auth/scopes.ts'
+import { hasScope, hasExplicitScope, normalizeScopes, SCOPE_AGENT, SCOPE_EXT_ASK, SCOPE_EXT_READ, SCOPE_EXT_WORK, SCOPE_EXT_LAUNCH } from '../src/auth/scopes.ts'
 
 const SRC = join(import.meta.dir, '..', 'src')
 
@@ -36,6 +36,18 @@ describe('scopes helper', () => {
     expect(hasExplicitScope([], SCOPE_EXT_WORK)).toBe(false)
     expect(hasExplicitScope([SCOPE_EXT_READ], SCOPE_EXT_WORK)).toBe(false)
     expect(hasExplicitScope([SCOPE_EXT_READ, SCOPE_EXT_WORK], SCOPE_EXT_WORK)).toBe(true)
+  })
+
+  it('hasExplicitScope: ext:launch is explicit-only - NULL/empty/other scopes never satisfy', () => {
+    expect(SCOPE_EXT_LAUNCH).toBe('ext:launch')
+    expect(hasExplicitScope(null, SCOPE_EXT_LAUNCH)).toBe(false)
+    expect(hasExplicitScope([], SCOPE_EXT_LAUNCH)).toBe(false)
+    expect(hasExplicitScope([SCOPE_AGENT, SCOPE_EXT_READ, SCOPE_EXT_ASK, SCOPE_EXT_WORK], SCOPE_EXT_LAUNCH)).toBe(false)
+    expect(hasExplicitScope([SCOPE_EXT_READ, SCOPE_EXT_LAUNCH], SCOPE_EXT_LAUNCH)).toBe(true)
+  })
+
+  it('normalizeScopes accepts ext:launch as a known scope', () => {
+    expect(normalizeScopes(['ext:read', 'ext:launch'])).toEqual({ ok: true, scopes: ['ext:read', 'ext:launch'] })
   })
 
   it('normalizeScopes accepts ext:work as a known scope', () => {
@@ -171,6 +183,54 @@ describe('/api/ext scope enforcement (milestone ASK middleware × SKEY scopes)',
   it('a key with EXPLICIT ext:work passes the /work scope gate', async () => {
     const app = await extApp(['ext:read', 'ext:work'])
     expect((await app.request('/api/ext/work', { method: 'POST', ...auth })).status).toBe(200)
+  })
+})
+
+describe('/api/ext launch + stop need EXPLICIT ext:launch', () => {
+  async function extApp(scopes: string[] | null) {
+    mock.module(join(SRC, 'db/ask-dal.ts'), () => ({
+      verifyApiKeyForExt: async () => ({ id: 'k1', user_id: 'u1', scopes }),
+      hasScope: (s: string[] | null | undefined, scope: string) => hasScope(s, scope),
+    }))
+    const { extApiKeyMiddleware } = await import(
+      `../src/auth/ext-api-key-middleware.ts?extlaunch=${encodeURIComponent(JSON.stringify(scopes))}`
+    )
+    const app = new Hono()
+    app.use('/api/ext/*', extApiKeyMiddleware)
+    app.post('/api/ext/sessions/s1/launch', (c) => c.json({ ok: true, actor: c.get('actor') }))
+    app.post('/api/ext/sessions/s1/stop', (c) => c.json({ ok: true, actor: c.get('actor') }))
+    return app
+  }
+  const post = (app: Hono, path: string) =>
+    app.request(path, { method: 'POST', headers: { Authorization: 'Bearer remokey_x' } })
+
+  it.each([
+    ['legacy NULL scopes', null],
+    ['empty array', []],
+    ['ext:read only', ['ext:read']],
+    ['ext:read + ext:ask + ext:work', ['ext:read', 'ext:ask', 'ext:work']],
+  ])('%s -> 403 required ext:launch on launch and stop', async (_n, scopes) => {
+    const app = await extApp(scopes as string[] | null)
+    for (const path of ['/api/ext/sessions/s1/launch', '/api/ext/sessions/s1/stop']) {
+      const res = await post(app, path)
+      expect(res.status).toBe(403)
+      expect(await res.json()).toEqual({ error: 'insufficient_scope', required: 'ext:launch' })
+    }
+  })
+
+  it('ext:launch without ext:read -> 403 required ext:read', async () => {
+    const res = await post(await extApp(['ext:launch']), '/api/ext/sessions/s1/launch')
+    expect(res.status).toBe(403)
+    expect(await res.json()).toEqual({ error: 'insufficient_scope', required: 'ext:read' })
+  })
+
+  it('ext:read + ext:launch passes, with the server-inferred actor external-launch', async () => {
+    const app = await extApp(['ext:read', 'ext:launch'])
+    for (const path of ['/api/ext/sessions/s1/launch', '/api/ext/sessions/s1/stop']) {
+      const res = await post(app, path)
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ ok: true, actor: 'external-launch' })
+    }
   })
 })
 

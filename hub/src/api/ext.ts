@@ -8,7 +8,8 @@
  *   (c) ASK it a question and get an ANSWER back (PAID — spends tokens; escalate
  *       only when the free reads are inconclusive).
  *
- * Auth: `api_keys` + the additive nullable `scopes` column (ext:read / ext:ask).
+ * Auth: `api_keys` + the additive nullable `scopes` column (ext:read / ext:ask /
+ * ext:work / ext:launch).
  * Mounted BEFORE the cookie/JWT catch-all — see the MOUNT-ORDER INVARIANT in
  * hub/src/index.ts and the assertion in hub/test/mount-order.test.ts.
  *
@@ -20,6 +21,9 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import { randomBytes } from 'node:crypto'
 import { sql } from '../db/postgres.ts'
+import { getSession, recordAuthEvent } from '../db/dal.ts'
+import { launchSessionForUser } from '../telegram/launch.ts'
+import { disconnectSession } from '../sessions/disconnect.ts'
 import {
   findSupervisorForSession,
   listOnlineSupervisorIdsForUser,
@@ -198,6 +202,119 @@ ext.get('/sessions/:id/state', async (c) => {
     last_assistant_message_at: lastAssistant[0]?.created_at ?? null,
     open_session_runs: Number(openRuns[0]?.n ?? 0),
   })
+})
+
+// ── Launch (gsd-console Phase 8, scope ext:launch) — start/stop an EXISTING session ──
+//
+// Narrow by construction: the only input is the exact session id in the path. No prompt,
+// path, branch or CLI kind travels with the request, and `:id` is NOT resolved through
+// `resolveSession` (repo-ident / bare-name matching): launching the wrong session is worse
+// than reading the wrong one. The scope (explicit-only) is enforced in
+// auth/ext-api-key-middleware.ts; the actor `external-launch` is server-inferred there.
+
+/** Exact session id owned by the key's user, not soft-deleted. */
+async function findOwnedSession(userId: string, id: string) {
+  return (await getSession(id, userId)) as
+    | { id: string; status: string; is_orchestrator: boolean | null }
+    | null
+}
+
+/** Best-effort audit row (auth_events.event_type is free TEXT). Never changes the response. */
+async function auditLaunchEvent(
+  c: { get: (k: string) => unknown },
+  eventType: 'ext_launch' | 'ext_stop',
+  sessionId: string,
+  outcome: string,
+): Promise<void> {
+  try {
+    await recordAuthEvent({
+      userId: c.get('userId') as string,
+      eventType,
+      metadata: {
+        key_id: (c.get('apiKeyId') as string) ?? null,
+        session_id: sessionId,
+        actor: (c.get('actor') as string) ?? null,
+        outcome,
+      },
+    })
+  } catch (err: any) {
+    console.warn(`[ext.audit] ${eventType} write failed: ${err?.message ?? err}`)
+  }
+}
+
+ext.post('/sessions/:id/launch', async (c) => {
+  const userId = c.get('userId') as string
+
+  const session = await findOwnedSession(userId, c.req.param('id'))
+  if (!session) return c.json({ error: 'session_not_found' }, 404)
+
+  // The orchestrator has its own launcher (POST /api/orchestrator/start).
+  if (session.is_orchestrator === true) {
+    await auditLaunchEvent(c, 'ext_launch', session.id, 'use_orchestrator_start')
+    return c.json({ error: 'use_orchestrator_start' }, 409)
+  }
+  // Already running (online, mid-turn, or holding a live channel): nothing to start.
+  if (session.status !== 'offline' || getChannel(session.id) != null) {
+    await auditLaunchEvent(c, 'ext_launch', session.id, 'already_online')
+    return c.json({ error: 'already_online' }, 409)
+  }
+
+  // The shared MACHINE-caller primitive: kill switch (twice), hostname pin, atomic
+  // concurrency reservation. Pinned by test/launch-callers-guard.test.ts.
+  const res = await launchSessionForUser({ userId, sessionId: session.id, machine: true })
+
+  if (res.ok) {
+    await auditLaunchEvent(c, 'ext_launch', session.id, 'accepted')
+    return c.json({ launching: true, run_id: res.runId }, 202)
+  }
+
+  const reason = res.reason
+  await auditLaunchEvent(c, 'ext_launch', session.id, reason)
+  if (reason.startsWith('automation_halted:')) {
+    return c.json({ error: 'automation_halted', scope: reason.slice('automation_halted:'.length) }, 409)
+  }
+  switch (res.reason) {
+    case 'session_not_found':
+      return c.json({ error: 'session_not_found' }, 404)
+    case 'no_project_dir':
+      return c.json({ error: 'no_project_dir' }, 409)
+    case 'no_online_supervisor':
+      return c.json({ error: 'supervisor_offline' }, 409)
+    case 'supervisor_ambiguous':
+      return c.json({ error: 'supervisor_ambiguous', detail: `${res.count} supervisors are online and none is bound to this session` }, 409)
+    case 'at_capacity':
+      return c.json({ error: 'at_capacity', running: res.running, cap: res.cap }, 429)
+    case 'send_failed':
+      console.error(`[ext.launch] session.start send failed session=${session.id}: ${res.error}`)
+      return c.json({ error: 'dispatch_failed' }, 503)
+    default:
+      console.error(`[ext.launch] internal error session=${session.id}: ${(res as any).error}`)
+      return c.json({ error: 'internal_error' }, 500)
+  }
+})
+
+// Stop = the human Disconnect, shared (sessions/disconnect.ts): shutdown to the channel,
+// open runs ended with the user_disconnect reason (so orphan-resume never restarts it),
+// status offline, row KEPT. Idempotent, and NEVER consults the automation kill switch: a
+// halt must never prevent a stop.
+ext.post('/sessions/:id/stop', async (c) => {
+  const userId = c.get('userId') as string
+
+  const session = await findOwnedSession(userId, c.req.param('id'))
+  if (!session) return c.json({ error: 'session_not_found' }, 404)
+
+  if (session.is_orchestrator === true) {
+    await auditLaunchEvent(c, 'ext_stop', session.id, 'use_orchestrator_start')
+    return c.json({ error: 'use_orchestrator_start' }, 409)
+  }
+
+  const { alreadyOffline } = await disconnectSession({
+    sessionId: session.id,
+    userId,
+    status: session.status,
+  })
+  await auditLaunchEvent(c, 'ext_stop', session.id, alreadyOffline ? 'already_offline' : 'stopped')
+  return c.json(alreadyOffline ? { stopped: true, already_offline: true } : { stopped: true })
 })
 
 // ── Ask (Phase 2) — spends tokens, rides every non-bypassable gate ───────────

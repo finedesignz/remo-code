@@ -1153,6 +1153,77 @@ openapi.openapi(taskTemplatesRoute, (c) => {
     },
   });
 
+  // ext:launch (gsd-console Phase 8): start/stop an EXISTING session. Exact session id only
+  // (no repo_ident / bare-name matching), no request body.
+  const LaunchParam = z.object({
+    id: z.string().openapi({
+      param: { name: "id", in: "path" },
+      description: "Exact session id owned by the key's user (no repo_ident or repo-name matching)",
+    }),
+  });
+  const LaunchRefusal = z.object({
+    error: z.enum([
+      "already_online",
+      "use_orchestrator_start",
+      "supervisor_offline",
+      "supervisor_ambiguous",
+      "no_project_dir",
+      "automation_halted",
+    ]),
+    scope: z.string().optional().openapi({ description: "automation_halted only: global | user | session" }),
+    detail: z.string().optional(),
+  });
+  const MissingScope = z.object({
+    error: z.literal("insufficient_scope"),
+    required: z.enum(["ext:read", "ext:launch"]),
+  });
+
+  reg.registerPath({
+    method: "post",
+    path: "/api/ext/sessions/{id}/launch",
+    summary: "Start an existing offline session (requires ext:read + explicit ext:launch)",
+    description:
+      "Launches the session's runner on its supervisor through the shared machine-caller primitive: the automation kill switch is consulted first and again immediately before the send, the supervisor is pinned by the session's hostname, and the concurrency slot is reserved atomically. No body: no prompt, path, branch or CLI kind is accepted. The `ext:launch` scope is EXPLICIT-only (a legacy NULL-scope key never has it). Audited as `ext_launch` with actor `external-launch`.",
+    ...base,
+    request: { params: LaunchParam },
+    responses: {
+      202: {
+        description: "Launch dispatched to the supervisor",
+        ...json(z.object({ launching: z.literal(true), run_id: z.string() })),
+      },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      403: { description: "Key lacks ext:read or an explicit ext:launch", ...json(MissingScope) },
+      404: { description: "No such session for this key's user", ...json(Err) },
+      409: { description: "Refused (already online, orchestrator, no supervisor, ambiguous supervisor, no project dir, automation halted)", ...json(LaunchRefusal) },
+      429: {
+        description: "Supervisor concurrency cap reached, or the /api/ext rate limit (30/min)",
+        ...json(z.object({ error: z.string(), running: z.number().int().optional(), cap: z.number().int().optional() })),
+      },
+      500: { description: "Internal error", ...json(Err) },
+      503: { description: "The session.start could not be sent to the supervisor", ...json(Err) },
+    },
+  });
+
+  reg.registerPath({
+    method: "post",
+    path: "/api/ext/sessions/{id}/stop",
+    summary: "Stop a session, keeping its row (requires ext:read + explicit ext:launch)",
+    description:
+      "The human Disconnect, shared: shutdown sent to the runner, open runs ended with the user-disconnect reason (so the orphan-resume path never restarts it), status offline, row kept. Idempotent. Never blocked by the automation kill switch. Audited as `ext_stop` with actor `external-launch`.",
+    ...base,
+    request: { params: LaunchParam },
+    responses: {
+      200: {
+        description: "Stopped; `already_offline` is true when there was nothing to stop",
+        ...json(z.object({ stopped: z.literal(true), already_offline: z.literal(true).optional() })),
+      },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      403: { description: "Key lacks ext:read or an explicit ext:launch", ...json(MissingScope) },
+      404: { description: "No such session for this key's user", ...json(Err) },
+      409: { description: "Orchestrator session (use POST /api/orchestrator/start)", ...json(z.object({ error: z.literal("use_orchestrator_start") })) },
+    },
+  });
+
   reg.registerPath({
     method: "get",
     path: "/api/ext/sessions/{id}/ask/{ask_id}",
