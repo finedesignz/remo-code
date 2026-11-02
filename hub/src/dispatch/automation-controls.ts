@@ -493,6 +493,15 @@ export async function releaseInject(args: { counterKey: string; token: string })
 }
 
 /**
+ * Strict release: stamps released_at while null and THROWS on a database error, so a caller that
+ * owes a retry (the heal sweep / route) can tell "released" from "still reserved". Idempotent: a
+ * row that never reserved, or is already released, matches nothing and resolves.
+ */
+export async function releaseInjectStrict(args: { counterKey: string; token: string }): Promise<void> {
+  await stampReleased(args)
+}
+
+/**
  * Claim a one-shot page for (counter key, kind, reset epoch) through a ledger
  * page row. Exactly one concurrent caller gets claimed:true. After a reset the
  * epoch changes, so the next claim succeeds. Page rows never count as injects.
