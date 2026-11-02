@@ -870,7 +870,7 @@ export async function appendToMessage(messageId: string, delta: string) {
 // throttle flush or network blips) and flips status to 'complete'.
 export async function finalizeMessage(messageId: string, content: string, turnId: string | null = null) {
   const rows = await sql`
-    UPDATE messages SET content = ${content}, status = 'complete', turn_id = ${turnId}
+    UPDATE messages SET content = ${content}, status = 'complete', turn_id = ${turnId}, completed_at = now()
     WHERE id = ${messageId}
     RETURNING *
   `;

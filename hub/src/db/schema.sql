@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS turn_id TEXT;
+-- Completion time of an assistant turn (set when a streaming placeholder is finalized). created_at is the
+-- placeholder insert time, so the proof attribution grace keys on COALESCE(completed_at, created_at).
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS api_keys (
   id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,

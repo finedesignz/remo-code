@@ -277,12 +277,15 @@ export async function sumSessionTokensSince(
   // the SAME (session_id, turn_id). An aggregate count could be masked by an extra row from another
   // turn; a per-turn anti-join cannot. A message with no turn_id (older supervisor, un-correlatable)
   // has no matching row by construction and fails closed. The grace window keeps a usage_event that
-  // is merely in flight right behind its assistant_message from reading as a loss.
+  // is merely in flight right behind its assistant_message from reading as a loss. The grace keys on the
+  // COMPLETION time (messages.completed_at, set by finalizeMessage), not created_at: created_at is the
+  // streaming placeholder insert, so a turn that streams >120s would otherwise be judged lost in the gap
+  // between its finalize and its usage_event (QC repair re-check, false-positive fail-closed).
   const gap = await sql<{ unmatched_turns: string | null }[]>`
     SELECT COUNT(*)::text AS unmatched_turns
     FROM messages m
     WHERE m.session_id = ${sessionId} AND m.role = 'assistant' AND m.status = 'complete'
-      AND m.created_at >= ${since} AND m.created_at < now() - interval '120 seconds'
+      AND m.created_at >= ${since} AND COALESCE(m.completed_at, m.created_at) < now() - interval '120 seconds'
       AND NOT EXISTS (
         SELECT 1 FROM token_usage tu
         WHERE tu.session_id = m.session_id AND m.turn_id IS NOT NULL AND tu.turn_id = m.turn_id
