@@ -48,7 +48,7 @@ export interface ProofFakeState {
   ledger: FakeLedger[]
   tokenUsage: FakeTokenRow[]
   /** messages rows (assistant turns) for the durable attribution-gap check */
-  messages: Array<{ session_id: string; role: string; status: string; created_at: number; turn_id?: string | null }>
+  messages: Array<{ session_id: string; role: string; status: string; created_at: number; completed_at?: number | null; turn_id?: string | null }>
   sessions: Set<string>
   /** automation_kill_switch rows touched by arm / enable / disarm */
   kill: Array<{ id?: string; engaged_by?: string; scope: string; user_id: string | null; session_id: string; reason: string; engaged: boolean }>
@@ -312,7 +312,7 @@ export function createProofFakeSql() {
       const [sid, since] = values
       const cutoff = Date.now() - 120_000
       const unmatched = state.messages.filter(
-        (m) => m.session_id === sid && m.role === 'assistant' && m.status === 'complete' && m.created_at >= Number(since) && m.created_at < cutoff &&
+        (m) => m.session_id === sid && m.role === 'assistant' && m.status === 'complete' && m.created_at >= Number(since) && (m.completed_at ?? m.created_at) < cutoff &&
           !state.tokenUsage.some((t) => t.session_id === m.session_id && m.turn_id != null && t.turn_id === m.turn_id),
       ).length
       return [{ unmatched_turns: String(unmatched) }]

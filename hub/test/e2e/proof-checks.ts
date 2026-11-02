@@ -314,6 +314,17 @@ export async function runProofChecks(a: ProofChecksArgs): Promise<void> {
       }),
     ).toEqual({ ok: false, reason: 'proof_budget_attribution_lost' })
 
+    // ── 6b. Attribution grace keys on COMPLETION time (real SQL, repair re-check) ──────
+    const sessG = await newSession(userE)
+    const sinceG = new Date(Date.now() - 3 * 60 * 60 * 1000)
+    const seedTurn = (turn: string, completedAgo: string) => sql`
+      INSERT INTO messages (session_id, role, content, status, turn_id, created_at, completed_at)
+      VALUES (${sessG}, 'assistant', 'x', 'complete', ${turn}, now() - interval '1 hour', now() - ${completedAgo}::interval)`
+    await seedTurn('tg1', '1 second') // long-streaming turn finalized just now, usage_event still in flight
+    expect((await tokenDal.sumSessionTokensSince(sessG, sinceG)).attributionLost).toBeUndefined()
+    await seedTurn('tg2', '10 minutes') // finalized long ago, no usage row: a real loss
+    expect((await tokenDal.sumSessionTokensSince(sessG, sinceG)).attributionLost).toBe(true)
+
     // ── 7. Budget gate on the real tables: blocks AT max_injects, not before ────────────
     process.env.REMO_AUTOMATION_LIFETIME_INJECT_CAP = '1000'
     process.env.REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR = '1000'

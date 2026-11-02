@@ -472,6 +472,16 @@ describe('sumSessionTokensSince (F2-3 attribution)', () => {
       expect(await T.sumSessionTokensSince('s1', new Date(1000))).toMatchObject({ attributionLost: true })
     })
 
+    test('REGRESSION (repair re-check): grace keys on completion time - a long-streaming turn just finalized is not a loss; the same turn finalized >120s ago is', async () => {
+      state.sessions.add('s1')
+      // placeholder inserted long ago (OLD), finalized just now: usage_event may still be in flight
+      state.messages.push(turn({ turn_id: 't1', completed_at: Date.now() - 1000 }))
+      expect(await T.sumSessionTokensSince('s1', new Date(1000))).toEqual({ tokens: 0, sessionExists: true })
+      state.messages.length = 0
+      state.messages.push(turn({ turn_id: 't1', completed_at: Date.now() - 200_000 }))
+      expect(await T.sumSessionTokensSince('s1', new Date(1000))).toMatchObject({ attributionLost: true })
+    })
+
     test('a turn still inside the grace window, a streaming placeholder, a user message, another session and a pre-arm turn are not losses', async () => {
       state.sessions.add('s1')
       state.messages.push(
