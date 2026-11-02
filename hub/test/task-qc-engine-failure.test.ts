@@ -65,7 +65,7 @@ const utcToday = () => new Date().toISOString().slice(0, 10)
 
 describe('engine failure visibility (D-20)', () => {
   test('first failure of the UTC day: one ENGINE claim row, one plain email, run failed with a typed code', async () => {
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     const claims = fake.state.writes().filter((s) => /INSERT INTO task_qc_findings/.test(s.text))
     expect(claims).toHaveLength(1)
     expect(claims[0]!.values).toContain('ENGINE')
@@ -82,7 +82,7 @@ describe('engine failure visibility (D-20)', () => {
   })
 
   test('the raw exception message never appears in the email (text or html) or the run error', async () => {
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     for (const part of [emails[0].text, emails[0].html, emails[0].subject, finalized[0].error]) {
       expect(part).not.toContain('hunter2')
       expect(part).not.toContain('db.internal')
@@ -91,15 +91,15 @@ describe('engine failure visibility (D-20)', () => {
   })
 
   test('the raw message is logged at error level only', async () => {
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     expect(JSON.stringify(errors)).toContain('hunter2')
     expect(JSON.stringify(warns)).not.toContain('hunter2')
   })
 
   test('a second failure the same UTC day sends no email but still finalizes failed', async () => {
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     claimFirst = false
-    await sendTaskQcTask(TASK, { runId: 'run-92', userId: USER })
+    await sendTaskQcTask(TASK, { runId: 'run-92', userId: USER, claimedAt: Date.now() })
     expect(emails).toHaveLength(1)
     expect(finalized.map((f) => [f.id, f.status])).toEqual([[RUN, 'failed'], ['run-92', 'failed']])
   })
@@ -114,7 +114,7 @@ describe('engine failure visibility (D-20)', () => {
   for (const [message, code] of codes) {
     test(`maps "${message}" to the typed code ${code}`, async () => {
       thrown = new Error(message)
-      await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+      await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
       expect(finalized[0].error).toBe(`task_qc_engine_error:${code}`)
       expect(emails[0].text).toContain(code)
       expect(emails[0].text).not.toContain(message === code ? '\u0000' : message)
@@ -123,7 +123,7 @@ describe('engine failure visibility (D-20)', () => {
 
   test('a non-Error throw maps to engine_error', async () => {
     thrown = 'a string with secret=abc123'
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     expect(finalized[0].error).toBe('task_qc_engine_error:engine_error')
     expect(emails[0].text).not.toContain('abc123')
   })
@@ -132,14 +132,14 @@ describe('engine failure visibility (D-20)', () => {
     sendImpl = async () => {
       throw new Error('smtp exploded')
     }
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     expect(finalized).toHaveLength(1)
     expect(finalized[0]).toMatchObject({ status: 'failed', error: 'task_qc_engine_error:engine_error' })
   })
 
   test('a failing claim insert sends no email, is logged, and the run still finalizes failed', async () => {
     fake.failOn(/INSERT INTO task_qc_findings/, new Error('claim insert down'))
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     expect(emails).toHaveLength(0)
     expect(finalized).toHaveLength(1)
     expect(finalized[0].status).toBe('failed')
@@ -147,7 +147,7 @@ describe('engine failure visibility (D-20)', () => {
   })
 
   test('the failure email is plain: no digest content, no task text', async () => {
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     expect(emails[0].subject).toMatch(/^Task quality audit failed/)
     expect([...emails[0].text].every((c: string) => c === '\n' || (c.charCodeAt(0) >= 32 && c.charCodeAt(0) <= 126))).toBe(true)
   })

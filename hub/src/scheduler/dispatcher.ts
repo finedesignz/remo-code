@@ -298,6 +298,8 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
   if (task.task_type === 'task_qc') {
     if (!isTaskQcEnabled()) return { runIds }
     const { claimTaskQcRun } = await import('../task-qc/run-claim.ts')
+    // the sender's whole-run deadline is anchored here, before the claim (QC round 4)
+    const claimedAt = Date.now()
     const run = await claimTaskQcRun({
       taskId: task.id,
       userId,
@@ -346,7 +348,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
     })
     try {
       const { sendTaskQcTask } = await import('./senders/task-qc.ts')
-      await sendTaskQcTask(task, ctx)
+      await sendTaskQcTask(task, { ...ctx, claimedAt })
     } catch (err: any) {
       log.error('scheduler.dispatcher.task_qc_sender_failed', { run_id: run.id, task_id: task.id, error: err?.message })
       await finalizeRun(run.id, 'failed', err?.message || 'task_qc_threw')

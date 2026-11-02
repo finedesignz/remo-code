@@ -26,6 +26,8 @@ const released: any[] = []
 let beginDelayMs = 0
 let selectDelayMs = 0
 let reserveDelayMs = 0
+let releaseHangs = false
+let engineThrows = false
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 function fakeSql(strings: TemplateStringsArray) {
@@ -60,19 +62,23 @@ mock.module('../src/dispatch/automation-controls.ts', () => ({
   },
   releaseInject: async (a: any) => {
     released.push(a)
+    if (releaseHangs) await new Promise(() => {})
   },
   haltBeforeMachineSend: async () => ({ ok: true }),
 }))
 mock.module('../src/lib/email.ts', () => ({ sendEmail: async () => true }))
 const finding = { kind: 'x' }
 mock.module('../src/task-qc/engine.ts', () => ({
-  runTaskQcPass: async () => ({
+  runTaskQcPass: async () => {
+    if (engineThrows) throw new Error('canceling statement due to statement timeout')
+    return {
     findings: [finding],
     proposals: [finding],
     applied: [],
     truncated: false,
     recorded: [{ id: 'f1', finding }],
-  }),
+    }
+  },
 }))
 mock.module('../src/task-qc/digest.ts', () => ({
   deliverDigest: async () => ({ delivered: true, shown: [finding] }),
@@ -92,13 +98,14 @@ beforeEach(() => {
   stmts.length = 0
   released.length = 0
   beginDelayMs = selectDelayMs = reserveDelayMs = 0
+  releaseHangs = engineThrows = false
 })
 
 const updates = () => stmts.filter((s) => /UPDATE task_qc_findings/.test(s))
 
 describe('task_qc sender whole-run deadline', () => {
   test('normal path unchanged: findings marked delivered, run finalized success', async () => {
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     expect(updates()).toHaveLength(1)
     expect(stmts.some((s) => /SET LOCAL statement_timeout = \d+/.test(s))).toBe(true)
     expect(finalized).toHaveLength(1)
@@ -109,7 +116,7 @@ describe('task_qc sender whole-run deadline', () => {
     const budget = BUDGET
     beginDelayMs = budget + 400
     const t0 = Date.now()
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     await sleep(500) // let the late connection arrive; it must issue nothing
     expect(updates()).toHaveLength(0)
     expect(finalized).toHaveLength(1)
@@ -120,7 +127,7 @@ describe('task_qc sender whole-run deadline', () => {
 
   test('slow recipient read past the deadline: run finalized failed, engine never started', async () => {
     selectDelayMs = BUDGET + 300
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     expect(finalized).toHaveLength(1)
     expect(finalized[0].status).toBe('failed')
     expect(finalized[0].error).toBe('task_qc_engine_error:statement_timeout')
@@ -129,10 +136,31 @@ describe('task_qc sender whole-run deadline', () => {
 
   test('slow reservation past the deadline: run finalized failed and the late slot is released', async () => {
     reserveDelayMs = BUDGET + 300
-    await sendTaskQcTask(TASK, { runId: RUN, userId: USER })
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
     expect(finalized).toHaveLength(1)
     expect(finalized[0].status).toBe('failed')
     await sleep(500)
     expect(released).toEqual([{ counterKey: `taskqc:${USER}`, token: RUN }])
   })
+
+  test('deadline is anchored at the dispatcher claim time, not sender entry', async () => {
+    // claimed BUDGET+300 ms ago: the very first bounded step (recipient read) is already past the deadline
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() - (BUDGET + 300) })
+    expect(finalized).toHaveLength(1)
+    expect(finalized[0].status).toBe('failed')
+    expect(finalized[0].error).toBe('task_qc_engine_error:statement_timeout')
+    expect(released).toHaveLength(0)
+  })
+
+  test('engine failure: run is finalized BEFORE cleanup, and a hanging cleanup cannot hold the sender', async () => {
+    engineThrows = true
+    releaseHangs = true
+    const t0 = Date.now()
+    await sendTaskQcTask(TASK, { runId: RUN, userId: USER, claimedAt: Date.now() })
+    expect(finalized).toHaveLength(1)
+    expect(finalized[0].status).toBe('failed')
+    expect(finalized[0].error).toBe('task_qc_engine_error:statement_timeout')
+    expect(released).toHaveLength(1) // cleanup was attempted (and hung)
+    expect(Date.now() - t0).toBeLessThan(8_000) // 5s grace, not forever
+  }, 15_000)
 })

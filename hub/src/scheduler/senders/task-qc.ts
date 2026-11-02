@@ -21,6 +21,9 @@ import { safeText, type TaskQcResult } from '../../task-qc/types.ts'
 import { finalizeRun } from '../dispatcher.ts'
 import { log } from '../../observability/logger'
 
+/** Bound on post-failure cleanup (reservation release + failure notice), after the run is already finalized. */
+const CLEANUP_GRACE_MS = 5_000
+
 type EngineErrorCode = 'statement_timeout' | 'halt_check_required' | 'db_unavailable' | 'engine_error'
 
 /** Fixed mapping from a thrown value to a typed code. The message is inspected, never emitted. */
@@ -93,12 +96,12 @@ async function markDelivered(userId: string, ids: string[], taskId: string, runI
 
 export async function sendTaskQcTask(
   task: ScheduledTask,
-  ctx: { runId: string; userId: string; isManual?: boolean },
+  ctx: { runId: string; userId: string; isManual?: boolean; claimedAt: number },
 ): Promise<void> {
-  // ONE wall-clock bound for the whole run, started at claim: the recipient read, the counter
+  // ONE wall-clock bound for the whole run, anchored at the dispatcher's claim time (ctx.claimedAt): the recipient read, the counter
   // reservation, the engine pass and the digest send/mark all share it, and the run is always
   // finalized (never left open) when it expires.
-  const deadline = Date.now() + clampBounds().passTimeoutMs
+  const deadline = ctx.claimedAt + clampBounds().passTimeoutMs
   const counterKey = `taskqc:${ctx.userId}`
   const expire = async (where: string): Promise<void> => {
     log.error('scheduler.task_qc.run_deadline', { task_id: task.id, run_id: ctx.runId, where })
@@ -145,11 +148,22 @@ export async function sendTaskQcTask(
       deps: { deadline, haltCheck: async () => ({ halted: !(await haltBeforeMachineSend({ userId: ctx.userId })).ok }) },
     })
   } catch (err: any) {
-    await releaseInject({ counterKey, token: ctx.runId })
     const code = engineErrorCode(err)
     log.error('scheduler.task_qc.engine_failed', { task_id: task.id, run_id: ctx.runId, code, error: err?.message ?? String(err) })
-    await notifyEngineFailure(task, ctx, to, code)
+    // finalize FIRST: the open run holds the QC claim slot, and the cleanup below is DB/network work
+    // that can hang (pool exhaustion). It is raced against a short grace so the sender always returns.
     await finalizeRun(ctx.runId, 'failed', `task_qc_engine_error:${code}`, { only_if_active: true })
+    try {
+      await raceDeadline(
+        (async () => {
+          await releaseInject({ counterKey, token: ctx.runId })
+          await notifyEngineFailure(task, ctx, to, code)
+        })(),
+        Date.now() + CLEANUP_GRACE_MS,
+      )
+    } catch (cleanupErr: any) {
+      log.error('scheduler.task_qc.engine_cleanup_failed', { task_id: task.id, run_id: ctx.runId, error: cleanupErr?.message })
+    }
     return
   }
 
