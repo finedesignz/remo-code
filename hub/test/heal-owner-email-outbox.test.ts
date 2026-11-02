@@ -122,6 +122,19 @@ describe('owner-email outbox: persisted with the heal claim', () => {
   })
 })
 
+describe('owner-email outbox: obligation probe failure (QC r4 #2)', () => {
+  test('a throwing probe suppresses the legacy email and the sweep still sends exactly one', async () => {
+    const w = world()
+    await fail(w, 'run1')
+    const broken: OwnerEmailDeps = { ...w.outbox, hasObligation: async () => { throw new Error('db down') } }
+    expect(await deliverOwnerEmailForRun('run1', broken)).toBe(true) // true => legacy default email suppressed
+    expect(w.sends).toHaveLength(0)
+    w.advance(10 * 60_000)
+    expect(await sweepOwnerEmails(60_000, w.outbox)).toBe(1)
+    expect(w.sends).toHaveLength(1)
+  })
+})
+
 describe('owner-email outbox: crash between claim and send', () => {
   test('sweep sends exactly one email; a second sweep sends none', async () => {
     const w = world()

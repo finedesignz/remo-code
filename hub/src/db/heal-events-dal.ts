@@ -103,7 +103,11 @@ export interface HealEventRow {
   updated_at: string | Date
 }
 
-/** Delete at most 100 rows older than max(retentionHours, 24h). Never younger than 24h. */
+/**
+ * Delete at most 100 rows older than max(retentionHours, 24h). Never younger than 24h. A row that
+ * still owes the owner an email (obligation persisted, not yet delivered) is NEVER pruned: the
+ * outbox is the only record of that obligation, so a send that keeps failing must not lose it.
+ */
 export async function pruneHealEvents(
   retentionHours: number,
   exec: HealExec = sql,
@@ -113,7 +117,9 @@ export async function pruneHealEvents(
   const cutoff = new Date(nowMs - hours * HOUR_MS)
   await exec`
     DELETE FROM heal_events WHERE id IN (
-      SELECT id FROM heal_events WHERE created_at < ${cutoff} ORDER BY created_at LIMIT 100
+      SELECT id FROM heal_events WHERE created_at < ${cutoff}
+        AND NOT (owner_email IS NOT NULL AND owner_email_delivered_at IS NULL)
+      ORDER BY created_at LIMIT 100
     )
   `
 }
