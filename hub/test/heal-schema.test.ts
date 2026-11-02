@@ -54,7 +54,7 @@ describe('heal_events DDL', () => {
   })
 
   test('diff adds no UPDATE/INSERT/DELETE/DROP/TRUNCATE line and removes nothing', () => {
-    const base = process.env.HEAL_PLAN_BASE ?? '60c06112e1ee13870c1ec16f237fb5758a797439'
+    const base = process.env.HEAL_PLAN_BASE ?? 'origin/main'
     let diff = ''
     try {
       diff = execFileSync('git', ['diff', base, '--', 'hub/src/db/schema.sql'], {
