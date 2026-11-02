@@ -70,7 +70,8 @@ const feedback = z
 
 const healEventSchema = z.discriminatedUnion('source', [coolifyDeploy, scheduledTask, errorCapture, feedback]);
 
-export type HealEvent = Omit<z.infer<typeof healEventSchema>, 'stored_content'> & { stored_content: string };
+type DistOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never; // keeps the source-discriminated union narrowable
+export type HealEvent = DistOmit<z.infer<typeof healEventSchema>, 'stored_content'> & { stored_content: string };
 export type HealSource = HealEvent['source'];
 
 /** Validate an untrusted/loosely-typed event. Throws ZodError on any violation. */
