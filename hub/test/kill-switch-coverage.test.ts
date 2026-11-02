@@ -140,12 +140,12 @@ describe('kill switch covers every machine-initiated dispatch list', () => {
     expect(gateLists().unparsed).toEqual([])
   })
 
-  test('the scan actually found the known dispatchers (13 lists, inject.ts twice)', () => {
+  test('the scan actually found the known dispatchers (14 lists, inject.ts twice)', () => {
     const { lists } = gateLists()
     const files = new Set(lists.map((g) => g.file))
     for (const f of KNOWN_FILES) expect(files.has(f), `scanner did not find ${f}`).toBe(true)
     expect(lists.filter((g) => g.file === 'orchestrator/inject.ts')).toHaveLength(2)
-    expect(lists).toHaveLength(13)
+    expect(lists).toHaveLength(14)
   })
 
   test('scanner self-check: element splitting handles nested calls, comments and trailing commas', () => {
