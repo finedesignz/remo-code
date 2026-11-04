@@ -14,8 +14,8 @@ function expectMatchOnly(text: string, name: string): void {
 }
 
 describe('scheduler/log-classifier', () => {
-  test('exposes 16 pattern names', () => {
-    expect(_PATTERN_NAMES.length).toBe(16)
+  test('exposes 17 pattern names', () => {
+    expect(_PATTERN_NAMES.length).toBe(17)
   })
 
   test('clean log → no matches, hasErrors=false', () => {
@@ -107,6 +107,13 @@ describe('scheduler/log-classifier', () => {
 
   test('16. dns_failure', () => {
     expectMatchOnly('Error: getaddrinfo ENOTFOUND api.example.com', 'dns_failure')
+  })
+
+  test('17. docker_network_pool_exhausted', () => {
+    expectMatchOnly(
+      "failed to set up container networking: no available IPv4 addresses on this network's address pools: coolify",
+      'docker_network_pool_exhausted',
+    )
   })
 
   test('multiple patterns in one log accumulate', () => {

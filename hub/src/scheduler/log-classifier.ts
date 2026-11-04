@@ -72,6 +72,13 @@ const PATTERNS: PatternSpec[] = [
   { name: 'out_of_disk', severity: 'high', re: /(no space left on device|ENOSPC|disk\s+full|out of disk)/i },
   // 16. DNS resolution failure
   { name: 'dns_failure', severity: 'high', re: /(EAI_AGAIN|ENOTFOUND|getaddrinfo\s+(?:ENOTFOUND|EAI_AGAIN)|DNS (?:resolution|lookup)\s+(?:failed|error))/i },
+  // 17. Docker network address-pool exhaustion — build/run helper container
+  // can't get an IP on the deploy host's docker network (leaked
+  // containers/endpoints never pruned). Distinct from container_exit_nonzero
+  // because the fix is "prune the docker network / remove leaked endpoints
+  // on the host", not an app bug — worth its own high-signal pattern so
+  // triage doesn't misdiagnose it as an application regression.
+  { name: 'docker_network_pool_exhausted', severity: 'high', re: /(no available ipv4 addresses on this network|could not find an available, non-overlapping ipv4 address pool|failed to set up container networking|network pool overlaps with other one on this address space)/i },
 ]
 
 function firstMatchingLine(text: string, re: RegExp): string | null {
