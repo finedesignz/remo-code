@@ -293,7 +293,14 @@ describe.skipIf(!HAS_TEST_DB)('schema.sql double-apply (boot idempotency)', () =
       `
     } catch { bad = true }
     expect(bad).toBe(true)
-  }, 45_000)
+
+    // PTYCAP-08: the real-Postgres DDL proof for task_qc (CHECK drop-and-re-add with task_qc
+    // rows present, per-user partial unique index, NULL-session binding, findings constraints
+    // and dedupe) runs HERE, in the body of this existing gated test. Adds zero tests and zero
+    // skips; executes only in Woodpecker (postgres:16). See ./task-qc-checks.ts.
+    const { runTaskQcSchemaChecks } = await import('./task-qc-checks.ts')
+    await runTaskQcSchemaChecks({ sql, applySchema: () => applySchemaStrict(sql) })
+  }, 120_000)
 
   // PTYCAP Phase 1, plan 02 (SC-2) — token_usage_runner_type_check is LIVE against
   // real Postgres, not just present in the schema.sql source. REMO_E2E_DB_URL-gated

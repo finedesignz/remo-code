@@ -13,6 +13,7 @@
  * collects all child results and fires actions ONCE with an aggregate.
  */
 import type { ScheduledTask, RunStatus } from '../../db/scheduled-tasks-dal.ts'
+import { log } from '../../observability/logger'
 import { listActionsForTask } from '../../db/scheduled-tasks-dal.ts'
 import { validatePostRunActions, type PostRunAction } from './schema.ts'
 import { executeChain } from './chain.ts'
@@ -161,7 +162,19 @@ interface AfterRunArgs {
   chainDepth: number
 }
 
+/**
+ * PTYCAP-08 (F1-A2): task_qc is terminal. The auditor's only outbound is its own digest
+ * email; no stored post_run_action, default summary email or chain edge may act on it,
+ * whatever the row carries. Checked on the task_type alone, before any read.
+ */
+function suppressTaskQc(args: AfterRunArgs): boolean {
+  if (args.task.task_type !== 'task_qc') return false
+  log.info('scheduler.post_run.task_qc_terminal', { task_id: args.task.id, run_id: args.runId, status: args.status })
+  return true
+}
+
 export async function afterRun(args: AfterRunArgs): Promise<void> {
+  if (suppressTaskQc(args)) return
   if (args.parentFireId) {
     await aggregatorReport(
       args.parentFireId,
@@ -297,6 +310,7 @@ export async function handleInternalTriageRun(args: AfterRunArgs): Promise<void>
 }
 
 export async function fireWithContext(args: FireCtxArgs): Promise<void> {
+  if (suppressTaskQc(args)) return
   // Awaited (errors contained) so the AAF forward + fallback email finish inside the
   // post-run lifecycle instead of being orphaned when the caller releases.
   await handleInternalTriageRun(args).catch((err: any) => {
