@@ -10,6 +10,7 @@ declare module 'hono' {
     userEmail?: string
     authMethod?: string
     apiKeyId?: string
+    apiKeyHash?: string
     actor?: string
     rateLimited?: boolean
     requestId?: string

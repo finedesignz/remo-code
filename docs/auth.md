@@ -87,3 +87,29 @@ state match, then exchanges with the verifier. A deep link this device did not s
 The license gate still uses the Keygen JWKS/JWT mirror and `SISMEMBER titanium:blocklist`
 (`hub/src/titanium-client.ts`). Canonical is the offline Ed25519 license-key validation with the
 `blocklist:license:<id>` key (titanium-licensing README §4). Not changed here.
+
+## Chat via API key (`chat:session`)
+
+A server (e.g. AgentAutofix) can drive an EXISTING live session like the browser `/ws/client` does, with
+`Authorization: Bearer remokey_...` over `/api/chat/*` (`hub/src/api/chat.ts`, auth `hub/src/auth/chat-api-key.ts`).
+
+- **Scope `chat:session` is EXPLICIT-only** (`hasExplicitScope`): a legacy NULL-scopes key never has it, no other scope
+  implies it, and the key reaches NOTHING else (`/api/ext` needs `ext:read`, `/api/plugin` needs `agent`, every other
+  `/api/*` path is 403 `api_key_not_allowed`). Mounted before the cookie catch-all (mount-order invariant).
+- **Mint (minimum):** signed in with a fresh login, `POST /api/api-keys {"name":"aaf-chat","scopes":["chat:session"]}`
+  (cookie auth + step-up; an api key can never mint a key). The raw key is shown once. Do not add any other scope.
+- **Routes:** `GET /api/chat/sessions?project_dir=<abs>`, `GET /api/chat/sessions/:id/messages?limit=N`,
+  `POST .../messages {content, images?, id?}` (202 `{id}`), `POST .../cancel`, `POST .../permission {request_id, approved}`,
+  `POST .../question {request_id, answer}`, `GET .../events` (SSE: each `data:` line is the `/ws/client` JSON event; `: hb`
+  comment every 15s; on reconnect refetch `/messages`). Every session id is same-user checked (404 otherwise).
+- **Send gates:** same as WS `send_message` (dedupe on `id`, license, threshold, scheduled-run fence) plus daily cost + token caps.
+  The actor is server-inferred `external-chat` (automation): a **pty-interactive session is refused** (409
+  `automation_blocked_on_pty:external-chat`); the key only drives stream-json sessions. Refusals are also emitted on the SSE
+  stream as `send_refused`. Cloud sessions are not supported (409).
+- **Blast radius:** a `chat:session` key can drive ANY of the owner's stream-json sessions: send prompts, cancel turns, and
+  approve permission requests and answer questions (i.e. authorize tool use). Mint it ONLY for the AgentAutofix server, store it
+  in Proton Pass + the Coolify env of that app, never in a repo or log, and rotate it (revoke + remint) on any suspected exposure.
+  Limits: 4 concurrent SSE streams per key, 30-minute stream lifetime (clients reconnect and refetch `/messages`), the key is
+  re-verified on every SSE heartbeat (a revoked key closes its streams), slow SSE consumers are dropped, request bodies are
+  capped (~52MB), image `media_type` must match `image/*`, and the pre-auth rate limit is per client IP.
+  A send id is idempotent only after a successful dispatch: a refused send (offline, gate, 409) releases the id so a retry re-sends.

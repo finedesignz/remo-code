@@ -104,9 +104,28 @@ export function snapshotSubscribedSessionIds(): Set<string> {
   return out
 }
 
+// Server-side taps on a session's event stream (the `/api/chat/.../events` SSE).
+// A tap receives the exact JSON string a /ws/client subscriber would. The caller MUST
+// have verified session ownership before tapping; this registry does not know users.
+const eventTaps = new Map<string, Set<(json: string) => void>>()
+
+export function tapSessionEvents(sessionId: string, tap: (json: string) => void): () => void {
+  let set = eventTaps.get(sessionId)
+  if (!set) { set = new Set(); eventTaps.set(sessionId, set) }
+  set.add(tap)
+  return () => {
+    const cur = eventTaps.get(sessionId)
+    if (!cur) return
+    cur.delete(tap)
+    if (cur.size === 0) eventTaps.delete(sessionId)
+  }
+}
+
 // Broadcast to all clients subscribed to a session
 export function broadcastToSubscribers(sessionId: string, message: object) {
   const json = JSON.stringify(message)
+  const taps = eventTaps.get(sessionId)
+  if (taps) for (const tap of taps) { try { tap(json) } catch {} }
   for (const client of clients) {
     if (client.subscriptions.has(sessionId)) {
       try { client.ws.send(json) } catch {}

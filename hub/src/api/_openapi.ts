@@ -1351,6 +1351,58 @@ openapi.openapi(taskTemplatesRoute, (c) => {
   });
 }
 
+// ── /api/chat — Bearer-key chat surface (scope chat:session) ────────────────
+// Spec-only registration; `./chat.ts` serves traffic. See docs/auth.md "Chat via API key".
+{
+  const Err = z.object({ error: z.string(), reason: z.string().optional(), detail: z.string().optional() });
+  const json = (schema: any) => ({ content: { "application/json": { schema } } });
+  const reg = openapi.openAPIRegistry;
+  const base = { tags: ["chat"], security: [{ apiKeyAuth: [] }] } as const;
+  const Id = z.object({ id: z.string().openapi({ param: { name: "id", in: "path" } }) });
+  const common = {
+    401: { description: "Missing/invalid api key", ...json(Err) },
+    403: { description: "Key lacks the explicit chat:session scope", ...json(Err) },
+    404: { description: "No such session for this user", ...json(Err) },
+  };
+  const Ok = z.object({ ok: z.boolean() });
+  const body = (schema: any) => ({ body: { content: { "application/json": { schema } } } });
+
+  reg.registerPath({
+    method: "get", path: "/api/chat/sessions", summary: "List the owner's sessions (optionally by project_dir)", ...base,
+    request: { query: z.object({ project_dir: z.string().optional() }) },
+    responses: { 200: { description: "Sessions", ...json(z.object({ sessions: z.array(z.object({ id: z.string(), name: z.string(), status: z.string(), project_dir: z.string().nullable(), online: z.boolean() })) })) }, 401: common[401], 403: common[403] },
+  });
+  reg.registerPath({
+    method: "get", path: "/api/chat/sessions/{id}/messages", summary: "Persisted history (web ChatMessage shape)", ...base,
+    request: { params: Id, query: z.object({ limit: z.string().optional() }) },
+    responses: { 200: { description: "Messages, oldest first", ...json(z.object({ messages: z.array(z.object({ id: z.string(), session_id: z.string(), role: z.string(), content: z.string(), status: z.string(), created_at: z.string() })) })) }, ...common },
+  });
+  reg.registerPath({
+    method: "post", path: "/api/chat/sessions/{id}/messages", summary: "Send a user message into the live session", ...base,
+    request: { params: Id, ...body(z.object({ content: z.string(), id: z.string().uuid().optional(), images: z.array(z.object({ media_type: z.string(), data: z.string() })).max(5).optional() })) },
+    responses: { 202: { description: "Accepted", ...json(z.object({ id: z.string(), client_id: z.string() })) }, 400: { description: "Invalid input", ...json(Err) }, 413: { description: "Body too large", ...json(Err) }, 402: { description: "License inactive", ...json(Err) }, 409: { description: "Refused: session_offline | automation_blocked_on_pty:external-chat | scheduled_run_active | cloud_session_unsupported", ...json(Err) }, 429: { description: "Refused by threshold / daily cost cap / daily token cap", ...json(Err) }, ...common },
+  });
+  reg.registerPath({
+    method: "post", path: "/api/chat/sessions/{id}/cancel", summary: "Cancel the in-flight turn", ...base,
+    request: { params: Id }, responses: { 202: { description: "Forwarded", ...json(Ok) }, 409: { description: "session_offline", ...json(Err) }, ...common },
+  });
+  reg.registerPath({
+    method: "post", path: "/api/chat/sessions/{id}/permission", summary: "Answer a permission_request", ...base,
+    request: { params: Id, ...body(z.object({ request_id: z.string(), approved: z.boolean() })) },
+    responses: { 202: { description: "Forwarded", ...json(Ok) }, 409: { description: "session_offline", ...json(Err) }, ...common },
+  });
+  reg.registerPath({
+    method: "post", path: "/api/chat/sessions/{id}/question", summary: "Answer a user_question", ...base,
+    request: { params: Id, ...body(z.object({ request_id: z.string(), answer: z.string() })) },
+    responses: { 202: { description: "Forwarded", ...json(Ok) }, 409: { description: "session_offline", ...json(Err) }, ...common },
+  });
+  reg.registerPath({
+    method: "get", path: "/api/chat/sessions/{id}/events", summary: "SSE stream of the session's ChatEvents (each data: line = the /ws/client JSON; 15s heartbeat comment; refetch /messages on reconnect)", ...base,
+    request: { params: Id },
+    responses: { 429: { description: "Too many concurrent streams for this key", ...json(Err) }, 200: { description: "text/event-stream", content: { "text/event-stream": { schema: z.string() } } }, ...common },
+  });
+}
+
 // OpenAPI security scheme registration.
 openapi.openAPIRegistry.registerComponent("securitySchemes", "apiKeyAuth", {
   type: "http",
