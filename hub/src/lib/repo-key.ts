@@ -59,3 +59,17 @@ export function repoKeyFromGitRepository(gitRepository: string | null | undefine
   if (!owner || !repo) return null
   return buildRepoKey({ owner, repo })
 }
+
+// PTYCAP-05 QC round 1 (codex #6): GitHub owner/repo path names are case-insensitive, so a
+// `github://Owner/Repo` ident and its lowercase twin name ONE physical repository. Everything that
+// stores or compares a proof repo identity (allowlist insert, proof row, single-flight index,
+// merge refusal, session comparison) must go through this single canonical form: the same
+// lowercase `github://owner/repo` that `buildRepoKey` produces for sessions.
+const RE_GITHUB_IDENT = /^github:\/\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/
+
+/** `github://Owner/Repo` -> `github://owner/repo`; null when it is not a github://owner/repo ident. */
+export function canonicalGithubRepoIdent(ident: string | null | undefined): string | null {
+  if (!ident || typeof ident !== 'string') return null
+  const m = RE_GITHUB_IDENT.exec(ident.trim())
+  return m ? buildRepoKey({ owner: m[1]!, repo: m[2]! }) : null
+}

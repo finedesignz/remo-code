@@ -99,4 +99,16 @@ describe('daily TOKEN cap covers every dispatch entry point', () => {
       .map((g) => `${g.file}: gates: [${g.list.trim()}]`)
     expect(offenders).toEqual([])
   })
+
+  // PTYCAP-05 (D-15): adding the proof gates must never displace the spend caps.
+  test('PTYCAP-05: both orchestrator/inject.ts lists still carry the token cap alongside the proof gates', () => {
+    const inject = gateLists().lists.filter((g) => g.file === 'orchestrator/inject.ts')
+    // non-vacuous self-check: the scanner must find BOTH orchestrator lists
+    expect(inject).toHaveLength(2)
+    for (const g of inject) {
+      expect(g.list.includes('dailyTokenCapGate')).toBe(true)
+      expect(g.list.includes('proofBudgetGate')).toBe(true)
+      expect(g.list.includes('proofProtectionGate')).toBe(true)
+    }
+  })
 })

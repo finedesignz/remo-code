@@ -14,7 +14,7 @@ export type RunnerEvent =
   | { type: 'tool_use'; tool: string; tool_id: string; input: unknown }
   | { type: 'tool_result'; tool_id: string; content: string; is_error?: boolean }
   | { type: 'status'; state: 'idle' | 'thinking' | 'tool_calling' | 'writing' }
-  | { type: 'assistant_message'; content: string }
+  | { type: 'assistant_message'; content: string; turn_id?: string }
   | { type: 'permission_request'; request_id: string; tool_name: string; tool_input: unknown }
   | {
       type: 'user_question'
@@ -40,6 +40,8 @@ export type RunnerEvent =
       // True when `cost` came from the SDK's `total_cost_usd` (authoritative).
       // False when absent (hub will estimate from its price table).
       cost_from_sdk?: boolean
+      /** PTYCAP-05: per-turn id shared with this turn's assistant_message. */
+      turn_id?: string
     }
   | { type: 'error'; message: string }
   | { type: 'log'; message: string }
@@ -174,7 +176,7 @@ export type AgentToHub =
   | { type: 'tool_use'; session_id: string; tool: string; tool_id: string; input: unknown }
   | { type: 'tool_result'; session_id: string; tool_id: string; content: string; is_error?: boolean }
   | { type: 'status'; session_id: string; state: 'idle' | 'thinking' | 'tool_calling' | 'writing' }
-  | { type: 'assistant_message'; session_id: string; content: string }
+  | { type: 'assistant_message'; session_id: string; content: string; turn_id?: string }
   | { type: 'permission_request'; session_id: string; request_id: string; tool_name: string; tool_input: unknown }
   | {
       type: 'user_question'
@@ -198,6 +200,7 @@ export type AgentToHub =
       cache_read_input_tokens: number
       cost_usd: number
       cost_source: 'sdk' | 'estimated'
+      turn_id?: string
       ts: string
       // PTYCAP Phase 1 — which runner produced this event. Optional with no
       // default here; the hub owns the single default site (defaults to

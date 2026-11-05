@@ -775,3 +775,20 @@ The door reserves after the governors with `{counterKey, turnToken}` supplied on
 `sessions-heal-halt`, `launch-machine-guard`, `launch-callers-guard`,
 `session-start-senders-guard`, `reserve-caller-guard`, `counter-key-assignment-guard`,
 `replay-reentry-guard`, and supervisor `pty-usage-tail` (dedupe).
+
+## PTYCAP Phase 5 - proof budget accounting
+
+The throwaway-repo proof (see [ptycap-05-proof-runbook.md](ptycap-05-proof-runbook.md)) carries its
+OWN frozen budget, enforced by `proofBudgetGate` and the tick-side evaluators. It is separate from,
+and never replaces, the daily cost and token caps.
+
+- **Injects:** counted from the Phase 4 ledger by the run's counter key since the run started
+  (`countProofInjects`), not from a second counter.
+- **Tokens:** the four-bucket sum (`input + output + cache_creation + cache_read`) for the bound
+  session since the run started, plus a monotone high-water mark (`tokens_hwm`) so the figure can
+  never go down and re-open the budget.
+- **Attribution fails closed:** if the session row is gone or the total cannot be read, the run
+  terminates `budget_attribution_lost` rather than assuming zero spend.
+- **Frozen at arm:** defaults 6 injects, 3,000,000 tokens, 6 h wall; set by
+  `REMO_PROOF_MAX_*` or the script flags at arm time only. The hub never re-reads them.
+- **Not a per-proof bound:** the 20M default `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` is a daily ceiling.

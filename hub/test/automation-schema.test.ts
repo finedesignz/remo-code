@@ -58,7 +58,7 @@ describe('PTYCAP-04 schema', () => {
       "(user_id) WHERE scope = 'user' AND engaged",
     )
     expect(statementContaining('CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_kill_switch_session')).toContain(
-      "(session_id) WHERE scope = 'session' AND engaged",
+      "(session_id, engaged_by) WHERE scope = 'session' AND engaged",
     )
   })
 
