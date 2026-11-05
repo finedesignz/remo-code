@@ -46,6 +46,14 @@ export const SCOPE_EXT_LAUNCH = 'ext:launch'
 export const SCOPE_SETTINGS_READ = 'settings:read'
 export const SCOPE_SETTINGS_WRITE = 'settings:write'
 
+/**
+ * Drive an existing live session like the web chat does, through /api/chat/* with a Bearer
+ * key (list sessions, history, send, cancel, answer prompts, SSE events). EXPLICIT-only and
+ * reaches NOTHING outside /api/chat/*: a legacy/NULL key never acquires it, and it implies
+ * no other scope. See `chat-api-key.ts`.
+ */
+export const SCOPE_CHAT_SESSION = 'chat:session'
+
 export const ALL_SCOPES = [
   SCOPE_AGENT,
   SCOPE_EXT_READ,
@@ -55,6 +63,7 @@ export const ALL_SCOPES = [
   SCOPE_CLOUD_HOOK,
   SCOPE_SETTINGS_READ,
   SCOPE_SETTINGS_WRITE,
+  SCOPE_CHAT_SESSION,
 ] as const
 export type Scope = (typeof ALL_SCOPES)[number]
 

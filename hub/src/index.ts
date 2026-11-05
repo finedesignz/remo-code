@@ -74,6 +74,8 @@ import { registerTokenCapAlarm } from './observability/token-cap-alarm.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { extApiKeyMiddleware } from './auth/ext-api-key-middleware'
 import { ext } from './api/ext'
+import { chatApiKeyMiddleware } from './auth/chat-api-key'
+import { chat } from './api/chat'
 import { rateLimit, rateLimitMulti } from './middleware/rate-limit'
 import { securityHeaders } from './middleware/security-headers'
 import { csrfGuard } from './csrf'
@@ -235,6 +237,12 @@ app.route('/api/plugin', plugin)
 app.use('/api/ext/*', rateLimit({ windowMs: 60_000, max: 30, keyFn: (c) => c.req.header('authorization')?.slice(0, 24) || 'anon' }))
 app.use('/api/ext/*', extApiKeyMiddleware)
 app.route('/api/ext', ext)
+
+// Bearer-key chat surface (scope chat:session, EXPLICIT-only). MUST be mounted BEFORE the cookie
+// catch-all; the key reaches nothing else. See docs/auth.md.
+app.use('/api/chat/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => c.req.header('authorization')?.slice(0, 24) || 'anon' }))
+app.use('/api/chat/*', chatApiKeyMiddleware)
+app.route('/api/chat', chat)
 
 // Sentry-style error intake — public, sentry_key in X-Sentry-Auth IS the credential.
 // MUST be mounted BEFORE the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top).

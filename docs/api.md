@@ -5231,6 +5231,836 @@ To perform this operation, you must be authenticated by means of one of the foll
 apiKeyAuth
 </aside>
 
+<h1 id="remo-code-hub-chat">chat</h1>
+
+## List the owner's sessions (optionally by project_dir)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/chat/sessions \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/chat/sessions',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/chat/sessions`
+
+<h3 id="list-the-owner's-sessions-(optionally-by-project_dir)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|project_dir|query|string|false|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "sessions": [
+    {
+      "id": "string",
+      "name": "string",
+      "status": "string",
+      "project_dir": "string",
+      "online": true
+    }
+  ]
+}
+```
+
+<h3 id="list-the-owner's-sessions-(optionally-by-project_dir)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Sessions|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks the explicit chat:session scope|Inline|
+
+<h3 id="list-the-owner's-sessions-(optionally-by-project_dir)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» sessions|[object]|true|none|none|
+|»» id|string|true|none|none|
+|»» name|string|true|none|none|
+|»» status|string|true|none|none|
+|»» project_dir|string¦null|true|none|none|
+|»» online|boolean|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## Persisted history (web ChatMessage shape)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/chat/sessions/{id}/messages \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/chat/sessions/{id}/messages',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/chat/sessions/{id}/messages`
+
+<h3 id="persisted-history-(web-chatmessage-shape)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+|limit|query|string|false|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "messages": [
+    {
+      "id": "string",
+      "session_id": "string",
+      "role": "string",
+      "content": "string",
+      "status": "string",
+      "created_at": "string"
+    }
+  ]
+}
+```
+
+<h3 id="persisted-history-(web-chatmessage-shape)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Messages, oldest first|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks the explicit chat:session scope|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such session for this user|Inline|
+
+<h3 id="persisted-history-(web-chatmessage-shape)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» messages|[object]|true|none|none|
+|»» id|string|true|none|none|
+|»» session_id|string|true|none|none|
+|»» role|string|true|none|none|
+|»» content|string|true|none|none|
+|»» status|string|true|none|none|
+|»» created_at|string|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## Send a user message into the live session
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/chat/sessions/{id}/messages \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "content": "string",
+  "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
+  "images": [
+    {
+      "media_type": "string",
+      "data": "string"
+    }
+  ]
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/chat/sessions/{id}/messages',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/chat/sessions/{id}/messages`
+
+> Body parameter
+
+```json
+{
+  "content": "string",
+  "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
+  "images": [
+    {
+      "media_type": "string",
+      "data": "string"
+    }
+  ]
+}
+```
+
+<h3 id="send-a-user-message-into-the-live-session-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+|body|body|object|false|none|
+|» content|body|string|true|none|
+|» id|body|string(uuid)|false|none|
+|» images|body|[object]|false|none|
+|»» media_type|body|string|true|none|
+|»» data|body|string|true|none|
+
+> Example responses
+
+> 202 Response
+
+```json
+{
+  "id": "string",
+  "client_id": "string"
+}
+```
+
+<h3 id="send-a-user-message-into-the-live-session-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|202|[Accepted](https://tools.ietf.org/html/rfc7231#section-6.3.3)|Accepted|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid input|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|402|[Payment Required](https://tools.ietf.org/html/rfc7231#section-6.5.2)|License inactive|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks the explicit chat:session scope|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such session for this user|Inline|
+|409|[Conflict](https://tools.ietf.org/html/rfc7231#section-6.5.8)|Refused: session_offline | automation_blocked_on_pty:external-chat | scheduled_run_active | cloud_session_unsupported|Inline|
+|429|[Too Many Requests](https://tools.ietf.org/html/rfc6585#section-4)|Refused by threshold / daily cost cap / daily token cap|Inline|
+
+<h3 id="send-a-user-message-into-the-live-session-responseschema">Response Schema</h3>
+
+Status Code **202**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» id|string|true|none|none|
+|» client_id|string|true|none|none|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **402**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **409**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **429**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## Cancel the in-flight turn
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/chat/sessions/{id}/cancel \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/chat/sessions/{id}/cancel',
+{
+  method: 'POST',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/chat/sessions/{id}/cancel`
+
+<h3 id="cancel-the-in-flight-turn-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+
+> Example responses
+
+> 202 Response
+
+```json
+{
+  "ok": true
+}
+```
+
+<h3 id="cancel-the-in-flight-turn-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|202|[Accepted](https://tools.ietf.org/html/rfc7231#section-6.3.3)|Forwarded|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks the explicit chat:session scope|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such session for this user|Inline|
+|409|[Conflict](https://tools.ietf.org/html/rfc7231#section-6.5.8)|session_offline|Inline|
+
+<h3 id="cancel-the-in-flight-turn-responseschema">Response Schema</h3>
+
+Status Code **202**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» ok|boolean|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **409**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## Answer a permission_request
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/chat/sessions/{id}/permission \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "request_id": "string",
+  "approved": true
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/chat/sessions/{id}/permission',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/chat/sessions/{id}/permission`
+
+> Body parameter
+
+```json
+{
+  "request_id": "string",
+  "approved": true
+}
+```
+
+<h3 id="answer-a-permission_request-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+|body|body|object|false|none|
+|» request_id|body|string|true|none|
+|» approved|body|boolean|true|none|
+
+> Example responses
+
+> 202 Response
+
+```json
+{
+  "ok": true
+}
+```
+
+<h3 id="answer-a-permission_request-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|202|[Accepted](https://tools.ietf.org/html/rfc7231#section-6.3.3)|Forwarded|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks the explicit chat:session scope|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such session for this user|Inline|
+|409|[Conflict](https://tools.ietf.org/html/rfc7231#section-6.5.8)|session_offline|Inline|
+
+<h3 id="answer-a-permission_request-responseschema">Response Schema</h3>
+
+Status Code **202**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» ok|boolean|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **409**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## Answer a user_question
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/chat/sessions/{id}/question \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "request_id": "string",
+  "answer": "string"
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/chat/sessions/{id}/question',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/chat/sessions/{id}/question`
+
+> Body parameter
+
+```json
+{
+  "request_id": "string",
+  "answer": "string"
+}
+```
+
+<h3 id="answer-a-user_question-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+|body|body|object|false|none|
+|» request_id|body|string|true|none|
+|» answer|body|string|true|none|
+
+> Example responses
+
+> 202 Response
+
+```json
+{
+  "ok": true
+}
+```
+
+<h3 id="answer-a-user_question-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|202|[Accepted](https://tools.ietf.org/html/rfc7231#section-6.3.3)|Forwarded|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks the explicit chat:session scope|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such session for this user|Inline|
+|409|[Conflict](https://tools.ietf.org/html/rfc7231#section-6.5.8)|session_offline|Inline|
+
+<h3 id="answer-a-user_question-responseschema">Response Schema</h3>
+
+Status Code **202**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» ok|boolean|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **409**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## SSE stream of the session's ChatEvents (each data: line = the /ws/client JSON; 15s heartbeat comment; refetch /messages on reconnect)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/chat/sessions/{id}/events \
+  -H 'Accept: text/event-stream' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'text/event-stream',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/chat/sessions/{id}/events',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/chat/sessions/{id}/events`
+
+<h3 id="sse-stream-of-the-session's-chatevents-(each-data:-line-=-the-/ws/client-json;-15s-heartbeat-comment;-refetch-/messages-on-reconnect)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+
+> Example responses
+
+> 200 Response
+
+> 401 Response
+
+```json
+{
+  "error": "string",
+  "reason": "string",
+  "detail": "string"
+}
+```
+
+<h3 id="sse-stream-of-the-session's-chatevents-(each-data:-line-=-the-/ws/client-json;-15s-heartbeat-comment;-refetch-/messages-on-reconnect)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|text/event-stream|string|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks the explicit chat:session scope|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such session for this user|Inline|
+
+<h3 id="sse-stream-of-the-session's-chatevents-(each-data:-line-=-the-/ws/client-json;-15s-heartbeat-comment;-refetch-/messages-on-reconnect)-responseschema">Response Schema</h3>
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
 # Schemas
 
 <h2 id="tocS_ExtWork">ExtWork</h2>
