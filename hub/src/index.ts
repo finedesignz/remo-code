@@ -240,7 +240,7 @@ app.route('/api/ext', ext)
 
 // Bearer-key chat surface (scope chat:session, EXPLICIT-only). MUST be mounted BEFORE the cookie
 // catch-all; the key reaches nothing else. See docs/auth.md.
-app.use('/api/chat/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => c.req.header('authorization')?.slice(0, 24) || 'anon' }))
+app.use('/api/chat/*', rateLimit({ bucket: 'chat-ip', windowMs: 60_000, max: 120, keyFn: ipKey }))
 app.use('/api/chat/*', chatApiKeyMiddleware)
 app.route('/api/chat', chat)
 

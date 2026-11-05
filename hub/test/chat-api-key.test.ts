@@ -7,7 +7,7 @@ process.env.TITANIUM_KEYGEN_ACCOUNT_ID = process.env.TITANIUM_KEYGEN_ACCOUNT_ID 
 process.env.TITANIUM_KEYGEN_PRODUCT_ID = process.env.TITANIUM_KEYGEN_PRODUCT_ID || 'prod_test_remo';
 process.env.TITANIUM_BYPASS = 'true';
 
-import { describe, test, expect, mock, beforeEach, afterAll } from 'bun:test';
+import { describe, test, expect, mock, beforeEach, afterEach, afterAll } from 'bun:test';
 import { Hono } from 'hono';
 
 let keyScopes: string[] | null = ['chat:session'];
@@ -55,7 +55,7 @@ mock.module('../src/dispatch/gates.ts', () => ({
 }));
 
 const { chatApiKeyMiddleware } = await import('../src/auth/chat-api-key');
-const { chat } = await import('../src/api/chat');
+const { chat, chatSseConfig, __chatStreamCountForTests, __resetChatSendLedgerForTests } = await import('../src/api/chat');
 const { authMiddleware } = await import('../src/auth/middleware');
 const { extApiKeyMiddleware } = await import('../src/auth/ext-api-key-middleware');
 const { apiKeyMiddleware } = await import('../src/auth/api-key-middleware');
@@ -86,7 +86,7 @@ let fakeWs: any;
 
 beforeEach(() => {
   keyScopes = ['chat:session']; keyFound = true; gateBlock = null; inserted.length = 0; sent = [];
-  __resetSendDedupeForTests();
+  __resetSendDedupeForTests(); __resetChatSendLedgerForTests();
   fakeWs = { readyState: 1, send: (s: string) => { sent.push(JSON.parse(s)); return 1; }, close() {} };
   unregisterChannel('s1'); unregisterChannel('spty');
   registerChannel('s1', 'u1', fakeWs as any);
@@ -213,5 +213,100 @@ describe('containment: the chat key reaches nothing else', () => {
   });
   test('unknown /api/chat path is not served to the key', async () => {
     expect((await buildApp().request('/api/chat/nope', { headers: H })).status).toBe(403);
+  });
+});
+
+describe('idempotency: only a delivered send consumes the id', () => {
+  test('offline refusal releases the id; retry with the same id re-sends', async () => {
+    const app = buildApp();
+    unregisterChannel('s1');
+    const r1 = await app.request('/api/chat/sessions/s1/messages', post({ content: 'x', id: UUID }));
+    expect(r1.status).toBe(409);
+    expect(inserted.length).toBe(0); // nothing persisted for an offline session
+    registerChannel('s1', 'u1', fakeWs as any);
+    const r2 = await app.request('/api/chat/sessions/s1/messages', post({ content: 'x', id: UUID }));
+    expect(r2.status).toBe(202);
+    expect(((await r2.json()) as any).duplicate).toBeUndefined();
+    expect(sent.filter((m) => m.type === 'user_message').length).toBe(1);
+  });
+  test('gate refusal releases the id; retry after the gate clears re-sends', async () => {
+    const app = buildApp();
+    gateBlock = 'daily_cost_cap';
+    expect((await app.request('/api/chat/sessions/s1/messages', post({ content: 'x', id: UUID }))).status).toBe(429);
+    gateBlock = null;
+    expect((await app.request('/api/chat/sessions/s1/messages', post({ content: 'x', id: UUID }))).status).toBe(202);
+    expect(sent.filter((m) => m.type === 'user_message').length).toBe(1);
+  });
+  test('two concurrent POSTs with one id dispatch exactly once', async () => {
+    const app = buildApp();
+    const [a, b] = await Promise.all([
+      app.request('/api/chat/sessions/s1/messages', post({ content: 'x', id: UUID })),
+      app.request('/api/chat/sessions/s1/messages', post({ content: 'x', id: UUID })),
+    ]);
+    expect([a.status, b.status]).toEqual([202, 202]);
+    const bodies = [(await a.json()) as any, (await b.json()) as any];
+    expect(bodies.filter((j) => j.duplicate === true).length).toBe(1);
+    expect(sent.filter((m) => m.type === 'user_message').length).toBe(1);
+    expect(inserted.length).toBe(1);
+  });
+});
+
+describe('input bounds', () => {
+  test('non-image media_type -> 400', async () => {
+    const r = await buildApp().request('/api/chat/sessions/s1/messages', post({ content: 'x', images: [{ media_type: 'text/html', data: 'AAAA' }] }));
+    expect(r.status).toBe(400);
+  });
+  test('oversized body -> 413', async () => {
+    const r = await buildApp().request('/api/chat/sessions/s1/messages', { method: 'POST', headers: H, body: 'a'.repeat(52_000_001) });
+    expect(r.status).toBe(413);
+  });
+});
+
+describe('SSE hardening', () => {
+  const saved = { ...chatSseConfig };
+  afterEach(() => { Object.assign(chatSseConfig, saved); });
+  const open = (app: Hono) => app.request('/api/chat/sessions/s1/events', { headers: H });
+  const drain = async (res: Response) => {
+    const reader = res.body!.getReader();
+    for (let i = 0; i < 50; i++) { const { done } = await reader.read(); if (done) return true; }
+    return false;
+  };
+
+  test('per-key concurrent stream cap -> 429, slot freed on close', async () => {
+    chatSseConfig.maxStreamsPerKey = 2;
+    const app = buildApp();
+    const a = await open(app); const b = await open(app);
+    expect(a.status).toBe(200); expect(b.status).toBe(200);
+    expect((await open(app)).status).toBe(429);
+    await a.body!.cancel();
+    expect(__chatStreamCountForTests('k1')).toBe(1);
+    const c = await open(app);
+    expect(c.status).toBe(200);
+    await b.body!.cancel(); await c.body!.cancel();
+    expect(__chatStreamCountForTests('k1')).toBe(0);
+  });
+
+  test('revoked key closes the stream on the next heartbeat', async () => {
+    chatSseConfig.heartbeatMs = 15;
+    const res = await open(buildApp());
+    expect(res.status).toBe(200);
+    keyFound = false;
+    expect(await drain(res)).toBe(true);
+    expect(__chatStreamCountForTests('k1')).toBe(0);
+  });
+
+  test('max lifetime closes the stream', async () => {
+    chatSseConfig.maxLifetimeMs = 30;
+    const res = await open(buildApp());
+    expect(await drain(res)).toBe(true);
+    expect(__chatStreamCountForTests('k1')).toBe(0);
+  });
+
+  test('a consumer that stops reading is dropped (backpressure)', async () => {
+    chatSseConfig.queueMax = 2;
+    const res = await open(buildApp());
+    for (let i = 0; i < 10; i++) broadcastToSubscribers('s1', { type: 'text_delta', session_id: 's1', delta: String(i) });
+    expect(__chatStreamCountForTests('k1')).toBe(0);
+    await res.body!.cancel().catch(() => {});
   });
 });

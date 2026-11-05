@@ -1380,7 +1380,7 @@ openapi.openapi(taskTemplatesRoute, (c) => {
   reg.registerPath({
     method: "post", path: "/api/chat/sessions/{id}/messages", summary: "Send a user message into the live session", ...base,
     request: { params: Id, ...body(z.object({ content: z.string(), id: z.string().uuid().optional(), images: z.array(z.object({ media_type: z.string(), data: z.string() })).max(5).optional() })) },
-    responses: { 202: { description: "Accepted", ...json(z.object({ id: z.string(), client_id: z.string() })) }, 400: { description: "Invalid input", ...json(Err) }, 402: { description: "License inactive", ...json(Err) }, 409: { description: "Refused: session_offline | automation_blocked_on_pty:external-chat | scheduled_run_active | cloud_session_unsupported", ...json(Err) }, 429: { description: "Refused by threshold / daily cost cap / daily token cap", ...json(Err) }, ...common },
+    responses: { 202: { description: "Accepted", ...json(z.object({ id: z.string(), client_id: z.string() })) }, 400: { description: "Invalid input", ...json(Err) }, 413: { description: "Body too large", ...json(Err) }, 402: { description: "License inactive", ...json(Err) }, 409: { description: "Refused: session_offline | automation_blocked_on_pty:external-chat | scheduled_run_active | cloud_session_unsupported", ...json(Err) }, 429: { description: "Refused by threshold / daily cost cap / daily token cap", ...json(Err) }, ...common },
   });
   reg.registerPath({
     method: "post", path: "/api/chat/sessions/{id}/cancel", summary: "Cancel the in-flight turn", ...base,
@@ -1399,7 +1399,7 @@ openapi.openapi(taskTemplatesRoute, (c) => {
   reg.registerPath({
     method: "get", path: "/api/chat/sessions/{id}/events", summary: "SSE stream of the session's ChatEvents (each data: line = the /ws/client JSON; 15s heartbeat comment; refetch /messages on reconnect)", ...base,
     request: { params: Id },
-    responses: { 200: { description: "text/event-stream", content: { "text/event-stream": { schema: z.string() } } }, ...common },
+    responses: { 429: { description: "Too many concurrent streams for this key", ...json(Err) }, 200: { description: "text/event-stream", content: { "text/event-stream": { schema: z.string() } } }, ...common },
   });
 }
 

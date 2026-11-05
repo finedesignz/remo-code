@@ -106,3 +106,10 @@ A server (e.g. AgentAutofix) can drive an EXISTING live session like the browser
   The actor is server-inferred `external-chat` (automation): a **pty-interactive session is refused** (409
   `automation_blocked_on_pty:external-chat`); the key only drives stream-json sessions. Refusals are also emitted on the SSE
   stream as `send_refused`. Cloud sessions are not supported (409).
+- **Blast radius:** a `chat:session` key can drive ANY of the owner's stream-json sessions: send prompts, cancel turns, and
+  approve permission requests and answer questions (i.e. authorize tool use). Mint it ONLY for the AgentAutofix server, store it
+  in Proton Pass + the Coolify env of that app, never in a repo or log, and rotate it (revoke + remint) on any suspected exposure.
+  Limits: 4 concurrent SSE streams per key, 30-minute stream lifetime (clients reconnect and refetch `/messages`), the key is
+  re-verified on every SSE heartbeat (a revoked key closes its streams), slow SSE consumers are dropped, request bodies are
+  capped (~52MB), image `media_type` must match `image/*`, and the pre-auth rate limit is per client IP.
+  A send id is idempotent only after a successful dispatch: a refused send (offline, gate, 409) releases the id so a retry re-sends.

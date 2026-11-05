@@ -5542,6 +5542,7 @@ fetch('https://app.remo-code.com/api/chat/sessions/{id}/messages',
 |403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks the explicit chat:session scope|Inline|
 |404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such session for this user|Inline|
 |409|[Conflict](https://tools.ietf.org/html/rfc7231#section-6.5.8)|Refused: session_offline | automation_blocked_on_pty:external-chat | scheduled_run_active | cloud_session_unsupported|Inline|
+|413|[Payload Too Large](https://tools.ietf.org/html/rfc7231#section-6.5.11)|Body too large|Inline|
 |429|[Too Many Requests](https://tools.ietf.org/html/rfc6585#section-4)|Refused by threshold / daily cost cap / daily token cap|Inline|
 
 <h3 id="send-a-user-message-into-the-live-session-responseschema">Response Schema</h3>
@@ -5594,6 +5595,14 @@ Status Code **404**
 |» detail|string|false|none|none|
 
 Status Code **409**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **413**
 
 |Name|Type|Required|Restrictions|Description|
 |---|---|---|---|---|
@@ -6029,6 +6038,7 @@ fetch('https://app.remo-code.com/api/chat/sessions/{id}/events',
 |401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
 |403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks the explicit chat:session scope|Inline|
 |404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such session for this user|Inline|
+|429|[Too Many Requests](https://tools.ietf.org/html/rfc6585#section-4)|Too many concurrent streams for this key|Inline|
 
 <h3 id="sse-stream-of-the-session's-chatevents-(each-data:-line-=-the-/ws/client-json;-15s-heartbeat-comment;-refetch-/messages-on-reconnect)-responseschema">Response Schema</h3>
 
@@ -6049,6 +6059,14 @@ Status Code **403**
 |» detail|string|false|none|none|
 
 Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|false|none|none|
+|» detail|string|false|none|none|
+
+Status Code **429**
 
 |Name|Type|Required|Restrictions|Description|
 |---|---|---|---|---|

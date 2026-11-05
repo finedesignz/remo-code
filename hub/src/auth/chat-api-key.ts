@@ -28,9 +28,10 @@ export async function chatApiKeyMiddleware(c: Context, next: Next) {
   const rawKey = authHeader.slice(7).trim()
   if (!/^remokey_[A-Za-z0-9_-]+$/.test(rawKey)) return c.json({ error: 'unauthorized' }, 401)
 
+  const keyHash = await hashToken(rawKey)
   let key: Awaited<ReturnType<typeof verifyApiKeyForExt>> = null
   try {
-    key = await verifyApiKeyForExt(await hashToken(rawKey))
+    key = await verifyApiKeyForExt(keyHash)
   } catch (err: any) {
     console.warn(`[chat-auth] key lookup failed: ${err?.message ?? err}`)
     return c.json({ error: 'unauthorized' }, 401)
@@ -43,6 +44,7 @@ export async function chatApiKeyMiddleware(c: Context, next: Next) {
 
   c.set('userId', key.user_id)
   c.set('apiKeyId', key.id)
+  c.set('apiKeyHash', keyHash)
   c.set('authMethod', CHAT_AUTH_METHOD)
   c.set('actor', CHAT_ACTOR)
   await next()

@@ -570,7 +570,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   key (incl. the supervisor's own `purpose='supervisor'` spawn key) does NOT satisfy it and can
   no longer publish to a client site; `ext:read`/`ext:ask` stay NULL-permissive by design. **`settings:read`/`settings:write`** are also EXPLICIT-only and reach ONLY the
   settings route allowlist in `hub/src/auth/settings-api-key.ts` via `authMiddleware` (any other
-  `/api/*` path ⇒ 403 for an api key). **`chat:session`** is EXPLICIT-only and reaches ONLY `/api/chat/*` (Bearer chat surface for a live stream-json session: list/history/send/cancel/prompts/SSE; pty-interactive refused; docs/auth.md "Chat via API key"). **`chat:session`** is EXPLICIT-only and reaches ONLY `/api/chat/*` (Bearer chat surface for a live stream-json session: list/history/send/cancel/prompts/SSE; pty-interactive refused; docs/auth.md "Chat via API key"). **`/api/api-keys` is cookie-auth ONLY —
+  `/api/*` path ⇒ 403 for an api key). **`chat:session`** is EXPLICIT-only and reaches ONLY `/api/chat/*` (Bearer chat surface for a live stream-json session: list/history/send/cancel/prompts/SSE; pty-interactive refused; docs/auth.md "Chat via API key"). **`/api/api-keys` is cookie-auth ONLY —
   an api key must NEVER be able to mint an api key.** N keys per user; only `purpose='supervisor'`
   and `purpose='orchestrator'` stay at-most-one-active (partial unique indexes). Extra hosts
   (e.g. a cloud session) use `purpose='host'` agent keys; key hot-swap targets only the host
