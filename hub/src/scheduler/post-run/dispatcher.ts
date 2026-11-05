@@ -82,7 +82,10 @@ export function buildDefaultEmailActions(
   chainDepth: number,
   actions: PostRunAction[],
   outcome?: { status: RunStatus; output_snippet: string | null },
+  opts?: { suppressDefaultFailureEmail?: boolean },
 ): PostRunAction[] {
+  // PTYCAP-07-08 (AM-F5-2): the heal path already sent the one owner notification for this failure.
+  if (opts?.suppressDefaultFailureEmail && outcome?.status === 'failed') return []
   if (chainDepth !== 0 && !isFailedOrBlocked(outcome)) return []
   if ((task as any).email_summary === false) return []
   if (actions.some((a) => a.type === 'notify_email')) return []
@@ -159,6 +162,8 @@ interface AfterRunArgs {
   output_snippet: string | null
   parentFireId: string | null
   chainDepth: number
+  /** PTYCAP-07-08: set only when the heal path owns the failure notification. */
+  suppressDefaultFailureEmail?: boolean
 }
 
 export async function afterRun(args: AfterRunArgs): Promise<void> {
@@ -296,6 +301,13 @@ export async function handleInternalTriageRun(args: AfterRunArgs): Promise<void>
   )
 }
 
+/** True when the default failure email would be built for a failed root run of this task. */
+export async function defaultFailureEmailApplies(task: ScheduledTask): Promise<boolean> {
+  const parsed = validatePostRunActions(await listActionsForTask(task.id))
+  if (!parsed.ok) return false // fireWithContext returns before any action when the set is invalid
+  return buildDefaultEmailActions(task, 0, parsed.value, { status: 'failed', output_snippet: null }).length > 0
+}
+
 export async function fireWithContext(args: FireCtxArgs): Promise<void> {
   // Awaited (errors contained) so the AAF forward + fallback email finish inside the
   // post-run lifecycle instead of being orphaned when the caller releases.
@@ -319,7 +331,7 @@ export async function fireWithContext(args: FireCtxArgs): Promise<void> {
     ...buildDefaultEmailActions(args.task, args.chainDepth, parsed.value, {
       status: args.status,
       output_snippet: args.output_snippet,
-    }),
+    }, { suppressDefaultFailureEmail: args.suppressDefaultFailureEmail }),
   ]
   if (actions.length === 0) return
 

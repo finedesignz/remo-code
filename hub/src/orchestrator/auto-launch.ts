@@ -125,6 +125,12 @@ export async function launchOrchestrator(args: {
    * REST `POST /api/orchestrator/start` omits it and is never blocked.
    */
   machine?: true;
+  /**
+   * PTYCAP-07 QC r2: `false` forces the session.start frame's dangerously_skip_permissions OFF,
+   * ignoring the persisted session setting. Passed by untrusted-triggered machine spawns (self-heal).
+   * Omitted => the session row value, unchanged for every other caller.
+   */
+  skipPermissions?: false;
 }): Promise<LaunchOrchestratorResult> {
   const requireEnabled = args.requireEnabled ?? true;
   const skipIfRunning = args.skipIfRunning ?? true;
@@ -272,7 +278,8 @@ export async function launchOrchestrator(args: {
 
     await updateSupervisorState(target.supervisorId, 'starting', runId);
 
-    const skipPerms = await getSessionSkipPermissions(sessionId, args.userId);
+    const skipPerms =
+      args.skipPermissions === false ? false : await getSessionSkipPermissions(sessionId, args.userId);
     // QC B1: the early halt check above sits before the target lookup, the locked
     // transaction, key minting and the awaits since - an engage that landed meanwhile
     // must still stop THIS send. Fresh read immediately before transmission (machine

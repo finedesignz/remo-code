@@ -807,13 +807,48 @@ export async function finalizeRun(
     ? await getTaskById(ctx.taskId)
     : updated?.task_id ? await getTaskById(updated.task_id) : null
   if (task) {
+    // PTYCAP-07-08 (AM-F5-2): heal hook BETWEEN the terminal UPDATE and post-run processing.
+    // Inert (returns false, imports nothing) unless the run failed AND REMO_HEAL_UNIFIED is ON.
+    const healOwnsNotification = status === 'failed'
+      ? await healFailedRunHook(task, runId, error ?? null)
+      : false
     await onRunFinalized(task, runId, status, error ?? null, {
       cost_usd: costUsd,
       duration_ms: dur,
       output_snippet: fields.output_snippet ?? null,
       parentFireId: ctx?.parentFireId ?? null,
       chainDepth: ctx?.chainDepth ?? 0,
+      ...(healOwnsNotification ? { suppressDefaultFailureEmail: true } : {}),
     })
+  }
+}
+
+/**
+ * Never throws into finalizeRun. Resolves true only when the heal path claimed and sent the one
+ * owner notification; any error resolves false so the normal failure email proceeds.
+ */
+async function healFailedRunHook(
+  task: ScheduledTask,
+  runId: string,
+  error: string | null,
+): Promise<boolean> {
+  try {
+    const { healUnifiedEnabled } = await import('../heal/config.ts')
+    if (!healUnifiedEnabled()) return false
+    const { healFailedScheduledRun } = await import('../heal/sources/scheduled-task.ts')
+    // Outbox: when the default failure email applies, it is persisted with the heal claim and sent
+    // from here, so a crash between the claim and the send cannot lose it (the sweep redelivers).
+    const { defaultFailureEmailApplies } = await import('./post-run/dispatcher.ts')
+    const persistOwnerEmail = await defaultFailureEmailApplies(task).catch(() => false)
+    const healOwns = await healFailedScheduledRun({ runId, status: 'failed', error, task, persistOwnerEmail })
+    if (persistOwnerEmail) {
+      const { deliverOwnerEmailForRun } = await import('../heal/owner-email.ts')
+      if (await deliverOwnerEmailForRun(runId)) return true
+    }
+    return healOwns
+  } catch (err: any) {
+    log.error('scheduler.dispatcher.heal_hook_failed', { task_id: task.id, run_id: runId, error: err?.message })
+    return false
   }
 }
 
@@ -823,6 +858,8 @@ interface PostRunPayload {
   output_snippet: string | null
   parentFireId?: string | null
   chainDepth: number
+  /** PTYCAP-07-08: the heal path already notified the owner of this failure. */
+  suppressDefaultFailureEmail?: boolean
 }
 
 async function onRunFinalized(
@@ -844,6 +881,7 @@ async function onRunFinalized(
       output_snippet: extra.output_snippet,
       parentFireId: extra.parentFireId ?? null,
       chainDepth: extra.chainDepth,
+      ...(extra.suppressDefaultFailureEmail ? { suppressDefaultFailureEmail: true } : {}),
     })
   } catch (err: any) {
     log.error('scheduler.dispatcher.post_run_failed', { task_id: task.id, run_id: runId, error: err?.message })

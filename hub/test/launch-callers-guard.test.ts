@@ -14,7 +14,9 @@ import { join, relative } from 'node:path'
 const SRC = join(import.meta.dir, '..', 'src')
 
 const MACHINE = new Set([
-  'orchestrator/inject.ts', //         BSA autospawn launch
+  // orchestrator/inject.ts no longer calls the primitive: BSA autospawn launches through the
+  // shared adapter below (PTYCAP-07-04), which is the machine call site for it and for heal.
+  'dispatch/governed-launch.ts', //    PTYCAP-07 shared governed autospawn adapter
   'scheduler/senders/agent.ts', //     maybeLaunchOfflineSession
   'ask/dispatch.ts', //                ensureOnline closure
   'work/dispatch.ts', //               ensureOnline closure
@@ -76,10 +78,39 @@ describe('launchSessionForUser caller classification', () => {
     expect(bad).toEqual([])
   })
 
+  test('the governed-launch adapter passes the machine option to the launch call (PTYCAP-07-04)', () => {
+    const src = readFileSync(join(SRC, 'dispatch/governed-launch.ts'), 'utf8')
+    expect(/launchSessionForUser\(\{[^}]*machine:\s*true/.test(src)).toBe(true)
+  })
+
   test('HUMAN callers never pass the machine option', () => {
     for (const f of HUMAN) {
       const src = readFileSync(join(SRC, f), 'utf8')
       expect(/machine\s*:\s*true/.test(src)).toBe(false)
     }
+  })
+})
+
+describe('PTYCAP-07-10: heal reaches launch only through the governed adapter', () => {
+  const healFiles = () => walk(join(SRC, 'heal')).map((f) => relative(SRC, f).split('\\').join('/'))
+
+  test('self-check: the heal tree is found', () => {
+    expect(healFiles().length).toBeGreaterThanOrEqual(10)
+  })
+
+  test('hub/src/heal contains no launchSessionForUser call', () => {
+    const callers = healFiles().filter((f) => codeLines(join(SRC, f)).some((l) => /\blaunchSessionForUser\s*\(/.test(l)))
+    expect(callers).toEqual([])
+  })
+
+  test('route.ts imports and calls governedLaunch', () => {
+    const src = codeLines(join(SRC, 'heal/route.ts')).join('\n')
+    expect(src).toMatch(/import \{ governedLaunch \} from '\.\.\/dispatch\/governed-launch\.ts'/)
+    expect(src).toMatch(/\bgovernedLaunch\(/)
+  })
+
+  test('governed-launch.ts is classified MACHINE and is a scanned call site', () => {
+    expect(MACHINE.has('dispatch/governed-launch.ts')).toBe(true)
+    expect(sites().some((s) => s.file === 'dispatch/governed-launch.ts')).toBe(true)
   })
 })
