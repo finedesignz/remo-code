@@ -310,3 +310,53 @@ describe('SSE hardening', () => {
     await res.body!.cancel().catch(() => {});
   });
 });
+
+describe('round 2: ws.send semantics, shared pending outcome, no duplicate prompt rows', () => {
+  test('ws.send returning 0 (dropped) fails the send; retry reuses the persisted row', async () => {
+    const app = buildApp();
+    let ret = 0;
+    fakeWs.send = (s: string) => { sent.push(JSON.parse(s)); return ret; };
+    const r1 = await app.request('/api/chat/sessions/s1/messages', post({ content: 'x', id: UUID }));
+    expect(r1.status).toBe(409);
+    expect(inserted.length).toBe(1);
+    // runner reconnects
+    unregisterChannel('s1'); registerChannel('s1', 'u1', fakeWs as any);
+    ret = 5;
+    const r2 = await app.request('/api/chat/sessions/s1/messages', post({ content: 'x', id: UUID }));
+    expect(r2.status).toBe(202);
+    expect(((await r2.json()) as any).id).toBe('m1');
+    expect(inserted.length).toBe(1); // reused, not re-inserted
+    const frames = sent.filter((m) => m.type === 'user_message');
+    expect(frames.length).toBe(2);
+    expect(frames[1].id).toBe('m1');
+  });
+  test('ws.send returning -1 (queued under backpressure) counts as delivered and is not released', async () => {
+    const app = buildApp();
+    fakeWs.send = (s: string) => { sent.push(JSON.parse(s)); return -1; };
+    const r1 = await app.request('/api/chat/sessions/s1/messages', post({ content: 'x', id: UUID }));
+    expect(r1.status).toBe(202);
+    const r2 = await app.request('/api/chat/sessions/s1/messages', post({ content: 'x', id: UUID }));
+    expect(r2.status).toBe(202);
+    expect(((await r2.json()) as any).duplicate).toBe(true);
+    expect(sent.filter((m) => m.type === 'user_message').length).toBe(1);
+  });
+  test('concurrent duplicate gets the original id, never null', async () => {
+    const app = buildApp();
+    const [a, b] = await Promise.all([
+      app.request('/api/chat/sessions/s1/messages', post({ content: 'x', id: UUID })),
+      app.request('/api/chat/sessions/s1/messages', post({ content: 'x', id: UUID })),
+    ]);
+    const ja = (await a.json()) as any; const jb = (await b.json()) as any;
+    expect(ja.id).toBe('m1'); expect(jb.id).toBe('m1');
+  });
+  test('concurrent duplicate of a refused send gets the same refusal', async () => {
+    gateBlock = 'daily_token_cap';
+    const app = buildApp();
+    const [a, b] = await Promise.all([
+      app.request('/api/chat/sessions/s1/messages', post({ content: 'x', id: UUID })),
+      app.request('/api/chat/sessions/s1/messages', post({ content: 'x', id: UUID })),
+    ]);
+    expect([a.status, b.status]).toEqual([429, 429]);
+    expect(sent.length).toBe(0);
+  });
+});

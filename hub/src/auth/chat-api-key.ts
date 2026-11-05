@@ -32,8 +32,8 @@ export async function chatApiKeyMiddleware(c: Context, next: Next) {
   let key: Awaited<ReturnType<typeof verifyApiKeyForExt>> = null
   try {
     key = await verifyApiKeyForExt(keyHash)
-  } catch (err: any) {
-    console.warn(`[chat-auth] key lookup failed: ${err?.message ?? err}`)
+  } catch {
+    console.warn("[chat-auth] key lookup failed")
     return c.json({ error: 'unauthorized' }, 401)
   }
   if (!key) return c.json({ error: 'unauthorized' }, 401)

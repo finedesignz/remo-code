@@ -97,20 +97,35 @@ chat.get('/sessions/:id/messages', async (c) => {
 })
 
 // Idempotency ledger for POST .../messages. The id is RESERVED synchronously (no await between
-// the check and the set) so two concurrent POSTs with the same id cannot both dispatch.
-// States: 'pending' (dispatch in flight) | 'delivered'. A refused / failed dispatch RELEASES the
-// reservation, so a retry with the same id re-sends; a delivered id is only ever replayed.
+// the lookup and the set). States:
+//   pending   dispatch in flight; a concurrent duplicate AWAITS this entry's promise and gets the
+//             same outcome (success -> 202 duplicate:true, refusal -> the same refusal)
+//   delivered the runner accepted the frame; replays return 202 duplicate:true
+//   failed    the message row was persisted but delivery failed; a retry with the same id REUSES the
+//             persisted row (never inserts a second copy) and re-dispatches
+// A refusal before persistence deletes the entry. Pending entries are never swept or evicted, and a
+// finishing dispatch only touches the entry it still owns (token compare).
 const DEDUPE_TTL_MS = 5 * 60_000
 const DEDUPE_MAX = 5000
-const sendLedger = new Map<string, { state: 'pending' | 'delivered'; messageId: string | null; expiresAt: number }>()
+
+type SendResult = { status: number; body: Record<string, unknown> }
+interface LedgerEntry {
+  token: symbol
+  state: 'pending' | 'delivered' | 'failed'
+  message: any | null
+  promise: Promise<SendResult> | null
+  expiresAt: number
+}
+const sendLedger = new Map<string, LedgerEntry>()
 
 function ledgerKey(sessionId: string, id: string) { return `${sessionId}\u0000${id}` }
 function ledgerSweep(now: number) {
-  for (const [k, v] of sendLedger) { if (v.expiresAt <= now) sendLedger.delete(k) }
-  while (sendLedger.size > DEDUPE_MAX) {
-    const first = sendLedger.keys().next()
-    if (first.done) break
-    sendLedger.delete(first.value)
+  for (const [k, v] of sendLedger) { if (v.state !== 'pending' && v.expiresAt <= now) sendLedger.delete(k) }
+  if (sendLedger.size > DEDUPE_MAX) {
+    for (const [k, v] of sendLedger) {
+      if (sendLedger.size <= DEDUPE_MAX) break
+      if (v.state !== 'pending') sendLedger.delete(k)
+    }
   }
 }
 export function __resetChatSendLedgerForTests() { sendLedger.clear() }
@@ -133,34 +148,55 @@ chat.post('/sessions/:id/messages', async (c) => {
   const sessionId = session.id as string
   const clientId = body.id ?? crypto.randomUUID()
 
-  // Atomic reserve: nothing awaits between the lookup and the set.
+  // Atomic section: no await between the lookup and the set.
   const now = Date.now()
   ledgerSweep(now)
   const lk = ledgerKey(sessionId, clientId)
   const existing = sendLedger.get(lk)
-  if (existing) return c.json({ id: existing.messageId, client_id: clientId, duplicate: true }, 202)
-  const reservation = { state: 'pending' as const, messageId: null as string | null, expiresAt: now + DEDUPE_TTL_MS }
-  sendLedger.set(lk, reservation)
+  let reuse: any | null = null
+  if (existing) {
+    if (existing.state === 'pending') {
+      const r = await existing.promise!
+      return r.status === 202
+        ? c.json({ ...r.body, duplicate: true }, 202)
+        : c.json(r.body, r.status as any)
+    }
+    if (existing.state === 'delivered') {
+      return c.json({ id: existing.message?.id ?? null, client_id: clientId, duplicate: true }, 202)
+    }
+    reuse = existing.message // 'failed': reuse the persisted row
+  }
+  const entry: LedgerEntry = { token: Symbol('send'), state: 'pending', message: reuse, promise: null, expiresAt: now + DEDUPE_TTL_MS }
+  entry.promise = dispatchSend(userId, session, sessionId, clientId, body, reuse, (m) => { entry.message = m })
+  sendLedger.set(lk, entry)
 
-  let res: Response
+  let result: SendResult
   try {
-    res = await dispatchSend(c, userId, session, sessionId, clientId, body, (id) => { reservation.messageId = id })
+    result = await entry.promise
   } catch (err) {
-    sendLedger.delete(lk)
+    if (sendLedger.get(lk)?.token === entry.token) {
+      if (entry.message) { entry.state = 'failed'; entry.promise = null } else sendLedger.delete(lk)
+    }
     throw err
   }
-  if (res.status === 202) sendLedger.set(lk, { state: 'delivered', messageId: reservation.messageId, expiresAt: Date.now() + DEDUPE_TTL_MS })
-  else sendLedger.delete(lk) // refused: release so a retry with the same id re-sends
-  return res
+  if (sendLedger.get(lk)?.token === entry.token) {
+    entry.expiresAt = Date.now() + DEDUPE_TTL_MS
+    if (result.status === 202) { entry.state = 'delivered'; entry.promise = null }
+    else if (entry.message) { entry.state = 'failed'; entry.promise = null }
+    else sendLedger.delete(lk)
+  }
+  return c.json(result.body, result.status as any)
 })
 
 async function dispatchSend(
-  c: any, userId: string, session: any, sessionId: string, clientId: string,
-  body: z.infer<typeof SendBody>, noteMessageId: (id: string) => void,
-): Promise<Response> {
+  userId: string, session: any, sessionId: string, clientId: string,
+  body: z.infer<typeof SendBody>, reuse: any | null, notePersisted: (m: any) => void,
+): Promise<SendResult> {
+  const refuse = (status: number, b: Record<string, unknown>): SendResult => ({ status, body: b })
+
   if (!(await licenseActive(userId))) {
     broadcastToSubscribers(sessionId, { type: 'send_refused', client_id: clientId, session_id: sessionId, reason: 'license_inactive' })
-    return c.json({ error: 'license_required', reason: 'license_inactive' }, 402)
+    return refuse(402, { error: 'license_required', reason: 'license_inactive' })
   }
 
   // Automation never drives a human's pty-interactive session (same decision the PTY relay uses).
@@ -168,45 +204,47 @@ async function dispatchSend(
   if (humanOnlyRejectsActor(CHAT_ACTOR, runnerType)) {
     const reason = `automation_blocked_on_pty:${CHAT_ACTOR}`
     broadcastToSubscribers(sessionId, { type: 'send_refused', client_id: clientId, session_id: sessionId, error: 'automation_blocked_on_pty', reason })
-    return c.json({ error: 'send_refused', reason }, 409)
+    return refuse(409, { error: 'send_refused', reason })
   }
 
-  if (session.cloud_session_id) return c.json({ error: 'send_refused', reason: 'cloud_session_unsupported' }, 409)
+  if (session.cloud_session_id) return refuse(409, { error: 'send_refused', reason: 'cloud_session_unsupported' })
 
   for (const gate of SPEND_GATES) {
     const r = await gate.check({ userId, sessionId, token: `chat:${clientId}`, prompt: body.content })
     if (!r.ok) {
       broadcastToSubscribers(sessionId, { type: 'send_refused', client_id: clientId, session_id: sessionId, error: gate.name, reason: r.reason })
-      return c.json({ error: 'send_refused', reason: r.reason }, 429)
+      return refuse(429, { error: 'send_refused', reason: r.reason })
     }
   }
 
   if (isScheduledRunActive(sessionId)) {
     broadcastToSubscribers(sessionId, { type: 'send_refused', client_id: clientId, session_id: sessionId, reason: 'scheduled_run_active' })
-    return c.json({ error: 'send_refused', reason: 'scheduled_run_active' }, 409)
+    return refuse(409, { error: 'send_refused', reason: 'scheduled_run_active' })
   }
 
-  // Liveness BEFORE persisting: an offline session must not leave a user message row behind
-  // (a same-id retry would otherwise store it twice).
-  const offline = (reason: string, id?: string) => {
+  const offline = (reason: string, id?: string): SendResult => {
     broadcastToSubscribers(sessionId, { type: 'session_status', session_id: sessionId, status: 'offline' })
     broadcastToSubscribers(sessionId, { type: 'send_refused', client_id: clientId, session_id: sessionId, error: 'session_offline', reason })
-    return c.json({ error: 'send_refused', reason: 'session_offline', ...(id ? { id } : {}) }, 409)
+    return refuse(409, { error: 'send_refused', reason: 'session_offline', ...(id ? { id } : {}) })
   }
+  // Liveness BEFORE persisting: an offline session must not leave a user message row behind.
   const channel0 = getChannel(sessionId)
   if (!channel0 || (channel0.ws as any).readyState !== 1) {
     if (channel0) unregisterChannel(sessionId)
-    return offline('No live runner is attached to this session.')
+    return offline('No live runner is attached to this session.', reuse?.id)
   }
 
-  let stored = body.content
-  if (body.images?.length) {
-    const md = body.images.map((img, i) => `![image-${i + 1}](data:${img.media_type};base64,${img.data})`).join('\n')
-    stored = md + '\n\n' + stored
+  let message = reuse
+  if (!message) {
+    let stored = body.content
+    if (body.images?.length) {
+      const md = body.images.map((img, i) => `![image-${i + 1}](data:${img.media_type};base64,${img.data})`).join('\n')
+      stored = md + '\n\n' + stored
+    }
+    message = await insertMessage(sessionId, 'user', stored)
+    notePersisted(message)
+    broadcastToSubscribers(sessionId, { type: 'message', session_id: sessionId, message })
   }
-  const message = await insertMessage(sessionId, 'user', stored)
-  noteMessageId(message.id)
-  broadcastToSubscribers(sessionId, { type: 'message', session_id: sessionId, message })
 
   // Re-resolve at send time: the channel may have changed across the insert await.
   const channel = getChannel(sessionId)
@@ -216,12 +254,14 @@ async function dispatchSend(
   }
   const payload: Record<string, unknown> = { type: 'user_message', id: message.id, content: body.content, ts: message.created_at }
   if (body.images) payload.images = body.images
-  if (channel.ws.send(JSON.stringify(payload)) === -1) {
+  // Bun ws.send: >0 bytes sent, -1 queued under backpressure (still accepted), 0 dropped (failure).
+  const sent = channel.ws.send(JSON.stringify(payload))
+  if (sent === 0) {
     unregisterChannel(sessionId)
-    return offline('Send to runner failed (socket closed mid-send).', message.id)
+    return offline('Send to runner failed (message dropped).', message.id)
   }
   try { await updateSessionStatus(sessionId, 'thinking') } catch {}
-  return c.json({ id: message.id, client_id: clientId }, 202)
+  return refuse(202, { id: message.id, client_id: clientId })
 }
 
 chat.post('/sessions/:id/cancel', async (c) => {
