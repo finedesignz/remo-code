@@ -4,6 +4,30 @@ This runbook walks through migrating the Coolify deployment webhook from the leg
 
 ---
 
+## 2026-10 update: unified heal routing (flag `REMO_HEAL_UNIFIED`)
+
+With `REMO_HEAL_UNIFIED` ON, `dispatchTriage` (`hub/src/api/coolify-webhook.ts`) builds a
+`coolify_deploy` `HealEvent` (`hub/src/heal/sources/coolify.ts`) and calls `routeHeal`
+(`docs/self-heal-routing.md`) instead of running the steps below:
+
+- The heal ledger (`heal_events`) replaces the Coolify storm claim. Dedupe key is
+  `coolify:<application_uuid>:<hash(repo,sha)>` (time-free) over `REMO_HEAL_DEDUPE_WINDOW_MS`
+  (default 15 minutes), claimed atomically.
+- There is no routability probe and no capacity fallback. The failure goes to a live session bound
+  to the failing repo, or to an allowlisted offline session of that repo (governed autospawn), or
+  fails fast in the same request: the metadata run is finalized `skipped`/`no_routable_session` and
+  the owner gets exactly one notification. An unrelated online agent session is never used.
+- There is no fail-open. A claim or routing error finalizes the metadata run `failed`
+  (`heal_route_error:<msg>`); it never dispatches anyway.
+- The lifetime counter key is `heal:<userId>:<canonical repo_ident>` and the full gate chain applies.
+
+With the flag OFF (the default) the legacy path below runs unchanged: it is kept verbatim as
+`dispatchTriageLegacy`, still uses `coolify_deploy_idempotency` and its fail-open claim, and the
+repo-keyed routing plus `pickSessionTarget` fallback described in the 2026-05-30 section stay in
+force. The `coolify_deploy_idempotency` table is untouched by the new path.
+
+---
+
 ## 2026-05-30 update: auto-dev P5 — error→fix→redeploy→VERIFY loop
 
 The Coolify failure path is now a **verified-closed** loop, not a hope-closed one. On

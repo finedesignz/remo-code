@@ -28,10 +28,10 @@
 
 ## Phases
 
-- [ ] **Phase 1: PTY Token Accounting** — live, mid-turn token accounting for a PTY turn (post-hoc is too late; a TUI turn can run for many minutes).
+- [x] **Phase 1: PTY Token Accounting** — live, mid-turn token accounting for a PTY turn (post-hoc is too late; a TUI turn can run for many minutes).
 - [x] **Phase 2: PTY Pre-Flight Gate** — a programmatic turn cannot be written to the PTY without passing the full gate chain.
 - [x] **Phase 3: Governed-Automation Guard** — `humanOnlyPtyGate` → `governedAutomationPtyGate`, new flag, default OFF.
-- [ ] **Phase 4: Lifetime Inject Counter + Kill Switch** — rate ceilings don't stop a slow grind; add a lifetime per-task counter and a real kill switch.
+- [x] **Phase 4: Lifetime Inject Counter + Kill Switch** — rate ceilings don't stop a slow grind; add a lifetime per-task counter and a real kill switch.
 - [ ] **Phase 5: Throwaway-Repo Due→PR Proof** — prove the thing actually works, once, on a repo nobody cares about.
 - [ ] **Phase 6: Hardening + Docs + Release** — real-Postgres e2e, docs, version bump, ship, smoke-verify.
 - [ ] **Phase 7: Unified Self-Heal Routing** — ONE heal pipeline fed by EVERY failure source; live-session-first routing; fail fast as `no_routable_session` instead of hanging 6h.
@@ -159,6 +159,19 @@ is armed) **and PR #346** (which owns `triage.ts`, `gates.ts`, `supervisor-dal.t
   4. No heal run can sit `pending` until the 6h `run_timeout` reaper — replayed by the incident
      fixtures (runs `8a6e0534`, `fa377e27`; task `0e16bf38`).
   5. Flag-gated; default OFF is a true no-op reproducing today's behaviour exactly.
+**Plans:** 11 plans (validation map: `.planning/phases/PTYCAP-07-self-heal-routing/07-VALIDATION.md`)
+Plans:
+- [ ] 07-01-PLAN.md - heal types, flag/knob config, canonical repo ident, shared counter-key builder (wave 1)
+- [ ] 07-02-PLAN.md - heal_events ledger DDL + atomic-claim DAL + durable internal-task marker (wave 1)
+- [ ] 07-03-PLAN.md - flag-OFF characterization traces recorded on unmodified code (wave 1)
+- [ ] 07-04-PLAN.md - governed launch adapter, shared liveness, launch-primitive run-leak fix (wave 1)
+- [ ] 07-05-PLAN.md - target resolution + routeHeal live path (tracer) + guards and terminal wrapper (wave 2)
+- [ ] 07-06-PLAN.md - single-attempt notification, governed autospawn branch, spawn deadline, boot sweep (wave 3)
+- [ ] 07-07-PLAN.md - per-source sinks (coolify, scheduled-task, error-capture, feedback) (wave 3)
+- [ ] 07-08-PLAN.md - Coolify + scheduled-task failure sources, incident V1/V2 at source level (wave 4)
+- [ ] 07-09-PLAN.md - error-capture + feedback sources (wave 4)
+- [ ] 07-10-PLAN.md - single-seam guard, extended guards, final flag-OFF proof, incident e2e on Postgres (wave 5)
+- [ ] 07-11-PLAN.md - docs, CLAUDE.md env/map/invariant, docs:sync check, baseline re-measure (wave 6)
 
 ### Phase 8: Periodic Task QC + Optimization
 **Goal**: A recurring, bounded meta-task audits every `scheduled_tasks` row for failing / silently
@@ -200,7 +213,7 @@ fix the CAUSE, and escalates to the human when it cannot.
 | 4. Lifetime Counter + Kill Switch | Executed (8/8 plans) - QC BLOCKED (2 open races), draft PR #506 |
 | 5. Throwaway-Repo Due→PR Proof | Not started |
 | 6. Hardening + Docs + Release | Not started |
-| 7. Unified Self-Heal Routing | Specced, not started (blocked on #346 + Phase 4) |
+| 7. Unified Self-Heal Routing | Executed (11/11 plans) - QC BLOCKED (1 open MAJOR), draft PR |
 | 8. Periodic Task QC + Optimization | Specced, not started (blocked on Phase 4) |
 | 9. Cap-Hit → QC Trigger | Specced, not started (blocked on Phases 4 + 8) |
 

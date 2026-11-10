@@ -68,6 +68,7 @@ import { startStaleRunReaperSweep, stopStaleRunReaperSweep } from './sessions/st
 import { startBatchSweep, stopBatchSweep } from './revanote/batch-dispatch.ts'
 import { startOnceDueSweep, stopOnceDueSweep } from './scheduler/once-due-sweep.ts'
 import { startRevanoteStallSweep, stopRevanoteStallSweep } from './revanote/stall-alert.ts'
+import { healUnifiedEnabled } from './heal/config.ts'
 import { assertTokenCapConfig } from './dispatch/gates.ts'
 import { assertAutomationControlsEnv, assertAutomationControlsTables } from './dispatch/automation-controls.ts'
 import { registerTokenCapAlarm } from './observability/token-cap-alarm.ts'
@@ -788,6 +789,14 @@ runMigrations()
     // group's latest arrival, so one Revanote review lands as one branch/PR
     // instead of one per comment. No-op when nothing pending carries a batch_id.
     startBatchSweep()
+    // PTYCAP-07-06 — boot-time sweep: terminalizes heal autospawn launches stranded by a
+    // restart (the spawn-deadline timer is process-local) so the 6h reaper is never their
+    // backstop. Event-driven (once at boot plus one follow-up at the deadline, no interval); flag-OFF boot loads nothing of it.
+    if (healUnifiedEnabled()) {
+      void import('./heal/sweep.ts')
+        .then((m) => m.bootSweepHealLaunches())
+        .catch((err) => console.error('[startup] heal boot sweep failed:', err?.message ?? err))
+    }
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {
