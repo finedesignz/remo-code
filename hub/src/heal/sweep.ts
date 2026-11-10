@@ -11,7 +11,7 @@
 
 import { healUnifiedEnabled, healSpawnTimeoutMs } from './config.ts';
 import { OUTCOME_AUTOSPAWN_STARTING } from './types.ts';
-import { sweepOwnerEmails, REAL_OWNER_EMAIL_DEPS, type OwnerEmailDeps } from './owner-email.ts';
+import { sweepOwnerEmails, REAL_OWNER_EMAIL_DEPS, OWNER_EMAIL_LEASE_MS, type OwnerEmailDeps } from './owner-email.ts';
 import { notifyOnce, REAL_NOTIFY_DEPS, type NotifyDeps } from './notify.ts';
 import type { HealEvent } from './types.ts';
 import type { HealOutcomeExtra, HealEventRow } from '../db/heal-events-dal.ts';
@@ -178,7 +178,19 @@ export async function bootSweepHealLaunches(deps: SweepDeps = REAL_SWEEP_DEPS): 
   arm(() => {
     void sweepStaleHealLaunches(deps).catch((err) => log(`follow-up sweep failed: ${err?.message ?? err}`));
   }, followUpDelayMs());
+  if (deps.ownerEmails) {
+    // QC re-QC N1: a delivery lease taken just before a crash is skipped by both sweeps above, so
+    // arm ONE more sweep strictly past the lease expiry (one-shot, no interval).
+    arm(() => {
+      void sweepStaleHealLaunches(deps).catch((err) => log(`lease-expiry sweep failed: ${err?.message ?? err}`));
+    }, leaseFollowUpDelayMs());
+  }
   return first;
+}
+
+/** Strictly past the owner-email delivery lease so a lease taken before a crash is retried. */
+export function leaseFollowUpDelayMs(): number {
+  return OWNER_EMAIL_LEASE_MS + FOLLOW_UP_MARGIN_MS;
 }
 
 /** Strictly past the staleness guard (2x spawn timeout) so every boot-stranded row qualifies. */

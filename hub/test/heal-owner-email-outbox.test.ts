@@ -135,6 +135,16 @@ describe('owner-email outbox: obligation probe failure (QC r4 #2)', () => {
   })
 })
 
+describe('owner-email outbox: transient probe failure (re-QC N2)', () => {
+  test('a probe that fails once is retried and the real answer decides (no obligation => legacy email kept)', async () => {
+    const w = world()
+    let calls = 0
+    const flaky: OwnerEmailDeps = { ...w.outbox, hasObligation: async () => { if (calls++ === 0) throw new Error('blip'); return false } }
+    expect(await deliverOwnerEmailForRun('no-event-run', flaky)).toBe(false)
+    expect(calls).toBe(2)
+  })
+})
+
 describe('owner-email outbox: crash between claim and send', () => {
   test('sweep sends exactly one email; a second sweep sends none', async () => {
     const w = world()

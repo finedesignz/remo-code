@@ -8,6 +8,9 @@
 
 import type { OwnerEmailClaim } from '../db/heal-events-dal.ts';
 
+/** Delivery lease: a lease older than this (a crash mid-send) may be re-taken. */
+export const OWNER_EMAIL_LEASE_MS = 5 * 60_000;
+
 export interface OwnerEmailDeps {
   hasObligation(runId: string): Promise<boolean>;
   claimByRun(runId: string): Promise<OwnerEmailClaim | null>;
@@ -69,7 +72,13 @@ async function sendClaimed(c: OwnerEmailClaim, deps: OwnerEmailDeps): Promise<bo
  */
 export async function deliverOwnerEmailForRun(runId: string, deps: OwnerEmailDeps = REAL_OWNER_EMAIL_DEPS): Promise<boolean> {
   try {
-    if (!(await deps.hasObligation(runId))) return false;
+    let has: boolean;
+    try {
+      has = await deps.hasObligation(runId);
+    } catch {
+      has = await deps.hasObligation(runId); // one retry: a transient probe error must not decide the outcome
+    }
+    if (!has) return false;
   } catch (err: any) {
     // Fail toward suppression: if an obligation exists the sweep delivers it, and returning false
     // here would also send the legacy default email (a duplicate). The obligation is written only

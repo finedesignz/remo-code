@@ -9,6 +9,7 @@ import {
   sweepStaleHealLaunches,
   bootSweepHealLaunches,
   followUpDelayMs,
+  leaseFollowUpDelayMs,
   SWEEP_BATCH,
   type SweepDeps,
 } from '../src/heal/sweep.ts'
@@ -304,6 +305,15 @@ describe('follow-up sweep at the deadline (SC4: no heal run stays pending past d
     await new Promise((r) => setTimeout(r, 10))
     expect(swept).toEqual(['quick'])
     expect(timers.length).toBe(1) // the follow-up does not re-arm
+  })
+
+  test('with the owner-email outbox wired, a second one-shot timer is armed past the delivery lease (re-QC N1)', async () => {
+    const { deps, timers } = clockDb([], 1_000_000)
+    const ownerEmails = { list: async () => [] } as any
+    await bootSweepHealLaunches({ ...deps, ownerEmails })
+    expect(timers.length).toBe(2)
+    expect(timers[1]!.ms).toBe(leaseFollowUpDelayMs())
+    expect(timers[1]!.ms).toBeGreaterThan(5 * 60_000)
   })
 
   test('the delay tracks REMO_HEAL_SPAWN_TIMEOUT_MS', () => {

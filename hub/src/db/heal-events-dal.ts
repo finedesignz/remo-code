@@ -22,6 +22,7 @@
  * Window / cap / retention values are ARGUMENTS; this module never reads env.
  */
 import { sql } from './postgres.ts'
+import { OWNER_EMAIL_LEASE_MS } from '../heal/owner-email.ts'
 
 /** postgres.js client or transaction (tagged template; the client also has .begin). */
 export type HealExec = any
@@ -324,7 +325,7 @@ export async function listStaleLaunchingHealEvents(
 // mid-send, can be re-taken), owner_email_delivered_at is the terminal flag stamped after the send.
 // At-least-once across a crash in the narrow send->mark window, never zero, never concurrent.
 
-export const OWNER_EMAIL_LEASE_MS = 5 * 60_000
+export { OWNER_EMAIL_LEASE_MS }
 
 export interface OwnerEmailClaim {
   id: string
