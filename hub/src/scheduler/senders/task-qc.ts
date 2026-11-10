@@ -202,6 +202,8 @@ export async function sendTaskQcTask(
     findings: result.findings.length,
     proposals: result.proposals.length,
     digest_delivered: delivered,
+    // a pass cut short by its deadline is visible on the run row instead of reading as a clean audit
+    ...(result.truncated ? { truncated: true } : {}),
   })
   await finalizeRun(ctx.runId, 'success', null, { output_snippet: snippet, only_if_active: true })
 }
