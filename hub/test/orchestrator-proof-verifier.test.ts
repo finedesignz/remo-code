@@ -175,6 +175,14 @@ describe('verifyProof: PR scope', () => {
     expect(t.detail).toContain('proof/other')
   })
 
+  test('a proof/ PR from an EARLIER run (created before arming) does not terminate a re-arm; an undated one fails closed', async () => {
+    const prior = pr({ number: 5, headRef: 'proof/previous-run', createdAt: '2026-09-01T00:00:00Z', state: 'closed' })
+    const okRun = await verifyProof(makeFakeProofGithub({ ...greenPr(), pulls: [pr(), prior] }), run())
+    expect(okRun.kind === 'terminal' ? okRun.outcome : 'pending').toBe('pr_open_green')
+    const undated = terminal(await verifyProof(makeFakeProofGithub({ pulls: [pr({ number: 5, headRef: 'proof/previous-run', createdAt: null })] }), run()))
+    expect(undated.outcome).toBe('terminated:pr_scope_violation')
+  })
+
   test('the run PR with a non-default base is pr_scope_violation and carries the PR url', async () => {
     const gh = makeFakeProofGithub({ pulls: [pr({ baseRef: 'release' })] })
     const t = terminal(await verifyProof(gh, run()))

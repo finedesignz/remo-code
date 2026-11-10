@@ -90,6 +90,9 @@ const scrubbed = (): Record<string, string> => {
   return env
 }
 
+// Each case cold-spawns bun from a temp cwd (5-10s on a loaded Windows host); bun's 5s default flakes.
+const SPAWN_TEST_TIMEOUT_MS = 90_000
+
 const FULL_ARGS = ['--user', 'u1', '--session', 's1', '--repo-ident', 'github://acme/proof', '--installation-id', '4242']
 
 describe('arm script spawned with no database', () => {
@@ -99,13 +102,13 @@ describe('arm script spawned with no database', () => {
     expect(r.code).toBe(2)
     expect(r.out.trim()).toBe('')
     expect(r.err).toContain('DATABASE_URL')
-  })
+  }, SPAWN_TEST_TIMEOUT_MS)
 
   test('arm and --disarm and --enable also refuse before any import when there is no database', () => {
     expect(runScript(FULL_ARGS, scrubbed()).code).toBe(2)
     expect(runScript(['--user', 'u1', '--disarm'], scrubbed()).code).toBe(2)
     expect(runScript(['--user', 'u1', '--enable'], scrubbed()).code).toBe(2)
-  })
+  }, SPAWN_TEST_TIMEOUT_MS)
 
   test('missing or conflicting arguments exit 2 with a usage message', () => {
     const none = runScript([], scrubbed())
@@ -115,5 +118,5 @@ describe('arm script spawned with no database', () => {
     expect(two.code).toBe(2)
     const badId = runScript(['--user', 'u', '--session', 's', '--repo-ident', 'github://a/b', '--installation-id', 'abc'], scrubbed())
     expect(badId.code).toBe(2)
-  })
+  }, SPAWN_TEST_TIMEOUT_MS)
 })

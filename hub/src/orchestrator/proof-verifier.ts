@@ -145,15 +145,18 @@ export async function verifyProof(github: ProofGithub, run: ProofRun): Promise<P
   // QC round 1 (codex #5): a PR the run did not make, opened after arming from any head that is not
   // under proof/, is out of scope (D-10 iii). Older PRs predate the run and are not the agent's.
   const armedAt = Date.parse(String(run.armed_at instanceof Date ? run.armed_at.toISOString() : run.armed_at));
-  const offPrefix = pulls.find((p) => {
-    if (p.headRef.startsWith(PROOF_BRANCH_PREFIX)) return false;
+  // Undated fails closed (in scope), same for both scans below.
+  const createdSinceArm = (p: PullSummary): boolean => {
     const created = p.createdAt ? Date.parse(p.createdAt) : NaN;
     return !Number.isFinite(created) || !Number.isFinite(armedAt) || created >= armedAt;
-  });
+  };
+  const offPrefix = pulls.find((p) => !p.headRef.startsWith(PROOF_BRANCH_PREFIX) && createdSinceArm(p));
   if (offPrefix) {
     return terminal('terminated:pr_scope_violation', `off_prefix_head ${offPrefix.headRef} by ${offPrefix.authorLogin ?? 'unknown'}`, offPrefix);
   }
-  const foreign = pulls.find((p) => p.headRef.startsWith(PROOF_BRANCH_PREFIX) && p.headRef !== run.branch);
+  // QC re-run (codex): a proof/ PR from an EARLIER run predates this arm and is not this run's agent;
+  // without the age filter a leftover PR from a previous proof would terminate every re-arm.
+  const foreign = pulls.find((p) => p.headRef.startsWith(PROOF_BRANCH_PREFIX) && p.headRef !== run.branch && createdSinceArm(p));
   if (foreign) return terminal('terminated:pr_scope_violation', `foreign_head ${foreign.headRef}`, foreign);
 
   const mine = pulls.filter((p) => p.headRef === run.branch);
