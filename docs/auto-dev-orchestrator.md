@@ -189,6 +189,14 @@ drains the parked prompt on reconnect. The autospawn seam writes ONE
 `routine_run_log` row with `command = 'autospawn-launch'` per real spawn (also the
 source for the per-day launch cap).
 
+**Shared governed launch (PTYCAP Phase 7).** The post-flag part of this chain was extracted out
+of `maybeAutospawnOffline` into `governedLaunch` (`hub/src/dispatch/governed-launch.ts`), shared
+with the self-heal seam (`docs/self-heal-routing.md`). The orchestrator uses its legacy policy:
+unchanged check order, reason strings and best-effort ledger row (same e2e suites, unmodified). The
+ghost-aware liveness predicate moved to `hub/src/sessions/liveness.ts` (`isSessionLive`) and is
+shared by both callers. `launchSessionForUser` now closes its reserved run on every non-launch exit.
+The heal flag is separate from `REMO_ORCHESTRATOR_ENABLED`.
+
 **The full gate AND-chain** (ANY miss ⇒ the legacy `no_session`, i.e. a strict no-op):
 
 ```

@@ -1833,3 +1833,53 @@ CREATE INDEX IF NOT EXISTS idx_orchestrator_proof_runs_counter_key
   ON orchestrator_proof_runs(counter_key);
 CREATE INDEX IF NOT EXISTS idx_orchestrator_proof_runs_session
   ON orchestrator_proof_runs(session_id);
+
+-- PTYCAP-07 self-heal event ledger. One row per heal claim; the atomic claim
+-- (tx advisory lock + real time-window check) lives in heal-events-dal.ts, the
+-- unique indexes below are only the backstop. No FK on the run id columns: runs
+-- are reaped independently and a heal row must outlive them. Additive DDL only.
+CREATE TABLE IF NOT EXISTS heal_events (
+  id                      TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id                 UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  source                  TEXT NOT NULL,
+  repo_ident              TEXT,
+  dedupe_key              TEXT NOT NULL,
+  window_bucket           BIGINT NOT NULL,
+  trigger_run_id          TEXT,
+  dispatch_run_id         TEXT,
+  metadata_run_id         TEXT,
+  session_id              TEXT,
+  outcome                 TEXT,
+  notification_claimed_at TIMESTAMPTZ,
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- PTYCAP-07 QC r1: minimal validated source context (e.g. error_id/project_id) so the stale-launch
+-- sweep can rebuild the per-event sink. Additive, nullable, never backfilled.
+ALTER TABLE heal_events ADD COLUMN IF NOT EXISTS recovery_ctx JSONB;
+-- PTYCAP-07 repair: durable default owner-email obligation (scheduled_task only), written in the
+-- claim transaction; delivered once via a lease CAS, terminal flag owner_email_delivered_at.
+-- Additive, nullable, never backfilled.
+ALTER TABLE heal_events ADD COLUMN IF NOT EXISTS owner_email JSONB;
+ALTER TABLE heal_events ADD COLUMN IF NOT EXISTS owner_email_claimed_at TIMESTAMPTZ;
+ALTER TABLE heal_events ADD COLUMN IF NOT EXISTS owner_email_delivered_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_heal_events_owner_email_pending
+  ON heal_events(created_at) WHERE owner_email IS NOT NULL AND owner_email_delivered_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_heal_events_bucket
+  ON heal_events(user_id, source, dedupe_key, window_bucket);
+-- A run can trigger at most one heal event, ever.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_heal_events_trigger
+  ON heal_events(source, trigger_run_id) WHERE trigger_run_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_heal_events_user_key_created
+  ON heal_events(user_id, dedupe_key, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_heal_events_dispatch_run
+  ON heal_events(dispatch_run_id);
+CREATE INDEX IF NOT EXISTS idx_heal_events_metadata_run
+  ON heal_events(metadata_run_id);
+CREATE INDEX IF NOT EXISTS idx_heal_events_user_repo_created
+  ON heal_events(user_id, repo_ident, created_at DESC);
+
+-- Durable internal-task marker (PTYCAP-07 AM-F5-3). Never backfilled: rows that
+-- predate this column stay recognised by the __internal_ name-prefix half of
+-- isInternalScheduledTask (hub/src/heal/internal-task.ts).
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS is_internal BOOLEAN NOT NULL DEFAULT false;

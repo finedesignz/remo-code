@@ -332,12 +332,15 @@ export async function runProofChecks(a: ProofChecksArgs): Promise<void> {
     const armedB = await arm(userB, sessB, repoA, { maxInjects: 3 })
     const runB = armedB.run
     counterKeys.push(runB.counter_key)
+    // Identity is checked before the inject ceiling (proofIdentityRefusal). This block is the
+    // ceiling, so the request carries the active run id the way a real proof dispatch does.
     const gateReq = (token: string) => ({
       userId: userB,
       sessionId: sessB,
       token,
       prompt: '',
       counterKey: runB.counter_key,
+      proofRunId: runB.id,
     })
     const reserve = (token: string) =>
       controls.reserveInject({ userId: userB, sessionId: sessB, token, counterKey: runB.counter_key })

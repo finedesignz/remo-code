@@ -417,6 +417,24 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   terminal); the hub verifier (`hub/src/orchestrator/proof-verifier.ts`) is the DETECTIVE layer; the macro
   prompt is advisory only; credential scrubbing is NOT relied on (the orchestrator session is exempt from
   the git-push scrub). SC-2/SC-3 are "armed-ready, live proof pending owner GO" until the owner arms it.
+- **`REMO_HEAL_UNIFIED`** (default **OFF**; accepts `1|true|yes|on` only, anything else is OFF; read at call
+  time): the unified **self-heal seam** (PTYCAP Phase 7; [docs/self-heal-routing.md](docs/self-heal-routing.md)).
+  OFF = every failure source (Coolify deploy webhook, scheduled-task failure, error-capture, feedback) keeps its
+  current path byte for byte and `routeHeal` is never called. ON = each source builds a `HealEvent` and calls
+  `hub/src/heal/route.ts::routeHeal`: live repo-bound session (ghost-aware) -> dispatch; else an OFFLINE
+  session of an allowlisted repo -> governed autospawn; else fail fast `no_routable_session` with ONE owner
+  notification (exactly one send attempt, not exactly-once delivery). Companion knobs (hub env, all in
+  `hub/src/heal/config.ts`; non-positive/non-finite/non-numeric => the default, never "no bound"):
+  **`REMO_HEAL_DEDUPE_WINDOW_MS`** (900000), **`REMO_HEAL_SPAWN_TIMEOUT_MS`** (25000, deadline for a launched
+  session to connect), **`REMO_HEAL_MAX_CLAIMS_PER_USER_HOUR`** (30), **`REMO_HEAL_MAX_PER_REPO_HOUR`** (4,
+  per-repo hourly dispatch bound), **`REMO_HEAL_MAX_PER_TASK_DAY`** (3, per scheduled-task daily ceiling),
+  **`REMO_HEAL_RETENTION_HOURS`** (48, floored at 24). **Arming:** heal autospawn needs the heal flag AND
+  `REMO_ORCHESTRATOR_AUTOSPAWN`, never `REMO_ORCHESTRATOR_ENABLED`; the allowlist
+  (`orchestrator_autospawn_allowlist`) is shared with the orchestrator and EMPTY by default, so a default
+  configuration spawns nothing. The `heal_events` ledger (atomic advisory-lock claim, unique-index backstop,
+  notification ownership by conditional update) is the dedupe and audit store; a boot sweep
+  (`hub/src/heal/sweep.ts`, only when the flag is ON) terminalizes launches stranded by a restart. Arming is an
+  owner action: [docs/orchestrator-autospawn-runbook.md](docs/orchestrator-autospawn-runbook.md).
 
 ## Docs map — subsystems & phases
 
@@ -451,6 +469,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 | API docs | [api.md](docs/api.md) · `/openapi.json` · `/docs` | OpenAPI 3.1 assembled in `hub/src/api/_openapi.ts`; run `bun run docs:sync` after route changes (docs-drift CI enforces). |
 | Cloud-session host | [cloud-session-supervisor.md](docs/cloud-session-supervisor.md) | Headless supervisor inside a Claude Code cloud session: `tools/cloud-session/setup.sh` (env Setup script) clones + starts the Bun source, SessionStart hook restarts it; hub WebSockets honour `HTTPS_PROXY` (`supervisor/src/ws-proxy.ts`); authenticates with an **additional host key** (`purpose='host'`, `POST /api/api-keys {host:true}`) so it never evicts the tray app's key. |
 | TEAB tasks | [teab-tasks.md](docs/teab-tasks.md) · [.planning/TEAB-MILESTONE.md](.planning/TEAB-MILESTONE.md) | Milestone TEAB — `task_type:'teab'` scheduled task runs `teab run --repo <X>` on the supervisor host (allowlisted `teab_run`/`teab_status` commands; preflight fails closed; NO bypassPermissions / NO programmatic claude flags). Hub-driven background poll-to-terminal (idle-teardown-safe) → `finalizeRun` → post-run actions; cost/token cap unchanged. Columns `teab_repo_ident`/`teab_last_status`. **A new signed supervisor MSI is REQUIRED** for `teab_run` to exist on installed hosts. |
+| Unified self-heal routing | [self-heal-routing.md](docs/self-heal-routing.md) | PTYCAP Phase 7 - one seam, `hub/src/heal/route.ts::routeHeal`, for the four failure sources (Coolify deploy, scheduled-task failure, error-capture, feedback), behind `REMO_HEAL_UNIFIED` (default OFF). Live repo-bound session -> shared `dispatch()` six-gate chain; allowlisted offline repo -> `governedLaunch` (gates + lifetime reservation BEFORE the spawn); else fail fast `no_routable_session` + one notification. `heal_events` ledger (dedupe, provenance, notification owner), key `heal:<userId>:<canonical repo_ident>`, boot sweep. `POST /api/sessions/heal` is unchanged (prefix-compatible key only). |
 
 ## Cross-cutting invariants (do not violate)
 
@@ -496,7 +515,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   feedback and Coolify triage prompt builders. A machine path NEVER instructs the agent to push
   to main / merge / deploy: revanote's `deploy_strategy='direct'` and `auto_merge` are inert
   unless `revanote_app_mappings.trusted = true` (default FALSE). Machine-triggered spawns force
-  `dangerously_skip_permissions: false` (`dispatch/spawn-on-error.ts`, `scheduler/senders/triage.ts`)
+  `dangerously_skip_permissions: false` (`dispatch/spawn-on-error.ts`, `scheduler/senders/triage.ts`; `spawn-on-error` stays for flag-OFF error-capture/feedback and Revanote, while `ask/dispatch.ts` calls `launchSessionForUser` directly and the heal seam launches only through `governedLaunch`)
   regardless of the session-row default. Every self-heal gate list carries `sessionInjectRateGate`
   alongside the cost + token caps — a report flood cannot buy N turns/hour.
 - **Public webhooks: raw body BEFORE JSON parse**, constant-time secret compare, HMAC over
@@ -557,6 +576,14 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   directly after the kill switch** (PTYCAP Phase 5). They are no-ops with the proof flag stack OFF or when
   the session has no active proof run; a protection read failure or drift fails closed. Enforced by the
   gate-coverage scans; see [docs/ptycap-05-proof-runbook.md](docs/ptycap-05-proof-runbook.md).
+- **One self-heal seam (PTYCAP Phase 7).** A failure source builds a `HealEvent` and calls `routeHeal`
+  (`hub/src/heal/route.ts`); none constructs its own routing, capacity fallback, dispatch, supervisor frame or
+  launch for a heal, none calls `listOnlineAgentSessionsForUser` / `pickSessionTarget` / `launchSessionForUser`,
+  and there is no fail-open dispatch-anyway branch (a routing error finalizes the run `failed`). The lifetime
+  key is `heal:<userId>:<canonical repo_ident>` from `buildHealKey` only. Guarded by
+  `hub/test/heal-single-seam.test.ts` (plus the extended token-cap, counter-key, session-start and
+  launch-caller guards); flag OFF is pinned by `hub/test/heal-flag-off.test.ts`. See
+  [docs/self-heal-routing.md](docs/self-heal-routing.md).
 - **Don't hand-roll per-subsystem dispatch/queue/grace.** Round-2 collapse is complete — use
   `hub/src/dispatch/` (the old `scheduler/session-queue.ts` shim is deleted).
 - **One-time tasks are `scheduled_tasks`, not a parallel queue (milestone once).** A

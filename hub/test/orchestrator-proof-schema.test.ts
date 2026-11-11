@@ -8,7 +8,12 @@ import { join } from 'node:path'
 
 const schema = readFileSync(join(import.meta.dir, '../src/db/schema.sql'), 'utf8').replace(/\r\n/g, '\n')
 const start = schema.indexOf('-- ── PTYCAP-05 (throwaway-repo due->PR proof)')
-const block = start >= 0 ? schema.slice(start) : ''
+// The proof DDL is one section. Later phases append their own sections after it
+// (PTYCAP-07 heal_events sits immediately below). Bound the block at the next
+// section banner so those sections are not counted as proof DDL.
+const proofRest = start >= 0 ? schema.slice(start) : ''
+const nextSection = proofRest.slice(1).search(/^-- (?:──|PTYCAP-)/m)
+const block = nextSection >= 0 ? proofRest.slice(0, nextSection + 1) : proofRest
 
 describe('orchestrator_proof_runs DDL', () => {
   test('the PTYCAP-05 block exists and creates the table idempotently', () => {
