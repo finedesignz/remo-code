@@ -127,6 +127,24 @@ export async function runProofChecks(a: ProofChecksArgs): Promise<void> {
   const scheduleRule = () => ({ interval: 5, unit: 'minutes', start_at: new Date().toISOString() })
   const arm = (userId: string, sessionId: string, repoIdent: string, over: Record<string, unknown> = {}) =>
     dal.armProofRunTx({ userId, sessionId, repoIdent, scheduleRule: scheduleRule(), ...frozen(over) } as any)
+  // Arm refuses while ANY other orchestrator task is enabled (hub-global flags). The e2e
+  // suite runs files concurrently, and orchestrator-due-waves enables one for a short
+  // scan. That refusal is real; it is not a single-flight result. Wait it out, then
+  // assert the race. A non-transient error still fails immediately.
+  const TRANSIENT_ARM = new Set(['other_orchestrator_task_enabled', '40P01', '40001'])
+  const reasonCode = (err: any): string => String(err?.code ?? err?.message ?? 'unknown')
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+  const armWhenQuiet = async (userId: string, sessionId: string, repoIdent: string, over: Record<string, unknown> = {}) => {
+    const deadline = Date.now() + 8_000
+    for (;;) {
+      try {
+        return await arm(userId, sessionId, repoIdent, over)
+      } catch (err: any) {
+        if (!TRANSIENT_ARM.has(reasonCode(err)) || Date.now() >= deadline) throw err
+        await sleep(100)
+      }
+    }
+  }
 
   let rawN = 0
   /** Raw INSERT bypassing the DAL (constraint probes). */
@@ -191,10 +209,24 @@ export async function runProofChecks(a: ProofChecksArgs): Promise<void> {
     expect(idx.every((r: any) => /UNIQUE/i.test(r.indexdef) && /WHERE/i.test(r.indexdef))).toBe(true)
 
     // ── 2. Single-flight under concurrency: 5 parallel arms, exactly 1 wins ──────────────
-    const arms = await Promise.allSettled(Array.from({ length: 5 }, () => arm(userA, sessA, repoA)))
-    const won = arms.filter((r) => r.status === 'fulfilled') as PromiseFulfilledResult<{ run: any; taskId: string }>[]
-    const lost = arms.filter((r) => r.status === 'rejected') as PromiseRejectedResult[]
-    expect(won.length).toBe(1)
+    const deadline = Date.now() + 8_000
+    let won: PromiseFulfilledResult<{ run: any; taskId: string }>[] = []
+    let lost: PromiseRejectedResult[] = []
+    let lostCodes = ''
+    for (;;) {
+      const arms = await Promise.allSettled(Array.from({ length: 5 }, () => arm(userA, sessA, repoA)))
+      won = arms.filter((r) => r.status === 'fulfilled') as PromiseFulfilledResult<{ run: any; taskId: string }>[]
+      lost = arms.filter((r) => r.status === 'rejected') as PromiseRejectedResult[]
+      lostCodes = lost.map((r) => reasonCode(r.reason)).join(',')
+      const settled =
+        won.length === 1 && lost.length === 4 && lost.every((r) => reasonCode(r.reason) === 'proof_already_active')
+      if (settled) break
+      const blocked =
+        won.length === 0 && lost.length === 5 && lost.every((r) => TRANSIENT_ARM.has(reasonCode(r.reason)))
+      if (!blocked || Date.now() >= deadline) break
+      await sleep(100)
+    }
+    expect(won.length, `lost codes: ${lostCodes}`).toBe(1)
     expect(lost.length).toBe(4)
     expect(lost.every((r) => (r.reason as any)?.code === 'proof_already_active')).toBe(true)
     const runA = won[0].value.run
@@ -329,7 +361,7 @@ export async function runProofChecks(a: ProofChecksArgs): Promise<void> {
     process.env.REMO_AUTOMATION_LIFETIME_INJECT_CAP = '1000'
     process.env.REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR = '1000'
     // user A's run is terminal, so user B may arm the same repo (allowlist row (B, repoA) is new).
-    const armedB = await arm(userB, sessB, repoA, { maxInjects: 3 })
+    const armedB = await armWhenQuiet(userB, sessB, repoA, { maxInjects: 3 })
     const runB = armedB.run
     counterKeys.push(runB.counter_key)
     // Identity is checked before the inject ceiling (proofIdentityRefusal). This block is the
