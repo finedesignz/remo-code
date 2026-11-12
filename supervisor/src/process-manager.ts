@@ -748,6 +748,14 @@ export class ProcessManager {
     // N+1 window during backoff closed.
     if (this.hasCrashedPendingForRepo(spec.repoPath)) {
       this.cb.onLog('warn', `Refusing start for repo with crashed-pending restart: ${spec.repoPath}`, spec.runId)
+      // Tell the hub THIS run was refused (like every other rejection path), so it
+      // closes the run row with the real reason instead of leaving it open until the
+      // inventory reaper ends it as `orphaned_no_inventory` (a silent non-start).
+      this.cb.onStateChange('stopped', {
+        runId: spec.runId,
+        repoPath: spec.repoPath,
+        lastExit: { code: null, reason: 'duplicate_run' },
+      })
       this.writeAudit(spec, false, 'duplicate_run')
       return { reason: 'duplicate_run', detail: { repo_path: spec.repoPath, pending_restart: true } }
     }
@@ -763,6 +771,13 @@ export class ProcessManager {
     const activeForRepo = this.activeRunIdForRepo(spec.repoPath)
     if (activeForRepo && activeForRepo !== spec.runId) {
       this.cb.onLog('warn', `Refusing duplicate start for already-active repo: ${spec.repoPath} (active run ${activeForRepo})`, spec.runId)
+      // Report the per-run rejection for the NEW run id only (the live run is
+      // untouched); see the crashed-pending branch above.
+      this.cb.onStateChange('stopped', {
+        runId: spec.runId,
+        repoPath: spec.repoPath,
+        lastExit: { code: null, reason: 'duplicate_run' },
+      })
       this.writeAudit(spec, false, 'duplicate_run')
       return { reason: 'duplicate_run', detail: { repo_path: spec.repoPath, active_run_id: activeForRepo } }
     }
