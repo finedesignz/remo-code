@@ -194,6 +194,20 @@ so a caller always gets *an* answer.
   "env": { "REMO_HUB_URL": "https://app.remo-code.com", "REMO_API_KEY": "remokey_…" } } } }
 ```
 
+**Never commit this config with a plaintext key.** `REMO_API_KEY` is a live credential
+scoped `ext:read`/`ext:ask` against the hub (see Blast radius above): a key checked into
+a repo, a sweep/automation `_state` directory, or any other file an agent transcript can
+surface is exposed the moment that transcript or repo is read by anyone else — including
+an unrelated agent run. Keep the raw key out of any file the MCP client config is loaded
+from; store it in a secrets manager (e.g. Proton Pass, the host's env, or the OS keychain)
+and inject it into the `env` block at process-launch time, never author it into a file on
+disk. If a key is ever exposed this way, treat it as compromised and rotate it immediately
+(`hub/scripts/rotate-api-key.ts rotate --user <email> --prefix <remokey_…>` — see that
+script's header for usage), even if the hub still reports it as apparently valid; a 401 at
+`/api/ext/sessions` for a key that was never revoked is itself a sign the key was rotated or
+expired out from under the stored config and the MCP server needs a fresh key minted from
+Settings → Credentials.
+
 **Cost discipline — the point of the whole design:** a scheduled completion-check runs
 `remo_read_memory` + `remo_read_transcript` **first** (free), and escalates to `remo_ask`
 **only** when those are inconclusive.

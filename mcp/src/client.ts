@@ -14,6 +14,12 @@ export interface ExtClientConfig {
 
 export function configFromEnv(): ExtClientConfig {
   const hubUrl = (process.env.REMO_HUB_URL || 'https://app.remo-code.com').replace(/\/+$/, '')
+  // Read ONLY from the environment at process-launch time. Never add a fallback that
+  // reads a plaintext key from a file on disk (e.g. a sweep/automation "_state" config
+  // or key file) — any such file is readable by every later agent transcript / repo scan
+  // and turns one exposure into a permanently-leaked credential. The MCP client config's
+  // `env` block (docs/session-ask.md) is the only supported way to supply this value;
+  // inject it from a secrets manager (Proton Pass, OS keychain, host env) at launch time.
   const apiKey = process.env.REMO_API_KEY || ''
   if (!apiKey) throw new Error('REMO_API_KEY is not set')
   return { hubUrl, apiKey }
