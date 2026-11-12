@@ -637,7 +637,18 @@ const server = Bun.serve({
 
     // Try Hono (API routes, health)
     const honoResponse = await app.fetch(req)
+    // A 404 from Hono's own API routers (e.g. an authenticated /api/ext/* route
+    // that resolved to extApiKeyMiddleware + the ext router but found no matching
+    // session) is an explicit JSON 404 from the handler itself, NOT "no route
+    // matched" — Hono only falls through to its own not-found handler when NO
+    // route pattern matched at all. The ONLY case we want to fall through to the
+    // SPA (index.html, 200 text/html) is that second case: an unknown path under
+    // the static site. Any already-authenticated/matched /api/* request that
+    // returns 404 must stay a 404 JSON response — masking it as the SPA shell
+    // makes every authenticated not-found (e.g. session_not_found) look like a
+    // 200 success to the caller.
     if (honoResponse.status !== 404) return honoResponse
+    if (url.pathname.startsWith('/api/')) return honoResponse
 
     // Serve static files from web/dist — with path traversal protection (M4 fix)
     const requestedPath = decodeURIComponent(url.pathname)
