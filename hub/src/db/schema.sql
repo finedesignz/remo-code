@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS turn_id TEXT;
+-- Completion time of an assistant turn (set when a streaming placeholder is finalized). created_at is the
+-- placeholder insert time, so the proof attribution grace keys on COALESCE(completed_at, created_at).
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS api_keys (
   id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -1403,6 +1407,13 @@ ALTER TABLE token_usage ADD COLUMN IF NOT EXISTS runner_type TEXT NOT NULL DEFAU
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='token_usage_runner_type_check' AND conrelid = 'token_usage'::regclass) THEN ALTER TABLE token_usage ADD CONSTRAINT token_usage_runner_type_check CHECK (runner_type IN ('stream-json','pty-interactive')); END IF; END $$;
 CREATE INDEX IF NOT EXISTS idx_token_usage_user_runner_created ON token_usage(user_id, runner_type, created_at DESC);
 
+-- PTYCAP-05 repair: per-turn correlation. The supervisor stamps ONE turn_id on a turn's
+-- assistant_message and its usage_event; the hub stores it on messages and token_usage so the proof
+-- budget detector can prove every completed turn has ITS OWN ledger row (never an aggregate count).
+-- Nullable, additive, no backfill.
+ALTER TABLE token_usage ADD COLUMN IF NOT EXISTS turn_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_token_usage_session_turn ON token_usage(session_id, turn_id) WHERE turn_id IS NOT NULL;
+
 -- Daily per-(user, model) rollup, upserted on each usage_event for cheap
 -- today/7d/total aggregates without scanning the full ledger.
 CREATE TABLE IF NOT EXISTS token_usage_daily (
@@ -1688,8 +1699,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_kill_switch_global
   ON automation_kill_switch(scope) WHERE scope = 'global' AND engaged;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_kill_switch_user
   ON automation_kill_switch(user_id) WHERE scope = 'user' AND engaged;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_kill_switch_session
-  ON automation_kill_switch(session_id) WHERE scope = 'session' AND engaged;
+-- PTYCAP-05 repair: session halts are OWNER-TAGGED. Several engaged rows may coexist per session
+-- (one per engaged_by); a halt is effective while ANY row is engaged, and a proof run releases only
+-- the row it engaged, so a manual emergency engage made after arm can never be released by proof code.
+-- schema-lint: allow idempotent DDL — IF EXISTS drop of the superseded one-engaged-row-per-session index; no-op once dropped
+DROP INDEX IF EXISTS idx_automation_kill_switch_session;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_kill_switch_session_owner
+  ON automation_kill_switch(session_id, engaged_by) WHERE scope = 'session' AND engaged;
 
 -- Daily token-ceiling alarm claim: one row per (user, local day). `delivered`
 -- flips only when the email was really sent, so a failed send is retried.
@@ -1711,6 +1727,112 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_token_cap_alarms_user_date
 -- Dedupe key shared by the rate union (routine_run_log inject rows vs ledger
 -- reserve rows): nullable, written by the inject path, never backfilled.
 ALTER TABLE routine_run_log ADD COLUMN IF NOT EXISTS inject_token TEXT;
+
+-- PTYCAP-05 (QC r1): a scheduled task that has ever been armed as a proof task carries this marker, so the
+-- macro cycle can REFUSE to render the dev macro for it under ANY flag combination without a DB read.
+-- Additive + idempotent; set by the arm transaction, never backfilled, never cleared.
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS proof_owned BOOLEAN NOT NULL DEFAULT false;
+
+-- ── PTYCAP-05 (throwaway-repo due->PR proof): orchestrator_proof_runs ────────
+-- One row per owner-armed proof run. Additive + idempotent only (this file
+-- re-runs in full on every hub boot): CREATE ... IF NOT EXISTS, guarded named
+-- CHECKs and partial unique indexes. NO backfill. session_id/task_id are plain
+-- TEXT with no foreign key so history and token attribution survive deletion of
+-- the session or task (same pattern as the Phase 4 tables above).
+CREATE TABLE IF NOT EXISTS orchestrator_proof_runs (
+  id                  TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  task_id             TEXT NOT NULL,
+  session_id          TEXT NOT NULL,
+  repo_ident          TEXT NOT NULL,
+  counter_key         TEXT NOT NULL,
+  branch              TEXT NOT NULL,
+  installation_id     BIGINT NOT NULL,
+  repo_owner          TEXT NOT NULL,
+  repo_name           TEXT NOT NULL,
+  default_branch      TEXT NOT NULL,
+  base_sha            TEXT NOT NULL,
+  ruleset_ids         BIGINT[] NOT NULL DEFAULT '{}',
+  ruleset_digest      TEXT NOT NULL,
+  ruleset_updated_at  TIMESTAMPTZ,
+  protection_shape    TEXT NOT NULL,
+  required_contexts   TEXT[] NOT NULL DEFAULT '{}',
+  arm_preconditions   JSONB NOT NULL DEFAULT '{}',
+  max_injects         INTEGER NOT NULL,
+  max_tokens          BIGINT NOT NULL,
+  max_wall_ms         BIGINT NOT NULL,
+  status              TEXT NOT NULL DEFAULT 'armed',
+  outcome             TEXT,
+  outcome_detail      TEXT,
+  pr_url              TEXT,
+  pr_number           INTEGER,
+  last_ci_state       TEXT,
+  last_inject_outcome TEXT,
+  tokens_hwm          BIGINT NOT NULL DEFAULT 0,
+  armed_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at          TIMESTAMPTZ,
+  terminal_at         TIMESTAMPTZ
+);
+-- QC round 2: the exact automation_kill_switch row this run's arm engaged (--enable releases only it).
+ALTER TABLE orchestrator_proof_runs ADD COLUMN IF NOT EXISTS kill_switch_id TEXT;
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_status_check
+    CHECK (status IN ('armed','running','succeeded','nothing','terminated','disarmed'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- QC r1 (codex #6): GitHub owner/repo names are case-insensitive; the ident is stored canonical
+-- (lowercase) so the plain unique indexes below are single-flight over the canonical value. NOT VALID:
+-- enforced for every new/updated row, never fails the boot on a pre-existing row.
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_repo_ident_canonical_check
+    CHECK (repo_ident = lower(repo_ident)) NOT VALID;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_max_injects_check
+    CHECK (max_injects > 0);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- QC r1 (adversary MINOR 6): ceilings mirror proof-arm.ts; NOT VALID = never fails the boot on an existing row.
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_max_injects_ceiling
+    CHECK (max_injects <= 50) NOT VALID;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_max_tokens_ceiling
+    CHECK (max_tokens <= 50000000) NOT VALID;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_max_wall_ms_ceiling
+    CHECK (max_wall_ms <= 86400000) NOT VALID;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_max_tokens_check
+    CHECK (max_tokens > 0);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_max_wall_ms_check
+    CHECK (max_wall_ms > 0);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_tokens_hwm_check
+    CHECK (tokens_hwm >= 0);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_terminal_at_check
+    CHECK ((status IN ('armed','running')) = (terminal_at IS NULL));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- Single-flight: at most one non-terminal proof per user, per repo, per task.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_proof_runs_active_user
+  ON orchestrator_proof_runs(user_id) WHERE status IN ('armed','running');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_proof_runs_active_repo
+  ON orchestrator_proof_runs(repo_ident) WHERE status IN ('armed','running');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_proof_runs_active_task
+  ON orchestrator_proof_runs(task_id) WHERE status IN ('armed','running');
+CREATE INDEX IF NOT EXISTS idx_orchestrator_proof_runs_task
+  ON orchestrator_proof_runs(task_id, armed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_orchestrator_proof_runs_counter_key
+  ON orchestrator_proof_runs(counter_key);
+CREATE INDEX IF NOT EXISTS idx_orchestrator_proof_runs_session
+  ON orchestrator_proof_runs(session_id);
 
 -- PTYCAP-07 self-heal event ledger. One row per heal claim; the atomic claim
 -- (tx advisory lock + real time-window check) lives in heal-events-dal.ts, the

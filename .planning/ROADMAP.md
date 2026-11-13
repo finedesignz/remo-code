@@ -130,6 +130,21 @@ ceiling (and the programmatic-credit halt).
   2. It produces a reviewable PR with a green CI check, or it cleanly does nothing and says why.
   3. This has **never once happened**. Until it does, the orchestrator is unproven and unsellable.
 
+**Plans:** 9 plans (the live proof is OWNER-GATED; these plans build, test and document the machinery and the arming runbook, they arm nothing)
+
+Plans:
+- [x] 05-01-PLAN.md -- tracer (armed run to terminal outcome through every layer, flag OFF a true no-op) + orchestrator_proof_runs state layer + ProofGithub contract and fake (wave 1)
+- [x] 05-02-PLAN.md -- read-only GitHub adapter + protection assertion/freeze/drift (ruleset shape, zero bypass, permission probe) (wave 2)
+- [x] 05-03-PLAN.md -- hub verifier: default-branch advance via compare, PR scope, CI/green decision (wave 2)
+- [x] 05-04-PLAN.md -- read-only GET /api/orchestrator/proof + OpenAPI + docs:sync (wave 2)
+- [x] 05-05-PLAN.md -- proofBudgetGate + proofProtectionGate in both orchestrator gate lists, coverage scans, merge-routing refusal (wave 3)
+- [x] 05-06-PLAN.md -- ordered evaluators, tick-side budget termination, inject-outcome mapping, counter-key pin (wave 3)
+- [x] 05-07-PLAN.md -- arm/disarm/enable cores + operator CLI (exactly-one allowlist, frozen budget and protection) (wave 3)
+- [x] 05-08-PLAN.md -- flag-OFF differential matrix, real-Postgres proof helper (CI only), baseline (wave 4)
+- [x] 05-09-PLAN.md -- owner runbook (permissions, repo + ruleset, ordered rollback), CLAUDE.md/docs, runbook pin test (wave 4)
+
+**Delivery notes (Phase 5)**: the machinery is built and tested against a fake GitHub client and, in CI, against real Postgres; nothing was armed and no flag, GitHub or prod system was touched. The live run is OWNER-GATED (`docs/ptycap-05-proof-runbook.md`); Phase 5 stays unchecked until SC-3 closes live, so SC-2/SC-3 are "armed-ready, live proof pending owner GO", never PASS. Deferred: the automation `term.input` PTY producer (D-01, drives the stream-json macro path instead). Recorded dependency: arming refuses `proof_protection_unverifiable` (`bypass_actors_not_visible`) unless the GitHub App token can see ruleset bypass actors (GitHub shows them only to a caller with write access); that is an owner decision about the App's permission level, with no override path.
+
 ### Phase 6: Hardening + Docs + Release
 
 **Goal**: Shipped, documented, verified live.
@@ -211,7 +226,7 @@ fix the CAUSE, and escalates to the human when it cannot.
 | 2. PTY Pre-Flight Gate | Done |
 | 3. Governed-Automation Guard | Complete (4/4 plans) - PR #505 open |
 | 4. Lifetime Counter + Kill Switch | Executed (8/8 plans) - QC BLOCKED (2 open races), draft PR #506 |
-| 5. Throwaway-Repo Due→PR Proof | Not started |
+| 5. Throwaway-Repo Due→PR Proof | Executed (9/9 plans) - QC BLOCKED (2 open MAJOR), draft PR - live proof pending owner GO |
 | 6. Hardening + Docs + Release | Not started |
 | 7. Unified Self-Heal Routing | Executed (11/11 plans) - QC BLOCKED (1 open MAJOR), draft PR |
 | 8. Periodic Task QC + Optimization | Specced, not started (blocked on Phase 4) |

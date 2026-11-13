@@ -631,6 +631,7 @@ export class SessionBridge {
           cache_read_input_tokens: e.usage.cache_read_input_tokens ?? 0,
           cost_usd: e.cost ?? 0,
           cost_source: e.cost_from_sdk ? 'sdk' : 'estimated',
+          ...(e.turn_id ? { turn_id: e.turn_id } : {}),
           ts: new Date().toISOString(),
         })
       }
