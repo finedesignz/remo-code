@@ -48,7 +48,7 @@ export interface GsdcDeps {
   /** Resolves with the userIds the notice reached on a DURABLE channel (email/telegram); others are retried. */
   notifyOutage: (o: GsdcOutage) => Promise<string[]>
   /** One 7d ticket per error signature per outage (CORCH-R1.16). Fire-and-forget: must never throw into ingestion. */
-  reportTicket?: (signature: string) => void
+  reportTicket?: (signature: string) => Promise<boolean>
   /** A new item was queued for this user: evaluate now (event-driven). */
   onEnqueued: (userId: string) => Promise<void>
   now?: () => number
@@ -144,8 +144,10 @@ export function createGsdcIngest(deps: GsdcDeps) {
   let notified = false
   /** Owners the current outage notice already reached durably (retries go to the rest only). */
   const notifiedUsers = new Set<string>()
-  /** Signatures already ticketed during the current outage. */
+  /** Signatures whose ticket was POSITIVELY delivered during the current outage. */
   const ticketed = new Set<string>()
+  /** Signatures with a ticket attempt currently in flight (no concurrent duplicates). */
+  const ticketing = new Set<string>()
   let generation = 0
 
   const clearTimer = () => {
@@ -156,27 +158,40 @@ export function createGsdcIngest(deps: GsdcDeps) {
   async function reportFailure(signature: string, gen: number): Promise<void> {
     failures++
     outage = true
-    if (gen === generation && !stopped && !ticketed.has(signature)) {
-      ticketed.add(signature)
-      try {
-        deps.reportTicket?.(signature)
-      } catch {
-        /* a ticket failure never affects ingestion */
-      }
+    let ticketRun: Promise<void> | null = null
+    if (deps.reportTicket && gen === generation && !stopped && !ticketed.has(signature) && !ticketing.has(signature)) {
+      // Delivered only on a positive result; a failed attempt is retried on the next failure of this outage.
+      ticketing.add(signature)
+      const outageGen = generation
+      ticketRun = Promise.resolve()
+        .then(() => deps.reportTicket!(signature))
+        .then(
+          (ok) => {
+            if (ok && outageGen === generation) ticketed.add(signature)
+          },
+          () => {
+            /* a ticket failure never affects ingestion */
+          },
+        )
+        .finally(() => ticketing.delete(signature))
     }
-    if (notified) return
     try {
-      const users = [...new Set((await deps.store.listEnabledProjects()).map((p) => p.user_id))]
-      // A stopped or superseded connection must neither send a stale notification nor flip shared state.
-      if (stopped || gen !== generation) return
-      const pending = users.filter((u) => !notifiedUsers.has(u))
-      const reached = await deps.notifyOutage({ userIds: pending, signature, isLive: () => !stopped && gen === generation })
-      if (stopped || gen !== generation) return
-      for (const u of reached) notifiedUsers.add(u)
-      // only after DURABLE delivery to every owner: any owner not reached is retried on the next failure of this outage
-      notified = users.every((u) => notifiedUsers.has(u))
-    } catch (err: any) {
-      console.error(`[corch.gsdc] outage notification failed: ${err?.message ?? err}`)
+      if (notified) return
+      try {
+        const users = [...new Set((await deps.store.listEnabledProjects()).map((p) => p.user_id))]
+        // A stopped or superseded connection must neither send a stale notification nor flip shared state.
+        if (stopped || gen !== generation) return
+        const pending = users.filter((u) => !notifiedUsers.has(u))
+        const reached = await deps.notifyOutage({ userIds: pending, signature, isLive: () => !stopped && gen === generation })
+        if (stopped || gen !== generation) return
+        for (const u of reached) notifiedUsers.add(u)
+        // only after DURABLE delivery to every owner: any owner not reached is retried on the next failure of this outage
+        notified = users.every((u) => notifiedUsers.has(u))
+      } catch (err: any) {
+        console.error(`[corch.gsdc] outage notification failed: ${err?.message ?? err}`)
+      }
+    } finally {
+      if (ticketRun) await ticketRun // bounded by the reporter's own fetch timeout; never throws
     }
   }
 
@@ -260,8 +275,10 @@ export function createGsdcIngest(deps: GsdcDeps) {
     const cfg = gsdcConfig()
     if (cfg.state === 'off') return // flag OFF or source unconfigured: no connection, no timer
     if (cfg.state === 'partial') {
-      // A misconfiguration cannot heal without a restart: notify once, do not retry.
+      // A misconfiguration cannot heal without a restart, so there is no connection retry; but an owner
+      // notice or ticket that was not delivered is retried on the backoff until both are done.
       await reportFailure(cfg.signature, gen)
+      if (!stopped && gen === generation && (!notified || !ticketed.has(cfg.signature))) arm(backoffMs(failures), gen)
       return
     }
     const ac = new AbortController()
@@ -327,6 +344,7 @@ export function createGsdcIngest(deps: GsdcDeps) {
           notified = false
           notifiedUsers.clear()
           ticketed.clear()
+          ticketing.clear()
           if (now() - startedAt >= GSDC_HEALTHY_STREAM_MS) failures = 0
         }
       } catch (err) {
