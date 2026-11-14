@@ -19,6 +19,9 @@ const vector = JSON.parse(readFileSync(new URL('./fixtures/corch-event-signature
 let applied: AafEventInput[] = []
 let seen = new Set<string>()
 let nextResult: AafEventResult | null = null
+let nextNotify = false
+// event_id -> notification state, mirroring corch_events.notify_state claim semantics
+let notifyState = new Map<string, 'pending' | 'sending' | 'sent'>()
 let storeThrows = false
 let notified: Array<[string, string]> = []
 let evaluated: string[] = []
@@ -32,7 +35,17 @@ const deps = () => ({
       if (seen.has(e.eventId)) return { kind: 'duplicate' }
       seen.add(e.eventId)
       applied.push(e)
-      return nextResult ?? { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'done', notify: false }
+      const r = nextResult ?? { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'done' }
+      if (r.kind === 'transitioned' && nextNotify) notifyState.set(e.eventId, 'pending')
+      return r
+    },
+    async claimAafNotify(eventId: string) {
+      if (notifyState.get(eventId) !== 'pending') return null
+      notifyState.set(eventId, 'sending')
+      return { userId: 'u1', workItemId: 'w1' }
+    },
+    async finishAafNotify(eventId: string, delivered: boolean) {
+      notifyState.set(eventId, delivered ? 'sent' : 'pending')
     },
   },
   notifyFailed: async (u: string, w: string) => {
@@ -75,6 +88,8 @@ beforeEach(() => {
   applied = []
   seen = new Set()
   nextResult = null
+  nextNotify = false
+  notifyState = new Map()
   storeThrows = false
   notified = []
   evaluated = []
@@ -190,24 +205,53 @@ describe('POST /api/corch-events/aaf receiver', () => {
     expect(evaluated).toEqual([])
   })
 
-  test('pr.failed transition sends exactly one notification (identifiers only)', async () => {
-    nextResult = { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'blocked', notify: true }
+  test('pr.failed transition sends exactly one notification (identifiers only), also across replays', async () => {
+    nextResult = { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'blocked' }
+    nextNotify = true
     const b = bodyOf({ event: 'pr.failed' })
-    await post(b)
-    await post(b) // replay
+    expect((await post(b)).status).toBe(200)
+    expect((await post(b)).status).toBe(200) // replay
     expect(notified).toEqual([['u1', 'w1']])
   })
 
-  test('a notifier failure never fails the receiver', async () => {
-    nextResult = { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'blocked', notify: true }
-    const app = createAafEventRoutes({ ...deps(), notifyFailed: async () => { throw new Error('smtp down') } } as any)
+  test('a failed notification is not lost: 503 now, the sender retry (same event_id) delivers it exactly once', async () => {
+    nextResult = { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'blocked' }
+    nextNotify = true
+    let fail = true
+    const app = createAafEventRoutes({
+      ...deps(),
+      notifyFailed: async (u: string, w: string) => {
+        if (fail) throw new Error('smtp down')
+        notified.push([u, w])
+        return true
+      },
+    } as any)
+    const b = bodyOf({ event: 'pr.failed' })
+    const call = () => {
+      const ts = Math.floor(Date.now() / 1000)
+      return app.request('/aaf', { method: 'POST', body: b, headers: { 'x-zeroexposure-timestamp': String(ts), 'x-zeroexposure-signature': sign(ts, b) } })
+    }
+    const first = await call()
+    expect(first.status).toBe(503)
+    expect(await first.json()).toEqual({ error: 'notification_pending' })
+    expect(applied.length).toBe(1) // the transition itself was applied once
+    fail = false
+    const retry = await call()
+    expect(retry.status).toBe(200)
+    expect(await retry.json()).toEqual({ ok: true, status: 'duplicate' })
+    expect((await call()).status).toBe(200)
+    expect(notified).toEqual([['u1', 'w1']])
+    expect(applied.length).toBe(1)
+  })
+
+  test('an undelivered (false) notification also answers 503 so the sender retries', async () => {
+    nextResult = { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'blocked' }
+    nextNotify = true
+    const app = createAafEventRoutes({ ...deps(), notifyFailed: async () => false } as any)
     const b = bodyOf({ event: 'pr.failed' })
     const ts = Math.floor(Date.now() / 1000)
-    const res = await app.request('/aaf', {
-      method: 'POST', body: b,
-      headers: { 'x-zeroexposure-timestamp': String(ts), 'x-zeroexposure-signature': sign(ts, b) },
-    })
-    expect(res.status).toBe(200)
+    const res = await app.request('/aaf', { method: 'POST', body: b, headers: { 'x-zeroexposure-timestamp': String(ts), 'x-zeroexposure-signature': sign(ts, b) } })
+    expect(res.status).toBe(503)
   })
 
   test('malformed or invalid payloads => 400 bad_request, nothing echoed', async () => {

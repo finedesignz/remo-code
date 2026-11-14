@@ -7698,7 +7698,7 @@
             }
           },
           "503": {
-            "description": "not_configured (secret unset; nothing recorded)",
+            "description": "not_configured (secret unset; nothing recorded) or notification_pending (a pr.failed owner notification was not delivered; the transition is applied, retry the same event_id)",
             "content": {
               "application/json": {
                 "schema": {

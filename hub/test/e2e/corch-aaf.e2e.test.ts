@@ -198,9 +198,11 @@ maybe('CORCH-08 e2e - AAF event receiver, closure transitions and provision gate
     expect(row.wait_reason).toBe('pr_closed')
     expect(notified.filter(([, w]) => w === claimedItem.id).length).toBe(0) // pr.closed notifies nobody
 
-    // Reconciler pass over the orphaned live run (older than the lease): the run ends, the item is NOT requeued
-    // and NOT re-notified as blocked by the dispatcher.
-    await h.sql`UPDATE corch_runs SET started_at = now() - interval '10 minutes' WHERE id = ${c!.run.id}`
+    // The event ended the live run itself; re-open it to model a run the reconciler still sees (the race the
+    // store's status guard covers), older than the lease: the pass ends it, the item is NOT requeued and NOT
+    // re-notified as blocked by the dispatcher.
+    expect((await h.sql`SELECT ended_at FROM corch_runs WHERE id = ${c!.run.id}`)[0]!.ended_at).not.toBeNull()
+    await h.sql`UPDATE corch_runs SET ended_at = NULL, status = 'running', end_reason = NULL, started_at = now() - interval '10 minutes' WHERE id = ${c!.run.id}`
     const notes: any[] = []
     const deps: any = {
       store: storeMod.corchStore,
@@ -229,7 +231,7 @@ maybe('CORCH-08 e2e - AAF event receiver, closure transitions and provision gate
     expect(await storeMod.corchStore.claimNext(u, [])).toBeNull()
   })
 
-  test('pr.merged while a run is still live => done; the late run end cannot requeue it', async () => {
+  test('pr.merged while a run is still live => done AND the live run is ended; a late run end cannot requeue it', async () => {
     const u = await mkUser()
     const proj = await mkProject(u, 'github://acme/merge-live')
     const it = await mkItem(u, proj, 'queued')
@@ -237,20 +239,110 @@ maybe('CORCH-08 e2e - AAF event receiver, closure transitions and provision gate
     expect(c?.item.id).toBe(it.id)
     await send({ event: 'pr.merged', repo: 'acme/merge-live', headRef: it.branch })
     expect((await itemRow(it.id)).status).toBe('done')
+    const run = (await h.sql`SELECT * FROM corch_runs WHERE id = ${c!.run.id}`)[0]!
+    expect(run.ended_at).not.toBeNull()
+    expect(run.end_reason).toBe('aaf_pr_merged')
+    // The reconciler / watcher end path now finds the run already ended: a no-op.
     const end = await storeMod.corchStore.endRunAndRequeue(c!.run.id, { endReason: 'no_pr', consumeAttempt: true, waitReason: null, notBefore: null })
-    expect(end.changed).toBe(true)
-    expect(end.changed && end.itemUntouched).toBe(true)
+    expect(end.changed).toBe(false)
     const row = await itemRow(it.id)
     expect(row.status).toBe('done')
     expect(row.attempts).toBe(0)
-    // The same for the pr_open path.
+  })
+
+  test('closure invalidates a pending send: the run ends, every dispatch gate refuses corch_run_not_live, the slot is free', async () => {
+    const keysMod = await import('../../src/corch/keys.ts')
+    const gatesMod = await import('../../src/corch/gates.ts')
+    for (const event of ['pr.closed', 'pr.failed', 'pr.merged']) {
+      const u = await mkUser()
+      const repo = `acme/parked-${event.replace('.', '-')}`
+      const proj = await mkProject(u, `github://${repo}`)
+      const it = await mkItem(u, proj, 'queued')
+      const c = await storeMod.corchStore.claimNext(u, [])
+      expect(c?.item.id).toBe(it.id)
+      const r = await send({ event, repo, headRef: it.branch })
+      expect(r.res.status).toBe(200)
+      const ctx = await storeMod.corchStore.runContext(c!.run.id)
+      expect(ctx!.run.ended_at).not.toBeNull()
+      const gate = gatesMod.corchProjectBudgetGate(storeMod.corchStore)
+      const verdict = await gate.check({ token: keysMod.buildCorchRunToken(c!.run.id) } as any)
+      expect(verdict).toEqual({ ok: false, reason: 'corch_run_not_live' })
+      expect((await h.sql`SELECT count(*)::int AS n FROM corch_runs WHERE user_id = ${u} AND ended_at IS NULL`)[0]!.n).toBe(0)
+    }
+  })
+
+  test('race guard: if a closure moved the item while its run was still live, the run end leaves the item untouched', async () => {
+    const u = await mkUser()
+    const proj = await mkProject(u, 'github://acme/race-guard')
+    const it = await mkItem(u, proj, 'queued')
+    const c = await storeMod.corchStore.claimNext(u, [])
+    expect(c?.item.id).toBe(it.id)
+    // Simulate the closure landing without ending the run (the narrow race the status guard exists for).
+    await h.sql`UPDATE corch_work_items SET status = 'blocked', wait_reason = 'pr_failed' WHERE id = ${it.id}`
+    const end = await storeMod.corchStore.endRunAndRequeue(c!.run.id, { endReason: 'no_pr', consumeAttempt: true, waitReason: null, notBefore: null })
+    expect(end.changed && end.itemUntouched).toBe(true)
+    expect(end.changed && end.itemStatus).toBe('blocked')
+    const row = await itemRow(it.id)
+    expect(row.status).toBe('blocked')
+    expect(row.attempts).toBe(0)
+    expect(row.wait_reason).toBe('pr_failed')
+
     const it2 = await mkItem(u, proj, 'queued')
     const c2 = await storeMod.corchStore.claimNext(u, [])
     expect(c2?.item.id).toBe(it2.id)
-    await send({ event: 'pr.closed', repo: 'acme/merge-live', headRef: it2.branch })
+    await h.sql`UPDATE corch_work_items SET status = 'blocked', wait_reason = 'pr_closed' WHERE id = ${it2.id}`
     const end2 = await storeMod.corchStore.endRunMarkPrOpen(c2!.run.id, 'https://example.test/pr/1')
     expect(end2.changed && end2.itemUntouched).toBe(true)
     expect((await itemRow(it2.id)).status).toBe('blocked')
+  })
+
+  test('a failed notification is durable: 503, state stays pending, the sender retry delivers it once', async () => {
+    const u = await mkUser()
+    const proj = await mkProject(u, 'github://acme/notify-retry')
+    const it = await mkItem(u, proj)
+    let fail = true
+    const sent: string[] = []
+    const app = evMod.createAafEventRoutes({
+      secret: () => SECRET,
+      store: storeMod.corchStore,
+      notifyFailed: async (_u, w) => {
+        if (fail) return false
+        sent.push(w)
+        return true
+      },
+      evaluate: async () => {},
+    })
+    const eventId = `evt-${randomUUID()}`
+    const body = JSON.stringify({ event_id: eventId, event: 'pr.failed', repo: 'acme/notify-retry', pr_number: 3, head_ref: it.branch })
+    const call = () => {
+      const ts = Math.floor(Date.now() / 1000)
+      return app.request('/aaf', { method: 'POST', body, headers: { 'x-zeroexposure-timestamp': String(ts), 'x-zeroexposure-signature': sign(ts, body) } })
+    }
+    const first = await call()
+    expect(first.status).toBe(503)
+    expect((await itemRow(it.id)).status).toBe('blocked')
+    expect((await eventRow(eventId)).notify_state).toBe('pending')
+    fail = false
+    const retry = await call()
+    expect(retry.status).toBe(200)
+    expect(await retry.json()).toEqual({ ok: true, status: 'duplicate' })
+    expect((await eventRow(eventId)).notify_state).toBe('sent')
+    expect((await call()).status).toBe(200)
+    expect(sent).toEqual([it.id])
+    expect(await eventCount(eventId)).toBe(1)
+  })
+
+  test('a stale sending claim (crash mid-send) is reclaimable; a fresh one is not', async () => {
+    const u = await mkUser()
+    const proj = await mkProject(u, 'github://acme/notify-stale')
+    const it = await mkItem(u, proj)
+    const r = await send({ event: 'pr.failed', repo: 'acme/notify-stale', headRef: it.branch })
+    expect(r.res.status).toBe(200) // delivered through the injected notifier
+    expect((await eventRow(r.eventId)).notify_state).toBe('sent')
+    await h.sql`UPDATE corch_events SET notify_state = 'sending', notify_claimed_at = now() WHERE event_id = ${r.eventId}`
+    expect(await storeMod.corchStore.claimAafNotify(r.eventId)).toBeNull()
+    await h.sql`UPDATE corch_events SET notify_claimed_at = now() - interval '6 minutes' WHERE event_id = ${r.eventId}`
+    expect(await storeMod.corchStore.claimAafNotify(r.eventId)).toEqual({ userId: u, workItemId: it.id })
   })
 
   test('pr.failed => blocked + exactly ONE notification, even on replay and on a second failed event', async () => {

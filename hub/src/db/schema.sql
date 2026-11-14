@@ -1853,6 +1853,10 @@ CREATE TABLE IF NOT EXISTS corch_events (
   user_id      UUID NULL REFERENCES users(id) ON DELETE CASCADE,
   work_item_id UUID NULL REFERENCES corch_work_items(id) ON DELETE SET NULL,
   outcome      TEXT NOT NULL DEFAULT 'received',
+  -- Durable owner-notification intent for pr.failed: none | pending | sending | sent. 'sending' is a short claim
+  -- (a crash mid-send is reclaimable after 5 minutes); the sender retries a 503 with the same event_id.
+  notify_state      TEXT NOT NULL DEFAULT 'none' CHECK (notify_state IN ('none','pending','sending','sent')),
+  notify_claimed_at TIMESTAMPTZ NULL,
   received_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
