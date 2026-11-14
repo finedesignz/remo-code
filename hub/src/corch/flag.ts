@@ -74,3 +74,41 @@ export function gsdcConfig(): GsdcConfig {
   if (!url) return { state: 'partial', signature: 'url_unset' }
   return { state: 'on', baseUrl: url.replace(/\/+$/, ''), token }
 }
+
+/**
+ * CORCH-08 (CORCH-R5.5): the shared secret the AAF event outbox signs with. Unset/blank => the receiver answers 503
+ * and records nothing. Read at call time. Never logged or returned.
+ */
+export function aafEventSecret(): string | null {
+  const v = (process.env.REMO_CORCH_AAF_EVENT_SECRET ?? '').trim()
+  return v === '' ? null : v
+}
+
+/**
+ * CORCH-08 (CORCH-R5.7): the AAF provision endpoint configuration, read at call time.
+ *  - off:      REMO_CORCH_AAF_URL or REMO_CORCH_AAF_TOKEN unset (no call is made; the project stays aaf_unprovisioned)
+ *  - partial:  URL and token set but REMO_CORCH_AAF_INSTALLATION_ID missing/invalid, or the URL unusable
+ *  - on:       a usable https (or loopback http) base URL, a token and the AAF GitHub installation id
+ * The token is read only to build one Authorization header.
+ */
+export type AafProvisionConfig =
+  | { state: 'off' }
+  | { state: 'partial'; signature: 'installation_unset' | 'bad_url' }
+  | { state: 'on'; baseUrl: string; token: string; installationId: number }
+
+export function aafProvisionConfig(): AafProvisionConfig {
+  const url = (process.env.REMO_CORCH_AAF_URL ?? '').trim()
+  const token = (process.env.REMO_CORCH_AAF_TOKEN ?? '').trim()
+  if (!url || !token) return { state: 'off' }
+  let u: URL
+  try {
+    u = new URL(url)
+  } catch {
+    return { state: 'partial', signature: 'bad_url' }
+  }
+  const loopback = u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]'
+  if (!(u.protocol === 'https:' || (u.protocol === 'http:' && loopback))) return { state: 'partial', signature: 'bad_url' }
+  const inst = Number((process.env.REMO_CORCH_AAF_INSTALLATION_ID ?? '').trim())
+  if (!Number.isSafeInteger(inst) || inst <= 0) return { state: 'partial', signature: 'installation_unset' }
+  return { state: 'on', baseUrl: `${u.origin}${u.pathname.replace(/\/+$/, '')}`, token, installationId: inst }
+}

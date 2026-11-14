@@ -176,7 +176,7 @@ maybe('CORCH-02 e2e - quota ingest on real Postgres', () => {
     const runs: Array<{ runId: string; itemId: string }> = []
     for (let i = 0; i < nProjects; i++) {
       const p = await h.sql<{ id: string }[]>`
-        INSERT INTO corch_projects (user_id, repo_ident) VALUES (${userId}, ${`github://acme/app-${randomUUID()}`}) RETURNING id`
+        INSERT INTO corch_projects (user_id, repo_ident, aaf_provision_status) VALUES (${userId}, ${`github://acme/app-${randomUUID()}`}, 'provisioned') RETURNING id`
       await corchStore.enqueueWorkItem({ userId, projectId: p[0]!.id, source: 'manual', sourceRef: `q-${randomUUID()}`, title: 't', body: '', priority: 0 })
       const claimed = await corchStore.claimNext(userId, [])
       if (!claimed) throw new Error('fixture: nothing claimed')
@@ -331,7 +331,7 @@ maybe('CORCH-02 e2e - quota ingest on real Postgres', () => {
     const { corchStore } = await import('../../src/corch/store.ts')
     await h.sql`UPDATE users SET corch_max_concurrent_runs = 5 WHERE id = ${u.userId}`
     const p = await h.sql<{ id: string }[]>`
-      INSERT INTO corch_projects (user_id, repo_ident) VALUES (${u.userId}, ${`github://acme/death-${randomUUID()}`}) RETURNING id`
+      INSERT INTO corch_projects (user_id, repo_ident, aaf_provision_status) VALUES (${u.userId}, ${`github://acme/death-${randomUUID()}`}, 'provisioned') RETURNING id`
     const item = await corchStore.enqueueWorkItem({ userId: u.userId, projectId: p[0]!.id, source: 'manual', sourceRef: `d-${randomUUID()}`, title: 't', body: '', priority: 0 })
     const { provider: quota } = await provider([{ supervisorId: 's-d', accountSlot: 'dead1', maxConcurrent: 1 }])
     const captured: any[] = []
@@ -395,7 +395,7 @@ maybe('CORCH-02 e2e - quota ingest on real Postgres', () => {
     const { corchStore } = await import('../../src/corch/store.ts')
     await h.sql`UPDATE users SET corch_max_concurrent_runs = 5 WHERE id = ${u.userId}`
     const p = await h.sql<{ id: string }[]>`
-      INSERT INTO corch_projects (user_id, repo_ident) VALUES (${u.userId}, ${`github://acme/h1-${randomUUID()}`}) RETURNING id`
+      INSERT INTO corch_projects (user_id, repo_ident, aaf_provision_status) VALUES (${u.userId}, ${`github://acme/h1-${randomUUID()}`}, 'provisioned') RETURNING id`
     const item = await corchStore.enqueueWorkItem({ userId: u.userId, projectId: p[0]!.id, source: 'manual', sourceRef: `h1-${randomUUID()}`, title: 't', body: '', priority: 0 })
     const { provider: quota } = await provider([{ supervisorId: 's-h1', accountSlot: 'h1', maxConcurrent: 1 }])
     const captured: any[] = []

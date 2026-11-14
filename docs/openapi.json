@@ -7539,6 +7539,185 @@
         }
       }
     },
+    "/api/corch-events/aaf": {
+      "post": {
+        "summary": "AgentAutofix PR-outcome event (timestamped HMAC; no cookie or api key)",
+        "tags": [
+          "corch"
+        ],
+        "security": [
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "description": "CORCH-08 receiver for events signed by AgentAutofix (`X-ZeroExposure-Timestamp`, `X-ZeroExposure-Signature: sha256=HMAC-SHA256(secret, ts + \".\" + rawBody)`, optional `X-ZeroExposure-Event-Id`). Raw body is read before any parse; the signature is compared in constant time; a timestamp more than 5 minutes off is rejected; every credential failure is the same 401. `pr.merged` marks the item done, `pr.closed` (unmerged) blocks it, `pr.failed` blocks it and sends one owner notification. An unknown or terminal item and a replayed `event_id` are 200 with no change. 503 until REMO_CORCH_AAF_EVENT_SECRET is set.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "event_id": {
+                    "type": "string"
+                  },
+                  "event": {
+                    "type": "string",
+                    "enum": [
+                      "pr.merged",
+                      "pr.closed",
+                      "pr.failed"
+                    ]
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "pr_number": {
+                    "type": "integer"
+                  },
+                  "head_ref": {
+                    "type": "string"
+                  },
+                  "merged_sha": {
+                    "type": "string"
+                  },
+                  "occurred_at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "event_id",
+                  "event",
+                  "repo",
+                  "head_ref"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Handled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "applied",
+                        "duplicate",
+                        "ignored"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "status"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_request (no value echoed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized (uniform: bad or missing signature, stale timestamp)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body over 16 KiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "not_configured (secret unset; nothing recorded)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/chat/sessions": {
       "get": {
         "summary": "List the owner's sessions (optionally by project_dir)",

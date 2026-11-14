@@ -73,6 +73,7 @@ import { healUnifiedEnabled } from './heal/config.ts'
 import { assertTokenCapConfig } from './dispatch/gates.ts'
 import { assertCorchConfig } from './corch/flag.ts'
 import { corchRoutes } from './corch/routes.ts'
+import { aafEventRoutes } from './corch/aaf-events.ts'
 import { startCorch } from './corch/reconciler.ts'
 import { assertAutomationControlsEnv, assertAutomationControlsTables } from './dispatch/automation-controls.ts'
 import { registerTokenCapAlarm } from './observability/token-cap-alarm.ts'
@@ -120,6 +121,7 @@ import { withHttpMetrics } from './observability/http-metrics'
 //        - /api/feedback        → feedbackWebhookRoutes      (mounted ~L178)
 //        - /api/cloud-hook      → cloudHookRoutes (Bearer key, explicit cloud:hook scope)
 //        - /api/quota           → quotaRoutes (Bearer key, explicit quota:publish / quota:read scope)
+//        - /api/corch-events    → aafEventRoutes (CORCH-08: HMAC over `${ts}.${rawBody}`, 503 until REMO_CORCH_AAF_EVENT_SECRET set)
 //        - /api/telegram        → telegramWebhookRoutes     (mounted ~L181)
 //        - /webhooks/titanium   → webhooksTitanium          (mounted ~L185)
 //      The JWT/auth catch-all is `app.use('/api/*', ...)` (~L190) and its skip
@@ -290,6 +292,11 @@ app.route('/api/cloud-hook', cloudHookRoutes)
 app.use('/api/quota/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => c.req.header('authorization')?.slice(0, 24) || 'anon' }))
 app.route('/api/quota', quotaRoutes)
 
+// CORCH-08: signed AgentAutofix PR-outcome events. The timestamped HMAC is the credential (no cookie, no API key);
+// raw body is read before any parse. MUST be mounted BEFORE the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top).
+app.use('/api/corch-events/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => (c.req.header('x-forwarded-for') ?? '').split(',')[0]!.trim().slice(0, 64) || 'anon' }))
+app.route('/api/corch-events', aafEventRoutes)
+
 // Phase 12: Public Telegram inbound webhook (URL-path secret). MUST be
 // mounted BEFORE the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top).
 // Auth is :secret in the URL, constant-time compared to config.telegram.webhookSecret.
@@ -312,6 +319,7 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/feedback/')) return next()
   if (c.req.path.startsWith('/api/cloud-hook/')) return next()
   if (c.req.path.startsWith('/api/quota/')) return next()
+  if (c.req.path.startsWith('/api/corch-events/')) return next()
   if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
   // Milestone ASK: /api/ext/* authenticates with an api_key Bearer (already
   // enforced by extApiKeyMiddleware above), never a cookie.
@@ -339,6 +347,7 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/feedback/')) return next()
   if (c.req.path.startsWith('/api/cloud-hook/')) return next()
   if (c.req.path.startsWith('/api/quota/')) return next()
+  if (c.req.path.startsWith('/api/corch-events/')) return next()
   if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
   if (c.req.path.startsWith('/api/auth/')) return next()
   if (c.req.path.startsWith('/api/client-config')) return next()
