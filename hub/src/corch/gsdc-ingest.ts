@@ -291,8 +291,10 @@ export function createGsdcIngest(deps: GsdcDeps) {
           }
           const live = () => !stopped && gen === generation && !ac.signal.aborted
           await handleSummaries(summaries, cfg.baseUrl, cfg.token, ac.signal, live)
-          // A superseded, stopped or aborted connection must not touch the shared outage / backoff bookkeeping.
-          if (!live()) return
+          // A stopped or superseded connection must not touch the shared outage / backoff bookkeeping. A CURRENT
+          // connection that was aborted (inactivity timeout) mid-apply is a real failure: report it and reconnect.
+          if (stopped || gen !== generation) return
+          if (ac.signal.aborted) throw new GsdcFailure('unreachable')
           if (ev.event === 'snapshot') gotSnapshot = true
           // A fully applied event ends any outage.
           outage = false
