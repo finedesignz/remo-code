@@ -26,6 +26,23 @@ describe('no polling under hub/src/corch (CORCH-R3.6)', () => {
       .map((f) => [f, count(readFileSync(join(DIR, f), 'utf8'), /\bsetTimeout\s*\(/g)] as const)
       .filter(([, c]) => c > 0)
     // The timer lives behind deps.timers.setTimeout and its real impl; nothing else may schedule.
-    expect(per.map(([f]) => f)).toEqual(['dispatcher.ts'])
+    // CORCH-04 (R1.14) deliberately adds gsdc-ingest.ts: it re-arms ONE reconnect/idle timeout per event
+    // through the same injected timers seam and never owns a loop (next test pins that).
+    expect(per.map(([f]) => f)).toEqual(['dispatcher.ts', 'gsdc-ingest.ts'])
+  })
+
+  test('gsdc-ingest.ts schedules only through the injected timers seam (no bare setTimeout, no setInterval)', () => {
+    const src = stripComments(readFileSync(join(DIR, 'gsdc-ingest.ts'), 'utf8'))
+    const all = src.match(/\bsetTimeout\s*\(/g) ?? []
+    const seam = src.match(/\btimers\.setTimeout\s*\(/g) ?? []
+    expect(all.length).toBeGreaterThan(0)
+    expect(seam.length).toBe(all.length)
+    expect(src).not.toMatch(/\bsetInterval\s*\(/)
+  })
+
+  test('the board is never polled: one SSE stream open and one per-project read, both inside the event path', () => {
+    const src = stripComments(readFileSync(join(DIR, 'gsdc-ingest.ts'), 'utf8'))
+    expect((src.match(/\/api\/board\/projects\//g) ?? []).length).toBe(1)
+    expect((src.match(/\/api\/board\/stream/g) ?? []).length).toBe(1)
   })
 })

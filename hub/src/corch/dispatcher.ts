@@ -854,7 +854,7 @@ export async function realCorchDeps(): Promise<CorchDeps> {
   }
 }
 
-const REAL_TIMERS: CorchTimers = {
+export const REAL_TIMERS: CorchTimers = {
   setTimeout: (fn, ms) => {
     const t = setTimeout(fn, ms)
     ;(t as { unref?: () => void })?.unref?.()

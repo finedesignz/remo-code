@@ -52,3 +52,25 @@ export function assertCorchConfig(): void {
   // CORCH-02: a bad ceiling refuses boot only when CORCH is on (flag OFF is a true no-op).
   if (corchEnabled()) corchQuotaCeilingPct()
 }
+
+/**
+ * CORCH-04 (CORCH-R1.14, R1.16): the gsd-console source configuration, read at call time. The token is read
+ * from the environment ONLY to build one Authorization header; it is never logged, stored or returned.
+ *  - off:      CORCH off, or neither variable set (no connection, nothing to report)
+ *  - partial:  exactly one of the two set (a misconfiguration: no connection, one notification)
+ *  - on:       both set
+ */
+export type GsdcConfig =
+  | { state: 'off' }
+  | { state: 'partial'; signature: 'token_unset' | 'url_unset' }
+  | { state: 'on'; baseUrl: string; token: string }
+
+export function gsdcConfig(): GsdcConfig {
+  if (!corchEnabled()) return { state: 'off' }
+  const url = (process.env.REMO_CORCH_GSDC_URL ?? '').trim()
+  const token = (process.env.REMO_CORCH_GSDC_TOKEN ?? '').trim()
+  if (!url && !token) return { state: 'off' }
+  if (!token) return { state: 'partial', signature: 'token_unset' }
+  if (!url) return { state: 'partial', signature: 'url_unset' }
+  return { state: 'on', baseUrl: url.replace(/\/+$/, ''), token }
+}
