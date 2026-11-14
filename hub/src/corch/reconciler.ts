@@ -39,13 +39,18 @@ export async function reconcilePass(deps: CorchDeps, d: CorchDispatcher): Promis
         continue
       }
 
-      const known = run.supervisor_id ? deps.inventory.forSupervisor(run.supervisor_id) : deps.inventory.forUser(run.user_id)
+      // Absence is proven ONLY by the owning supervisor's own fresh inventory (LD-13). A run with no
+      // supervisor_id (hub crashed between launch and markRunLaunched) has no owner on record: another
+      // supervisor's inventory can show it ALIVE, but never that it is gone (it may live on a supervisor
+      // whose inventory is unavailable), so it can only stall, never be reclaimed.
+      const owner = run.supervisor_id ? deps.inventory.forSupervisor(run.supervisor_id) : null
+      const known = owner ?? deps.inventory.forUser(run.user_id)
       if (known.fresh && known.sessionIds.has(run.session_id)) {
         alive.push(run.id)
         continue
       }
       if (now - new Date(run.heartbeat_at).getTime() <= lease) continue
-      if (known.fresh) await d.reclaimRun(run, 'session_absent', true)
+      if (owner?.fresh) await d.reclaimRun(run, 'session_absent', true)
       else await d.stallRun(run)
     }
     if (alive.length > 0) await deps.store.touchHeartbeat(alive)
