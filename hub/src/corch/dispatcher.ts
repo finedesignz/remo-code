@@ -73,6 +73,9 @@ export interface SendGuard {
   assertLive(): void
 }
 
+/** F3: hold applied when a quota death could not be recorded on its account (the 5h window cap). */
+const QUOTA_DEATH_FALLBACK_HOLD_MS = 5 * 3600_000
+
 const ALWAYS_LIVE: SendGuard = { assertLive: () => {} }
 
 /** What this hub process positively knows about one supervisor's (or one user's) live sessions. */
@@ -361,9 +364,13 @@ export function createCorchDispatcher(deps: CorchDeps) {
   async function endQuotaDeath(c: RunCtx, death: QuotaDeath): Promise<void> {
     sendable.delete(c.runId) // before the first await
     let accountId: string | null = null
+    // F3: if the account cannot be identified or blocked, the run must not be immediately redispatchable onto the
+    // same (unblocked) account. Fail closed: hold the item for the 5h window cap and log without any content.
+    let blockFailed = false
     try {
       accountId = (await deps.store.runContext(c.runId))?.run.account_slot ?? null
     } catch (err) {
+      blockFailed = true
       log(`run context failed run=${c.runId}: ${errMsg(err)}`)
     }
     let blockedUntil: Date | null = null
@@ -371,9 +378,11 @@ export function createCorchDispatcher(deps: CorchDeps) {
       try {
         blockedUntil = await deps.quota.markDeath({ userId: c.userId, accountId, resetAt: death.resetAt, window: death.window })
       } catch (err) {
+        blockFailed = true
         log(`markDeath failed run=${c.runId}: ${errMsg(err)}`)
       }
     }
+    if (blockFailed && !blockedUntil) blockedUntil = new Date(Date.now() + QUOTA_DEATH_FALLBACK_HOLD_MS)
     const r = await deps.store.endRunAndRequeue(c.runId, {
       endReason: 'quota_death',
       consumeAttempt: false,

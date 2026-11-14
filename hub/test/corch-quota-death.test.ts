@@ -187,12 +187,26 @@ describe('CORCH-R2.5 SC5: handleRunEnd on a death sample', () => {
     expect(w.ends[0]).toMatchObject({ endReason: 'quota_death', notBefore: null })
   })
 
-  test('a throwing markDeath still requeues without an attempt (the item is never lost)', async () => {
+  const fiveHoursOut = (at: string) => Math.abs(Date.parse(at) - (Date.now() + 5 * 3600_000)) < 60_000
+
+  test('F3: a throwing markDeath requeues without an attempt but NOT immediately: not_before = now+5h (fail closed)', async () => {
     process.env.REMO_CORCH_ENABLED = '1'
     const w = world({ accountSlot: 'acct_a', markDeath: async () => { throw new Error('db down') } })
     await createCorchDispatcher(w.deps).evaluateUser('u1')
     await w.dispatched[0].pdeps.store.onFinalize('corch-run:run-1', SESSION)
-    expect(w.ends[0]).toMatchObject({ endReason: 'quota_death', consumeAttempt: false, notBefore: null })
+    expect(w.ends[0]).toMatchObject({ endReason: 'quota_death', consumeAttempt: false, waitReason: 'quota:death' })
+    expect(fiveHoursOut(w.ends[0].notBefore.at)).toBe(true)
+  })
+
+  test('F3: a throwing runContext (account unknown) also requeues with not_before = now+5h', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const w = world({ accountSlot: 'acct_a' })
+    await createCorchDispatcher(w.deps).evaluateUser('u1')
+    w.deps.store.runContext = async () => { throw new Error('db down') }
+    await w.dispatched[0].pdeps.store.onFinalize('corch-run:run-1', SESSION)
+    expect(w.markDeathCalls.length).toBe(0)
+    expect(w.ends[0]).toMatchObject({ endReason: 'quota_death', consumeAttempt: false })
+    expect(fiveHoursOut(w.ends[0].notBefore.at)).toBe(true)
   })
 
   test('non-death content keeps the CORCH-01 path: PR lookup runs, no_pr consumes an attempt', async () => {
