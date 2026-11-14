@@ -7,6 +7,7 @@ need REMO_ACCOUNT_SLOT
 need REMO_HUB_URL
 need REMO_API_KEY
 need CLAUDE_CODE_OAUTH_TOKEN
+need GH_TOKEN
 
 # supervisor.json (0600) from env, reusing the cloud-session writer.
 bun /opt/remo/tools/cloud-session/write-config.ts >/dev/null
@@ -25,10 +26,8 @@ if [ ! -f "$SETTINGS" ]; then
 JSON
 fi
 
-# Optional git credentials from runtime env (never persisted to a file).
+# Git credentials from runtime env (required above; never persisted to a file).
 GIT_HOST="${REMO_GIT_HOST:-github.com}"
-if [ -n "${GH_TOKEN:-}" ]; then
-  git config --global "credential.https://${GIT_HOST}.helper" '!f() { test "$1" = get && echo username=x-access-token && echo "password=$GH_TOKEN"; }; f'
-fi
+git config --global "credential.https://${GIT_HOST}.helper" '!f() { test "$1" = get && echo username=x-access-token && echo "password=$GH_TOKEN"; }; f'
 
 exec bun src/index.ts run
