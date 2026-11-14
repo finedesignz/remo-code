@@ -1,0 +1,33 @@
+#!/bin/sh
+# CORCH-10: per-slot supervisor entrypoint. Reads runtime env only; writes nothing secret into the image.
+set -eu
+
+need() { eval "v=\${$1:-}"; [ -n "$v" ] || { echo "[remo-slot] $1 is required" >&2; exit 64; }; }
+need REMO_ACCOUNT_SLOT
+need REMO_HUB_URL
+need REMO_API_KEY
+need CLAUDE_CODE_OAUTH_TOKEN
+need GH_TOKEN
+
+# supervisor.json (0600) from env, reusing the cloud-session writer.
+bun /opt/remo/tools/cloud-session/write-config.ts >/dev/null
+
+# Per-slot Claude settings.json permission allowlist (CORCH A8); never overwrite an operator-edited file.
+SETTINGS="${REMO_SLOT_CLAUDE_CONFIG_DIR:-/data/claude}/settings.json"
+if [ ! -f "$SETTINGS" ]; then
+  mkdir -p "$(dirname "$SETTINGS")"
+  cat >"$SETTINGS" <<'JSON'
+{
+  "permissions": {
+    "allow": ["Read", "Edit", "Write", "Glob", "Grep", "Bash(git:*)", "Bash(bun:*)", "Bash(npm:*)", "Bash(gh:*)"],
+    "deny": ["Bash(sudo:*)"]
+  }
+}
+JSON
+fi
+
+# Git credentials from runtime env (required above; never persisted to a file).
+GIT_HOST="${REMO_GIT_HOST:-github.com}"
+git config --global "credential.https://${GIT_HOST}.helper" '!f() { test "$1" = get && echo username=x-access-token && echo "password=$GH_TOKEN"; }; f'
+
+exec bun src/index.ts run

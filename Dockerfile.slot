@@ -1,0 +1,50 @@
+# CORCH-10 (R4.6): headless per-slot supervisor image. One container per Claude account slot.
+# Runs the supervisor Bun source directly (same path as tools/cloud-session): no Tauri, no ConPTY sidecar.
+# NO secret is ever an ARG/ENV/layer here. Runtime-only env (Coolify secrets):
+#   CLAUDE_CODE_OAUTH_TOKEN, REMO_ACCOUNT_SLOT, REMO_HUB_URL, REMO_API_KEY (purpose='host'), GH_TOKEN (all required).
+# Build context = repo root:  docker build -f Dockerfile.slot -t remo-slot .
+
+FROM node:22-bookworm-slim AS deps
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+    && apt-get clean
+WORKDIR /opt/remo/supervisor
+# node-pty compiles from source on linux; only the supervisor package is installed.
+COPY supervisor/package.json ./
+RUN npm install --omit=dev --no-audit --no-fund \
+    && find node_modules -type f \( -iname '*.exe' -o -iname '*.dll' -o -iname 'winpty*' -o -iname 'conpty*' \) -delete
+
+FROM node:22-bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git openssh-client ca-certificates curl \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && gh --version \
+    && apt-get clean \
+    && npm install -g --no-audit --no-fund @anthropic-ai/claude-code \
+    && npm cache clean --force
+# bun runs the supervisor source; node runs the PTY host (pty-host.mjs).
+COPY --from=oven/bun:1 /usr/local/bin/bun /usr/local/bin/bun
+
+WORKDIR /opt/remo
+COPY --from=deps /opt/remo/supervisor/node_modules supervisor/node_modules
+COPY supervisor/package.json supervisor/
+COPY supervisor/src supervisor/src
+COPY tools/cloud-session/write-config.ts tools/cloud-session/write-config.ts
+# Cross-directory static imports of the supervisor source (version.ts, git-introspect.ts): JSON/TS only, no Tauri binary.
+COPY supervisor/tauri/src-tauri/tauri.conf.json supervisor/tauri/src-tauri/tauri.conf.json
+COPY hub/src/lib/repo-key.ts hub/src/lib/repo-key.ts
+COPY tools/slot-image/entrypoint.sh /usr/local/bin/remo-slot-entrypoint
+
+# Non-secret defaults only. Volumes: /data/claude (this slot's Claude login/config), /data/work (checkouts).
+ENV REMO_ROOTS=/data/work \
+    REMO_SLOT_CLAUDE_CONFIG_DIR=/data/claude \
+    REMO_CODE_CONFIG_DIR=/home/node/.config/remo-code \
+    REMO_MAX_CONCURRENT=1
+RUN chmod 0555 /usr/local/bin/remo-slot-entrypoint \
+    && mkdir -p /data/claude /data/work /home/node/.config/remo-code \
+    && chown -R node:node /data /home/node
+VOLUME ["/data/claude", "/data/work"]
+
+USER node
+WORKDIR /opt/remo/supervisor
+ENTRYPOINT ["/usr/local/bin/remo-slot-entrypoint"]

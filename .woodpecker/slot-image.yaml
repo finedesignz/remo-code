@@ -1,0 +1,29 @@
+# CORCH-10 (R4.6): build the per-slot supervisor image on PRs. BUILD ONLY: dry_run, no registry push, no deploy.
+when:
+  - event: pull_request
+    path:
+      include:
+        - 'Dockerfile.slot'
+        - 'tools/slot-image/**'
+        - 'tools/cloud-session/write-config.ts'
+        - 'supervisor/**'
+        - '.woodpecker/slot-image.yaml'
+
+labels:
+  platform: linux/amd64
+
+steps:
+  - name: slot-image-static-tests
+    image: oven/bun:latest
+    commands:
+      - bun install --frozen-lockfile
+      - bun test supervisor/test/corch-slot-image.test.ts
+
+  - name: build-slot-image
+    image: woodpeckerci/plugin-docker-buildx
+    settings:
+      dry_run: true
+      repo: remo-slot-ci/never-pushed
+      dockerfile: Dockerfile.slot
+      context: .
+      platforms: linux/amd64

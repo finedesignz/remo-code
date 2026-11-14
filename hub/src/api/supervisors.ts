@@ -32,6 +32,8 @@ supervisors.get('/', async (c) => {
     // 9106): /sup/status is gone and it is retrying the bind. null = pre-fix
     // supervisor that doesn't report.
     status_server: getSupervisorStatusServer(r.id),
+    // CORCH-10 — the slot this supervisor advertised in supervisor.hello (null = desktop host / offline).
+    account_slot: getSupervisorRegistryEntry(r.id)?.accountSlot ?? null,
   }))
   return c.json({ supervisors: enriched })
 })
