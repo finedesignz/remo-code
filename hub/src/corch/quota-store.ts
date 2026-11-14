@@ -82,6 +82,22 @@ export const quotaStore = {
     }))
   },
 
+  /**
+   * Record the chosen account on the run: ONE conditional UPDATE that only sets account_slot when it is NULL,
+   * the run is live and owned by the user, and the account's other live runs are below `capacity`.
+   * false = 0 rows updated.
+   */
+  async claimAccountSlot(runId: string, userId: string, accountId: string, capacity: number): Promise<boolean> {
+    const rows = await sql<{ id: string }[]>`
+      UPDATE corch_runs SET account_slot = ${accountId}
+      WHERE id = ${runId} AND user_id = ${userId} AND account_slot IS NULL AND ended_at IS NULL
+        AND (SELECT count(*) FROM corch_runs o
+             WHERE o.user_id = ${userId} AND o.account_slot = ${accountId} AND o.ended_at IS NULL AND o.id <> ${runId})
+            < ${capacity}::int
+      RETURNING id`
+    return rows.length > 0
+  },
+
   /** Live (un-ended) CORCH runs per account_slot for the user, optionally excluding one run. */
   async liveRunsByAccount(userId: string, excludeRunId?: string | null): Promise<Record<string, number>> {
     const rows = await sql<{ account_slot: string; n: number }[]>`

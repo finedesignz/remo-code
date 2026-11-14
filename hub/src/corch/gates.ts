@@ -53,14 +53,20 @@ export function corchConcurrencyGate(store: CorchStore): DispatchGate {
   }
 }
 
-/** Refuses with the provider's reason (default `quota_no_snapshot`); ignores account/supervisor on success. */
+/** Refuses with the provider's reason (default `quota_no_snapshot`). The run id and any account already held are passed so the provider can pick and record the account (CORCH-02). */
 export function corchQuotaGate(quota: QuotaProvider, store: CorchStore): DispatchGate {
   return {
     name: 'corch_quota',
     async check(req): Promise<GateResult> {
       const ctx = await contextFor(store, req)
       if (refused(ctx)) return ctx
-      const snap = await quota.snapshotFor({ userId: ctx.run.user_id, projectId: ctx.project.id, workItemId: ctx.item.id })
+      const snap = await quota.snapshotFor({
+        userId: ctx.run.user_id,
+        projectId: ctx.project.id,
+        workItemId: ctx.item.id,
+        runId: ctx.run.id,
+        accountSlot: ctx.run.account_slot,
+      })
       return snap.ok ? { ok: true } : { ok: false, reason: snap.reason }
     },
   }
