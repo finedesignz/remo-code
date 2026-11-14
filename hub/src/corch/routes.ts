@@ -115,7 +115,10 @@ export function createCorchRoutes(deps: RouteDeps = REAL_ROUTE_DEPS): Hono<Env> 
     } catch (err: any) {
       return c.json({ error: 'bad_request', detail: err?.message }, 400)
     }
-    const r = await deps.store.updateProject(userId, c.req.param('id'), {
+    // A non-UUID id would raise a Postgres cast error (500): it can match no project, so it is a 404.
+    const id = c.req.param('id')
+    if (!z.string().uuid().safeParse(id).success) return c.json({ error: 'project_not_found' }, 404)
+    const r = await deps.store.updateProject(userId, id, {
       priority: body.priority,
       dailyTokenBudget: body.daily_token_budget,
       enabled: body.enabled,
