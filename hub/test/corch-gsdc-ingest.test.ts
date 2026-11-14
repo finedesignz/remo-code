@@ -69,7 +69,7 @@ function project(id: string, userId: string, ident: string, priority = 5) {
 
 type Make = () => Response | Promise<Response>
 
-function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<string, Make>; applyThrows?: boolean; applyGate?: Promise<void>; enqueuedGate?: Promise<void>; listThrows?: number; listGate?: Promise<void>; notifyThrows?: number } = {}) {
+function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<string, Make>; applyThrows?: boolean; applyGate?: Promise<void>; enqueuedGate?: Promise<void>; listThrows?: number; listGate?: Promise<void>; notifyThrows?: number; reach?: (u: string[]) => string[]; ticketThrows?: boolean } = {}) {
   const log = {
     fetches: [] as string[],
     auth: [] as string[],
@@ -77,6 +77,7 @@ function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<st
     cancels: [] as any[],
     outages: [] as Array<{ userIds: string[]; signature: string }>,
     enqueued: [] as string[],
+    tickets: [] as string[],
     signals: [] as AbortSignal[],
   }
   const timers: Array<{ fn: () => void; ms: number; cleared: boolean }> = []
@@ -138,6 +139,11 @@ function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<st
         throw new Error("undelivered")
       }
       log.outages.push({ userIds: o.userIds, signature: o.signature })
+      return (opts.reach ? opts.reach(o.userIds) : o.userIds)
+    },
+    reportTicket: (sig) => {
+      log.tickets.push(sig)
+      if (opts.ticketThrows) throw new Error('ticket down')
     },
     onEnqueued: async (u) => {
       log.enqueued.push(u)
@@ -806,5 +812,47 @@ describe('review hardening (QC round 8)', () => {
     expect(isLive()).toBe(true)
     h.ingest.stop()
     expect(isLive()).toBe(false)
+  })
+})
+
+describe('review hardening (QC round 9)', () => {
+  test('only owners reached durably count: unreached owners are retried alone, then silent', async () => {
+    let calls = 0
+    const h = harness({
+      projects: [project('pa', 'u1', 'github://acme/app'), project('pb', 'u2', 'github://acme/b')],
+      streams: [() => json({}, 503), () => json({}, 503), () => json({}, 503)],
+      reach: (us) => {
+        calls++
+        return us.filter((u) => u === 'u1' || calls > 1)
+      },
+    })
+    h.ingest.start()
+    await flush()
+    expect(h.log.outages).toEqual([{ userIds: ['u1', 'u2'], signature: 'http_5xx' }])
+    h.reconnects().at(-1)!.fn()
+    await flush()
+    expect(h.log.outages[1]).toEqual({ userIds: ['u2'], signature: 'http_5xx' }) // u1 not re-notified
+    h.reconnects().at(-1)!.fn()
+    await flush()
+    expect(h.log.outages.length).toBe(2)
+    h.ingest.stop()
+  })
+
+  test('one ticket per signature per outage; a new signature gets its own; ticket failure does not affect ingestion', async () => {
+    const h = harness({
+      projects: [project('pa', 'u1', 'github://acme/app')],
+      streams: [() => json({}, 503), () => json({}, 503), () => json({}, 401), () => sseResponse([frame('snapshot', { projects: [] })], { hold: true })],
+      ticketThrows: true,
+    })
+    h.ingest.start()
+    await flush()
+    h.reconnects().at(-1)!.fn()
+    await flush()
+    expect(h.log.tickets).toEqual(['http_5xx'])
+    h.reconnects().at(-1)!.fn()
+    await flush()
+    expect(h.log.tickets).toEqual(['http_5xx', 'http_401'])
+    expect(h.log.upserts).toEqual([])
+    h.ingest.stop()
   })
 })

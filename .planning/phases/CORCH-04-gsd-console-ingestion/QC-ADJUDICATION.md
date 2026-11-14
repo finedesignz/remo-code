@@ -16,7 +16,7 @@ Judged BY DESIGN, not changed.
   must drop events, and a dropped event is exactly the stale-board condition fail-closed is meant to avoid). Rejected as
   more risk than the abort-and-resnapshot it would replace.
 
-## R8 #1: "inapp counts as delivered for an offline owner; track durable per-owner delivery and retry only undelivered recipients"
+## R8 #1 (SUPERSEDED by the R9 fix: durable-channel delivery and per-owner retry; the judgement below no longer stands): "inapp counts as delivered for an offline owner; track durable per-owner delivery and retry only undelivered recipients"
 
 Judged BY DESIGN, not changed.
 

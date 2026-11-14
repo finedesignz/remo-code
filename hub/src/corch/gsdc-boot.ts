@@ -8,25 +8,39 @@ import { createGsdcIngest, type GsdcOutage } from './gsdc-ingest.ts'
 import { corchStore } from './store.ts'
 import { evaluateUserNow, REAL_TIMERS } from './dispatcher.ts'
 
-async function notifyOutage(o: GsdcOutage): Promise<void> {
+async function notifyOutage(o: GsdcOutage): Promise<string[]> {
   const { fanOutNotify } = await import('../orchestrator/notify.ts')
   // The detail carries the error signature only: never console text, never the token.
-  let delivered = 0
+  const reached: string[] = []
   for (const userId of o.userIds) {
-    if (!o.isLive()) return // stopped or superseded: no further recipients
+    if (!o.isLive()) break // stopped or superseded: no further recipients
     const r = await fanOutNotify({
       userId,
       sessionId: '',
       event: 'failure',
       level: 'blocking',
       detail: `CORCH gsd-console source unavailable (${o.signature}); no work was added or cancelled from it`,
-      channels: ['telegram', 'inapp', 'email', 'push'],
+      channels: ['telegram', 'email'],
     })
-    if (r.delivered.length > 0) delivered++
+    // inapp is a live-socket broadcast that persists nothing, so it never counts. Delivered only on a durable
+    // channel: email (accepted by the mail service) or telegram (stored by Telegram for the owner).
+    if (r.delivered.includes('email') || r.delivered.includes('telegram')) reached.push(userId)
   }
-  // fanOutNotify swallows channel failures: when NO owner got it on any channel, throw so the ingest keeps
-  // the outage un-notified and retries on the next failure instead of going silent for its whole length.
-  if (o.userIds.length > 0 && delivered === 0) throw new Error('gsdc_outage_notification_undelivered')
+  return reached
+}
+
+/** One 7d ticket per signature (deduped per outage by the ingest). Never throws; sends nothing when AAF is unconfigured. */
+export function reportTicket(signature: string): void {
+  void import('../agentautofix/reporter.ts')
+    .then(({ reportSelfErrorToAgentautofix }) =>
+      reportSelfErrorToAgentautofix({
+        fingerprint: `corch-gsdc:${signature}`,
+        errorType: 'CorchGsdcSourceFailure',
+        errorValue: `gsd-console ingest failure signature: ${signature}`,
+        source: 'corch-gsdc',
+      }),
+    )
+    .catch(() => {})
 }
 
 let current: ReturnType<typeof createGsdcIngest> | null = null
@@ -39,6 +53,7 @@ export function startGsdcIngest(): void {
     fetch: (url, init) => fetch(url, init),
     timers: REAL_TIMERS,
     notifyOutage,
+    reportTicket,
     onEnqueued: evaluateUserNow,
   })
   current.start()
