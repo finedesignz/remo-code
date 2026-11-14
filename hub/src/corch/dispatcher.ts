@@ -730,8 +730,17 @@ export function createCorchDispatcher(deps: CorchDeps) {
    * CORCH-08: an AAF closure ended these runs in the database. Cancel their in-process send guard so a turn that
    * already passed its liveness check cannot still reach the socket (same SYNCHRONOUS cancel reclaimRun does).
    */
-  function cancelRunSends(runIds: string[]): void {
-    for (const id of runIds) sendable.delete(id)
+  async function cancelRunSends(runIds: string[]): Promise<void> {
+    for (const id of runIds) sendable.delete(id) // synchronous: before the first await
+    // Free the session queue slot and disarm the finalize hook exactly like reclaimRun does, so a dispatched turn
+    // whose agent never replies cannot keep the slot and queue later dispatches to that session behind it.
+    for (const id of runIds) {
+      try {
+        await deps.pipeline.releaseByToken(buildCorchRunToken(id), 'aaf_closure')
+      } catch (err) {
+        log(`pipeline release failed run=${id}: ${errMsg(err)}`)
+      }
+    }
   }
 
   return { deps, evaluateUser, evaluateAll, armNotBeforeTimer, inFlight, reclaimRun, stallRun, onSupervisorClosed, cancelRunSends }
@@ -881,7 +890,7 @@ export function getCorch(): Promise<CorchDispatcher> {
 /** CORCH-08: cancel the send guard of runs an AAF closure ended. A no-op (builds nothing) while no dispatcher exists. */
 export async function cancelRunSendsNow(runIds: string[]): Promise<void> {
   if (singleton === null || runIds.length === 0) return
-  ;(await singleton).cancelRunSends(runIds)
+  await (await singleton).cancelRunSends(runIds)
 }
 
 /** Whether the real singleton was ever built (a flag-OFF process must never build it). */

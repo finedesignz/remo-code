@@ -153,7 +153,11 @@ export function createAafEventRoutes(deps: AafEventDeps = REAL_DEPS): Hono {
           } catch (err: any) {
             console.warn(`[corch] aaf pr.failed notification failed item=${claim.workItemId}: ${err?.name ?? 'error'}`)
           }
-          await deps.store.finishAafNotify(parsed.event_id, claim.token, delivered)
+          // The send is not repeatable, so a failed bookkeeping write is retried once before giving up (at-least-once:
+          // a still-failing write leaves 'sending', which a later retry reclaims after 5 minutes).
+          await deps.store.finishAafNotify(parsed.event_id, claim.token, delivered).catch(() =>
+            deps.store.finishAafNotify(parsed.event_id, claim.token, delivered),
+          )
           if (!delivered) {
             console.warn(`[corch] aaf pr.failed notification undelivered item=${claim.workItemId}`)
             notifyFailed = true
