@@ -19,6 +19,7 @@ import { corchEnabled, corchLeaseMs, corchQuotaCeilingPct } from './flag.ts'
 import { buildCorchKey, buildCorchRunToken, CORCH_ACTOR } from './keys.ts'
 import { corchProjectBudgetGate, corchConcurrencyGate, corchQuotaGate } from './gates.ts'
 import { DEFAULT_QUOTA_PROVIDER, createQuotaProvider, type QuotaProvider } from './quota-provider.ts'
+import { classifyQuotaDeath, type QuotaDeath } from './quota-death.ts'
 import { buildCorchPrompt } from './prompt.ts'
 import type { CorchStore, CorchWorkItem, CorchProject, EndRequeueInput, EndResult, LiveRun, NotBefore } from './store.ts'
 
@@ -353,9 +354,41 @@ export function createCorchDispatcher(deps: CorchDeps) {
     await evaluateUser(c.userId)
   }
 
-  /** Run end signal from the shared pipeline (the agent's next assistant_message). */
-  async function handleRunEnd(c: RunCtx): Promise<void> {
+  /**
+   * CORCH-R2.5: the run ended on the CLI usage-limit signal. Block its account until the reset (when the run holds
+   * one), then requeue with no attempt consumed. The PR lookup is skipped: the run did not fail on its own merits.
+   */
+  async function endQuotaDeath(c: RunCtx, death: QuotaDeath): Promise<void> {
     sendable.delete(c.runId) // before the first await
+    let accountId: string | null = null
+    try {
+      accountId = (await deps.store.runContext(c.runId))?.run.account_slot ?? null
+    } catch (err) {
+      log(`run context failed run=${c.runId}: ${errMsg(err)}`)
+    }
+    let blockedUntil: Date | null = null
+    if (accountId && deps.quota.markDeath) {
+      try {
+        blockedUntil = await deps.quota.markDeath({ userId: c.userId, accountId, resetAt: death.resetAt, window: death.window })
+      } catch (err) {
+        log(`markDeath failed run=${c.runId}: ${errMsg(err)}`)
+      }
+    }
+    const r = await deps.store.endRunAndRequeue(c.runId, {
+      endReason: 'quota_death',
+      consumeAttempt: false,
+      waitReason: 'quota:death',
+      notBefore: blockedUntil ? { at: blockedUntil.toISOString() } : null,
+    })
+    if (!r.changed) return
+    await afterRunEnd(c)
+  }
+
+  /** Run end signal from the shared pipeline (the agent's next assistant_message). */
+  async function handleRunEnd(c: RunCtx, text?: string): Promise<void> {
+    sendable.delete(c.runId) // before the first await
+    const death = classifyQuotaDeath(text)
+    if (death) return endQuotaDeath(c, death)
     let pr: Awaited<ReturnType<PrLookup['lookup']>>
     try {
       pr = await deps.prLookup.lookup({ userId: c.userId, repoIdent: c.repoIdent, branch: c.branch, workItemId: c.itemId })
@@ -402,8 +435,11 @@ export function createCorchDispatcher(deps: CorchDeps) {
       // dropped_busy. It is a dispatch failure (attempt + backoff, LD-8), not a no-deadline refusal.
       markSkipped: async (_token, reason) =>
         reason === 'session_busy' ? endFailure(c, 'dropped_busy', true) : endRefusal(c, reason, true),
-      markFailed: async () => endFailure(c, 'dispatch_failed', false),
-      onFinalize: async () => handleRunEnd(c),
+      markFailed: async (_token, error) => {
+        const death = classifyQuotaDeath(error)
+        return death ? endQuotaDeath(c, death) : endFailure(c, 'dispatch_failed', false)
+      },
+      onFinalize: async (_token, content) => handleRunEnd(c, content),
     }
   }
 
@@ -743,6 +779,7 @@ export async function realCorchDeps(): Promise<CorchDeps> {
       claimAccountSlot: (r, u, a, c) => quotaStore.claimAccountSlot(r, u, a, c),
       now: () => new Date(),
       ceilingPct: corchQuotaCeilingPct,
+      markDeath: (a) => quotaStore.markDeath(a),
     }),
     pipeline: {
       isOnline: (req) => getChannel(req.sessionId) != null,

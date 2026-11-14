@@ -98,6 +98,29 @@ export const quotaStore = {
     return rows.length > 0
   },
 
+  /**
+   * CORCH-R2.5 (LD-Q10): block the account after a quota death. blocked_at = now(); blocked_until = the signal's
+   * reset when it is in the future, else the named window's reset from the reading, else the earliest future of
+   * resets_5h / resets_7d, else NULL (then only a snapshot with a newer fetched_at clears it, LD-Q5).
+   * Returns the resulting blocked_until (null when none, or when the account has no row).
+   */
+  async markDeath(a: { userId: string; accountId: string; resetAt: Date | null; window?: '5h' | '7d' | null }): Promise<Date | null> {
+    const resetAt = a.resetAt ? a.resetAt.toISOString() : null
+    const window = a.window ?? null
+    const rows = await sql<{ blocked_until: Date | null }[]>`
+      UPDATE corch_quota_accounts SET
+        blocked_at = now(),
+        blocked_until = CASE
+          WHEN ${resetAt}::timestamptz IS NOT NULL AND ${resetAt}::timestamptz > now() THEN ${resetAt}::timestamptz
+          WHEN ${window}::text = '5h' THEN CASE WHEN resets_5h > now() THEN resets_5h END
+          WHEN ${window}::text = '7d' THEN CASE WHEN resets_7d > now() THEN resets_7d END
+          ELSE (SELECT min(t) FROM (VALUES (resets_5h), (resets_7d)) AS v(t) WHERE t > now())
+        END
+      WHERE user_id = ${a.userId} AND account_id = ${a.accountId}
+      RETURNING blocked_until`
+    return rows[0]?.blocked_until ?? null
+  },
+
   /** Live (un-ended) CORCH runs per account_slot for the user, optionally excluding one run. */
   async liveRunsByAccount(userId: string, excludeRunId?: string | null): Promise<Record<string, number>> {
     const rows = await sql<{ account_slot: string; n: number }[]>`

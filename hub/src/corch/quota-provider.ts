@@ -21,8 +21,11 @@ export interface QuotaProvider {
   }): Promise<QuotaSnapshot>
   /** When an account can next become eligible; null when only an event can change it. */
   earliestEligibleAt?(userId: string): Promise<Date | null>
-  /** Block an account after a quota death until its reset (CORCH-R2.5). */
-  markDeath?(a: { userId: string; accountId: string; resetAt: Date | null }): Promise<void>
+  /**
+   * Block an account after a quota death until its reset (CORCH-R2.5). Returns the resulting blocked_until
+   * (null when only a newer reading can clear the block).
+   */
+  markDeath?(a: { userId: string; accountId: string; resetAt: Date | null; window?: '5h' | '7d' | null }): Promise<Date | null>
 }
 
 export const DEFAULT_QUOTA_PROVIDER: QuotaProvider = {
@@ -43,7 +46,7 @@ export interface QuotaProviderDeps {
   claimAccountSlot(runId: string, userId: string, accountId: string, capacity: number): Promise<boolean>
   now(): Date
   ceilingPct(): number
-  markDeath?(a: { userId: string; accountId: string; resetAt: Date | null }): Promise<void>
+  markDeath?(a: { userId: string; accountId: string; resetAt: Date | null; window?: '5h' | '7d' | null }): Promise<Date | null>
 }
 
 export function createQuotaProvider(deps: QuotaProviderDeps): QuotaProvider {
