@@ -15,6 +15,7 @@ import {
   getQueue,
   releaseClosedRun,
   releaseClosedRunByToken,
+  onSessionReply,
   _reset as resetPipeline,
   type DispatchRequest,
   type PipelineDeps,
@@ -93,6 +94,68 @@ describe('releaseClosedRun', () => {
     expect(await releaseClosedRunByToken('run-1', 'run_timeout', { markFailed: false })).toBe(true)
     expect(sent).toEqual(['run-1', 'run-2'])
     expect(await releaseClosedRunByToken('missing', 'run_timeout')).toBe(false)
+  })
+})
+
+describe('7c panel: a send that fails after its hook was released never touches the successor', () => {
+  test('paused send A rejects after B was promoted: B keeps its hook and the slot; no overlap', async () => {
+    const sent: string[] = []
+    const failed: Array<{ token: string; error: string }> = []
+    const finalized: string[] = []
+    let rejectA!: (e: Error) => void
+    let aReached!: () => void
+    const aInSend = new Promise<void>((r) => {
+      aReached = r
+    })
+    const deps: PipelineDeps = {
+      gates: [],
+      store: {
+        markSkipped: async () => {},
+        markFailed: async (token, error) => {
+          failed.push({ token, error })
+        },
+        onFinalize: async (token) => {
+          finalized.push(token)
+        },
+      },
+      replay: async () => {},
+      isOnline: () => true,
+      send: async (r) => {
+        sent.push(r.token)
+        if (r.token === 'a') {
+          aReached()
+          await new Promise<void>((_, rej) => {
+            rejectA = rej
+          })
+        }
+      },
+    }
+
+    const pa = dispatch(req('a'), deps) // A is paused inside send()
+    await aInSend
+    expect((await dispatch(req('b'), deps)).kind).toBe('queued')
+
+    // The run is closed elsewhere (reclaim): A's hook is released and B is promoted (arms its hook, takes the slot).
+    expect(await releaseClosedRunByToken('a', 'session_absent', { markFailed: false })).toBe(true)
+    expect(sent).toEqual(['a', 'b'])
+    expect(getQueue().currentInFlight('s1')).toBe('b')
+
+    // A's send now fails (cancellation guard). It no longer owns the hook or the slot.
+    rejectA(new Error('corch_run_not_live'))
+    const outA = await pa
+    expect(outA).toEqual({ kind: 'failed', reason: 'corch_run_not_live' })
+    expect(failed).toEqual([]) // neither A (already closed by the releaser) nor B was marked failed
+    expect(getQueue().currentInFlight('s1')).toBe('b')
+
+    // A third dispatch queues behind B: no overlap.
+    expect((await dispatch(req('c'), deps)).kind).toBe('queued')
+    expect(sent).toEqual(['a', 'b'])
+
+    // B's hook is still armed: its reply finalizes B and promotes C.
+    await onSessionReply('s1', 'reply')
+    expect(finalized).toEqual(['b'])
+    expect(sent).toEqual(['a', 'b', 'c'])
+    expect(getQueue().currentInFlight('s1')).toBe('c')
   })
 })
 

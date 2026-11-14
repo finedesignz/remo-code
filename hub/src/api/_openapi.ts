@@ -1351,6 +1351,124 @@ openapi.openapi(taskTemplatesRoute, (c) => {
   });
 }
 
+// ── /api/corch + /api/ext/corch — central orchestrator queue (milestone CORCH) ─────────────
+// Spec-only registration; `../corch/routes.ts` serves traffic. Flag REMO_CORCH_ENABLED (default OFF):
+// with it OFF these routes only store and list rows. See docs/corch.md.
+{
+  const Err = z.object({ error: z.string(), detail: z.string().optional() });
+  const json = (schema: any) => ({ content: { "application/json": { schema } } });
+  const reg = openapi.openAPIRegistry;
+  const cookie = { tags: ["corch"], security: [{ bearerAuth: [] as string[] }] };
+  const extBase = { tags: ["corch"], security: [{ apiKeyAuth: [] as string[] }] };
+  const body = (schema: any) => ({ body: { content: { "application/json": { schema } } } });
+  const Project = z
+    .object({
+      id: z.string(),
+      repo_ident: z.string(),
+      priority: z.number().int(),
+      daily_token_budget: z.union([z.number(), z.string()]),
+      enabled: z.boolean(),
+      accept_external: z.boolean(),
+    })
+    .openapi("CorchProject");
+  const Item = z
+    .object({
+      id: z.string(),
+      project_id: z.string(),
+      source: z.enum(["manual", "gsd_console", "aaf", "memlog"]),
+      source_ref: z.string(),
+      title: z.string(),
+      status: z.enum(["queued", "running", "pr_open", "done", "blocked", "cancelled"]),
+      wait_reason: z.string().nullable(),
+      attempts: z.number().int(),
+      branch: z.string(),
+    })
+    .openapi("CorchWorkItem");
+  const common = { 401: { description: "Not authenticated", ...json(Err) } };
+  const WorkFields = {
+    title: z.string().min(1).max(500),
+    body: z.string().max(20000).optional(),
+    priority: z.number().int().optional(),
+  };
+
+  reg.registerPath({
+    method: "post", path: "/api/corch/projects", summary: "Enroll a github:// repo with the central orchestrator", ...cookie,
+    request: body(z.object({
+      repo_ident: z.string(),
+      priority: z.number().int().optional(),
+      daily_token_budget: z.number().int().positive().optional(),
+      enabled: z.boolean().optional(),
+      accept_external: z.boolean().optional(),
+    })),
+    responses: {
+      201: { description: "Created", ...json(z.object({ project: Project, created: z.literal(true) })) },
+      200: { description: "Already enrolled", ...json(z.object({ project: Project, created: z.literal(false) })) },
+      400: { description: "Invalid body or repo_ident (path_ident_not_supported for path://)", ...json(Err) },
+      ...common,
+    },
+  });
+  reg.registerPath({
+    method: "get", path: "/api/corch/projects", summary: "List the caller's enrolled projects", ...cookie,
+    responses: { 200: { description: "Projects", ...json(z.object({ projects: z.array(Project) })) }, ...common },
+  });
+  reg.registerPath({
+    method: "patch", path: "/api/corch/projects/{id}", summary: "Update priority, budget, enabled or accept_external", ...cookie,
+    request: {
+      params: z.object({ id: z.string().openapi({ param: { name: "id", in: "path" } }) }),
+      ...body(z.object({
+        priority: z.number().int().optional(),
+        daily_token_budget: z.number().int().positive().optional(),
+        enabled: z.boolean().optional(),
+        accept_external: z.boolean().optional(),
+      })),
+    },
+    responses: {
+      200: { description: "Updated", ...json(z.object({ project: Project })) },
+      400: { description: "Invalid body", ...json(Err) },
+      404: { description: "No such project for this user", ...json(Err) },
+      ...common,
+    },
+  });
+  reg.registerPath({
+    method: "post", path: "/api/corch/work-items", summary: "Enqueue a manual work item (idempotent on source_ref)", ...cookie,
+    request: body(z.object({ project_id: z.string().uuid(), ...WorkFields, source_ref: z.string().min(1).max(200).optional() })),
+    responses: {
+      201: { description: "Created", ...json(z.object({ item: Item, created: z.literal(true) })) },
+      200: { description: "Already enqueued", ...json(z.object({ item: Item, created: z.literal(false) })) },
+      400: { description: "Invalid body", ...json(Err) },
+      404: { description: "No such project for this user", ...json(Err) },
+      ...common,
+    },
+  });
+  reg.registerPath({
+    method: "get", path: "/api/corch/work-items", summary: "List the caller's work items (limit 200, newest first)", ...cookie,
+    request: { query: z.object({ status: z.enum(["queued", "running", "pr_open", "done", "blocked", "cancelled"]).optional() }) },
+    responses: {
+      200: { description: "Items", ...json(z.object({ items: z.array(Item) })) },
+      400: { description: "Invalid status", ...json(Err) },
+      ...common,
+    },
+  });
+  reg.registerPath({
+    method: "post", path: "/api/ext/corch/work-items", summary: "External enqueue of a work item (EXPLICIT ext:corch scope)", ...extBase,
+    description:
+      "Enqueues a work item for an enrolled project that has `accept_external=true` and `enabled=true`. The key needs the EXPLICIT `ext:corch` scope (a NULL-scopes key is refused). Idempotent on `(source, source_ref)`. Nothing runs unless REMO_CORCH_ENABLED is on.",
+    request: body(z.object({
+      repo_ident: z.string(),
+      source: z.enum(["aaf", "memlog", "manual"]),
+      source_ref: z.string().min(1).max(200),
+      ...WorkFields,
+    })),
+    responses: {
+      201: { description: "Created", ...json(z.object({ item: Item, created: z.literal(true) })) },
+      200: { description: "Already enqueued", ...json(z.object({ item: Item, created: z.literal(false) })) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      403: { description: "Key lacks the explicit ext:corch scope, OR project_not_accepting", ...json(Err) },
+    },
+  });
+}
+
 // ── /api/chat — Bearer-key chat surface (scope chat:session) ────────────────
 // Spec-only registration; `./chat.ts` serves traffic. See docs/auth.md "Chat via API key".
 {

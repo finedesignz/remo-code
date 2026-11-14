@@ -204,6 +204,29 @@ describe('mount-order: /api/ext is api-key-authed and mounted BEFORE the cookie 
   });
 });
 
+describe('mount-order: CORCH routes (milestone CORCH-01)', () => {
+  test('unauth GET /api/corch/projects -> 401 (authMiddleware ran, not a 404)', async () => {
+    const res = await app.request('/api/corch/projects', { method: 'GET' });
+    expect(
+      res.status,
+      `GET /api/corch/projects returned ${res.status}; expected 401. A 404 means the corch router is ` +
+        `not mounted after the /api/* catch-alls in index.ts.`,
+    ).toBe(401);
+  });
+
+  test('unauth POST /api/ext/corch/work-items -> 401 (api-key middleware ran, not 404, not a CSRF rejection)', async () => {
+    const res = await app.request('/api/ext/corch/work-items', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    expect(res.status).toBe(401);
+    let body: any = null;
+    try { body = await res.clone().json(); } catch { /* ignore */ }
+    expect(body?.error).not.toBe('csrf_failed');
+  });
+});
+
 describe('mount-order: CSRF guard SKIPS the public webhook paths', () => {
   // A no-CSRF-token POST to a webhook must NOT be rejected with the CSRF error
   // (`{error:"csrf_failed"}`, 403). It must reach the webhook's own auth — i.e.

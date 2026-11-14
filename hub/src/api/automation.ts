@@ -64,6 +64,13 @@ async function resumeDeferredWork(scope: KillScope, userId: string): Promise<voi
   } catch (err: any) {
     console.warn(`[automation-api] release resume sweep failed: ${err?.message ?? err}`)
   }
+  // CORCH-01 (LD-12): deferred central-orchestrator work in this scope resumes on the same event.
+  try {
+    const c = await import('../corch/dispatcher.ts')
+    await c.onKillSwitchReleased(scope, userId)
+  } catch (err: any) {
+    console.warn(`[automation-api] corch release resume failed: ${err?.message ?? err}`)
+  }
 }
 
 async function ownsSession(userId: string, sessionId: string): Promise<boolean> {

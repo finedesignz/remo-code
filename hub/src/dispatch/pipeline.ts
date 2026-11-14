@@ -433,7 +433,15 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
   // 5. Send the user_message on the agent socket + register the finalize hook
   //    BEFORE the reply can race back. IR-7: the hook only fires via
   //    onSessionReply (agent assistant_message branch).
-  activeBySession.set(req.sessionId, { token: openedId, req, deps, startedAt: Date.now() })
+  //    Hook ownership (7c panel, CORCH-01): while the awaits below run, the run can be closed
+  //    elsewhere (`releaseClosedRun*`), which deletes THIS hook, frees the slot and promotes a
+  //    waiter that arms its own hook. Cleanup after a refused/failed send therefore only touches
+  //    the hook, the run row and the slot when this exact hook object is still the session's
+  //    active one; otherwise they already belong to the releaser or a successor. The
+  //    reservation release stays token-scoped (it is keyed by this request's own token).
+  const hook: ActiveHook = { token: openedId, req, deps, startedAt: Date.now() }
+  activeBySession.set(req.sessionId, hook)
+  const ownsHook = () => activeBySession.get(req.sessionId) === hook
   try {
     if (deps.store?.markDispatched) await deps.store.markDispatched(openedId)
     // FINAL halt check (D-09c): the kill switch is re-read immediately before the
@@ -443,30 +451,32 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
     if (machine && controls) {
       const fh = await controls.finalHaltCheck(req)
       if (!fh.ok) {
-        activeBySession.delete(req.sessionId)
+        const owner = ownsHook()
+        if (owner) activeBySession.delete(req.sessionId)
         if (reserved && req.counterKey) await controls.releaseInject({ counterKey: req.counterKey, token: req.token })
-        if (deps.store) {
+        if (owner && deps.store) {
           try {
             await deps.store.markSkipped(openedId, fh.reason)
           } catch {}
         }
-        void releaseAndPromote(req.sessionId)
+        if (owner) void releaseAndPromote(req.sessionId)
         return { kind: 'skipped', reason: fh.reason }
       }
     }
     await deps.send(req)
   } catch (err: any) {
-    activeBySession.delete(req.sessionId)
+    const owner = ownsHook()
+    if (owner) activeBySession.delete(req.sessionId)
     if (reserved && controls && req.counterKey) {
       await controls.releaseInject({ counterKey: req.counterKey, token: req.token })
     }
     const msg = err?.message ?? String(err)
-    if (deps.store) {
+    if (owner && deps.store) {
       try {
         await deps.store.markFailed(openedId, msg)
       } catch {}
     }
-    void releaseAndPromote(req.sessionId)
+    if (owner) void releaseAndPromote(req.sessionId)
     return { kind: 'failed', reason: msg }
   }
 

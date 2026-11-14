@@ -43,6 +43,8 @@ export const SCOPE_ASK = 'ext:ask'
 export const SCOPE_WORK = 'ext:work'
 /** Starts/stops a process on the owner's machine - its own, EXPLICIT-only scope. */
 export const SCOPE_LAUNCH = 'ext:launch'
+/** Enqueues CORCH work items - its own EXPLICIT-only scope. */
+export const SCOPE_CORCH = 'ext:corch'
 
 /** POST /api/ext/sessions/<id>/launch | /stop - the only routes behind ext:launch. */
 const LAUNCH_PATH = /\/sessions\/[^/]+\/(?:launch|stop)\/?$/
@@ -83,6 +85,11 @@ export async function extApiKeyMiddleware(c: Context, next: Next) {
   // sufficient — an answer and a live-site change are not the same authority.
   if (c.req.method === 'POST' && c.req.path.endsWith('/work') && !hasExplicitScope(key.scopes, SCOPE_WORK)) {
     return c.json({ error: 'insufficient_scope', required: SCOPE_WORK }, 403)
+  }
+
+  // CORCH: enqueueing central-orchestrator work is EXPLICIT-only too (a NULL-scopes key never acquires it).
+  if (c.req.method === 'POST' && c.req.path.endsWith('/corch/work-items') && !hasExplicitScope(key.scopes, SCOPE_CORCH)) {
+    return c.json({ error: 'insufficient_scope', required: SCOPE_CORCH }, 403)
   }
 
   // LAUNCH: starting or stopping a session spawns/kills a process on the owner's machine.

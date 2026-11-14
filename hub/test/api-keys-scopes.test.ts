@@ -10,7 +10,8 @@ import { describe, it, expect, afterAll, mock } from 'bun:test'
 import { Hono } from 'hono'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { hasScope, hasExplicitScope, normalizeScopes, SCOPE_AGENT, SCOPE_EXT_ASK, SCOPE_EXT_READ, SCOPE_EXT_WORK, SCOPE_EXT_LAUNCH } from '../src/auth/scopes.ts'
+import { hasScope, hasExplicitScope, normalizeScopes, SCOPE_AGENT, SCOPE_EXT_ASK, SCOPE_EXT_READ, SCOPE_EXT_WORK, SCOPE_EXT_LAUNCH, SCOPE_EXT_CORCH, ALL_SCOPES } from '../src/auth/scopes.ts'
+import { matchSettingsRoute } from '../src/auth/settings-api-key.ts'
 
 const SRC = join(import.meta.dir, '..', 'src')
 
@@ -237,6 +238,53 @@ describe('/api/ext launch + stop need EXPLICIT ext:launch', () => {
       expect(res.status).toBe(200)
       expect(await res.json()).toEqual({ ok: true, actor: 'external-launch' })
     }
+  })
+})
+
+describe('ext:corch is an EXPLICIT-only scope (milestone CORCH-01)', () => {
+  it('is in ALL_SCOPES, accepted by normalizeScopes, never satisfied by NULL/empty/other scopes', () => {
+    expect(SCOPE_EXT_CORCH).toBe('ext:corch')
+    expect((ALL_SCOPES as readonly string[]).includes('ext:corch')).toBe(true)
+    expect(normalizeScopes(['ext:read', 'ext:corch'])).toEqual({ ok: true, scopes: ['ext:read', 'ext:corch'] })
+    expect(hasExplicitScope(null, 'ext:corch')).toBe(false)
+    expect(hasExplicitScope([], 'ext:corch')).toBe(false)
+    expect(hasExplicitScope([SCOPE_AGENT, SCOPE_EXT_READ, SCOPE_EXT_ASK, SCOPE_EXT_WORK, SCOPE_EXT_LAUNCH], 'ext:corch')).toBe(false)
+    expect(hasExplicitScope([SCOPE_EXT_READ, 'ext:corch'], 'ext:corch')).toBe(true)
+  })
+
+  it('an api key can never reach the cookie /api/corch routes: they are not on the settings allowlist (authMiddleware -> 403)', () => {
+    for (const [m, p] of [
+      ['GET', '/api/corch/projects'],
+      ['POST', '/api/corch/projects'],
+      ['PATCH', '/api/corch/projects/p1'],
+      ['POST', '/api/corch/work-items'],
+      ['GET', '/api/corch/work-items'],
+    ] as const) {
+      expect(matchSettingsRoute(m, p)).toBeNull()
+    }
+  })
+
+  it('extApiKeyMiddleware gates POST /api/ext/corch/work-items on the explicit scope', async () => {
+    async function extApp(scopes: string[] | null) {
+      mock.module(join(SRC, 'db/ask-dal.ts'), () => ({
+        verifyApiKeyForExt: async () => ({ id: 'k1', user_id: 'u1', scopes }),
+        hasScope: (s: string[] | null | undefined, scope: string) => hasScope(s, scope),
+      }))
+      const { extApiKeyMiddleware } = await import(
+        `../src/auth/ext-api-key-middleware.ts?extcorch=${encodeURIComponent(JSON.stringify(scopes))}`
+      )
+      const app = new Hono()
+      app.use('/api/ext/*', extApiKeyMiddleware)
+      app.post('/api/ext/corch/work-items', (c) => c.json({ ok: true }))
+      return app
+    }
+    const auth = { method: 'POST', headers: { Authorization: 'Bearer remokey_x' } }
+    for (const scopes of [null, [], ['ext:read'], ['ext:read', 'ext:work']]) {
+      const res = await (await extApp(scopes)).request('/api/ext/corch/work-items', auth)
+      expect(res.status).toBe(403)
+      expect(await res.json()).toEqual({ error: 'insufficient_scope', required: 'ext:corch' })
+    }
+    expect((await (await extApp(['ext:read', 'ext:corch'])).request('/api/ext/corch/work-items', auth)).status).toBe(200)
   })
 })
 
