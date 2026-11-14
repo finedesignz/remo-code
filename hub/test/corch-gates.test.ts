@@ -163,3 +163,260 @@ describe('defaults fail closed (LD-11)', () => {
     expect(await DEFAULT_PR_LOOKUP.lookup({} as any)).toEqual({ kind: 'unavailable' })
   })
 })
+
+// ── dispatcher with fake deps (CORCH-R1.11, R3.4, R3.5) ──────────────────────
+
+import { createCorchDispatcher } from '../src/corch/dispatcher.ts'
+
+function mkWorld(opts: { attempts?: number; maxAttempts?: number; prLookup?: any; dispatchOutcome?: any } = {}) {
+  const w = {
+    attempts: opts.attempts ?? 0,
+    maxAttempts: opts.maxAttempts ?? 3,
+    status: 'running' as string,
+    ended: new Set<string>(),
+    ends: [] as Array<{ runId: string; input: any; result: any }>,
+    prOpen: [] as string[],
+    notifications: [] as any[],
+    releases: [] as any[],
+    reserves: [] as any[],
+    gateCalls: [] as any[],
+    runLog: [] as any[],
+    launchCalls: 0,
+    allowedChecks: [] as any[],
+    running: [] as string[],
+    launched: [] as any[],
+    claims: 0,
+    pending: 1,
+    dispatched: [] as Array<{ req: any; pdeps: any }>,
+    outcome: opts.dispatchOutcome ?? { kind: 'dispatched', runId: 'x' },
+    gateReason: null as string | null,
+    launchThrows: false,
+    earliest: null as Date | null,
+    setTimeouts: [] as number[],
+    clearTimeouts: 0,
+  }
+  const claim = () => ({
+    run: { id: 'run-1', user_id: 'u1', project_id: 'p1', work_item_id: 'w1' },
+    item: { id: 'w1', branch: 'corch/w1', title: 't', body: 'b', source: 'manual', source_ref: 'r' },
+    project: { id: 'p1', repo_ident: 'github://acme/app', daily_token_budget: 1000 },
+  })
+  const store: any = {
+    claimNext: async () => {
+      w.claims++
+      return w.pending-- > 0 ? claim() : null
+    },
+    attachSession: async () => true,
+    markRunLaunched: async (id: string, sup: string) => void w.launched.push([id, sup]),
+    markRunRunning: async (id: string) => void w.running.push(id),
+    endRunAndRequeue: async (runId: string, input: any) => {
+      let result: any
+      if (w.ended.has(runId)) result = { changed: false }
+      else {
+        w.ended.add(runId)
+        if (input.consumeAttempt) {
+          w.attempts++
+          w.status = w.attempts >= w.maxAttempts ? 'blocked' : 'queued'
+        } else w.status = 'queued'
+        result = { changed: true, workItemId: 'w1', userId: 'u1', itemStatus: w.status, attempts: w.attempts }
+      }
+      w.ends.push({ runId, input, result })
+      return result
+    },
+    endRunMarkPrOpen: async (runId: string, url: string) => {
+      if (w.ended.has(runId)) return { changed: false }
+      w.ended.add(runId)
+      w.prOpen.push(url)
+      return { changed: true, workItemId: 'w1', userId: 'u1', itemStatus: 'pr_open', attempts: w.attempts }
+    },
+    earliestFutureNotBefore: async () => w.earliest,
+    usersWithDueItems: async () => [],
+    runContext: async () => null,
+  }
+  const launch: any = {
+    tzForUser: async () => 'UTC',
+    checkGates: async (...a: any[]) => (w.gateCalls.push(a), w.gateReason),
+    reserve: async (a: any) => (w.reserves.push(a), { ok: true }),
+    release: async (a: any) => void w.releases.push(a),
+    isRepoAutospawnAllowed: async (u: string, r: string) => (w.allowedChecks.push([u, r]), true),
+    supervisorOnlineForUser: async () => true,
+    getTokenCapStatus: async () => ({ over: false }),
+    countAutospawnLaunchesToday: async () => 0,
+    isOverAutospawnDailyLaunchCap: () => false,
+    graceParkPending: () => false,
+    launchSessionForUser: async () => {
+      w.launchCalls++
+      if (w.launchThrows) throw new Error('boom')
+      return { ok: true, runId: 'sup-run', supervisorId: 'sup-1' }
+    },
+    appendRunLog: async (row: any) => void w.runLog.push(row),
+  }
+  const deps: any = {
+    store,
+    workspace: { resolve: async () => ({ ok: true, sessionId: 's1', worktreePath: 'C:/wt/app' }) },
+    launch,
+    launchCommand: 'corch_test_launch',
+    quota: DEFAULT_QUOTA_PROVIDER,
+    pipeline: { isOnline: async () => true, send: async () => {} },
+    dispatch: async (req: any, pdeps: any) => (w.dispatched.push({ req, pdeps }), w.outcome),
+    prLookup: opts.prLookup ?? DEFAULT_PR_LOOKUP,
+    notify: async (n: any) => void w.notifications.push(n),
+    timers: {
+      setTimeout: (_fn: () => void, ms: number) => (w.setTimeouts.push(ms), { id: w.setTimeouts.length }),
+      clearTimeout: () => void w.clearTimeouts++,
+    },
+  }
+  return { w, deps }
+}
+
+describe('dispatcher (CORCH-R1.11, R3.4, R3.5)', () => {
+  test('governedLaunch gets the corch policy: enrollment check, launch command, preLaunch governor over the SAME gate list', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, deps } = mkWorld()
+    await createCorchDispatcher(deps).evaluateUser('u1')
+    expect(w.allowedChecks).toEqual([['u1', 'github://acme/app']])
+    expect(w.runLog[0].command).toBe('corch_test_launch')
+    expect(w.runLog[0].repo_key).toBe('github://acme/app')
+    expect(w.reserves[0]).toMatchObject({ enforceRate: true, actor: 'corch', counterKey: 'corch:w1', token: 'corch-run:run-1', sessionId: 's1' })
+    expect(w.gateCalls[0][0].counterKey).toBe('corch:w1')
+    expect(w.gateCalls[0][1]).toBe(w.dispatched[0]!.pdeps.gates) // same list object (heal pattern)
+    expect(w.launched).toEqual([['run-1', 'sup-1']])
+    expect(w.running).toEqual(['run-1'])
+  })
+
+  test('flag OFF: evaluateUser never reaches the store or launch', async () => {
+    delete process.env.REMO_CORCH_ENABLED
+    const { w, deps } = mkWorld()
+    expect(await createCorchDispatcher(deps).evaluateUser('u1')).toEqual({ kind: 'disabled' })
+    expect(w.claims).toBe(0)
+    expect(w.launchCalls).toBe(0)
+  })
+
+  test('refused quota_no_snapshot: no attempt, wait_reason set, no timer (event-driven)', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, deps } = mkWorld()
+    w.gateReason = 'quota_no_snapshot'
+    await createCorchDispatcher(deps).evaluateUser('u1')
+    expect(w.ends[0]!.input).toEqual({ endReason: 'quota_no_snapshot', consumeAttempt: false, waitReason: 'quota_no_snapshot', notBefore: null })
+    expect(w.attempts).toBe(0)
+    expect(w.launchCalls).toBe(0)
+  })
+
+  test('refused automation_halted:global normalizes end_reason, keeps full wait_reason, no attempt', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, deps } = mkWorld()
+    w.gateReason = 'automation_halted:global'
+    await createCorchDispatcher(deps).evaluateUser('u1')
+    expect(w.ends[0]!.input).toMatchObject({ endReason: 'automation_halted', waitReason: 'automation_halted:global', consumeAttempt: false })
+    expect(w.attempts).toBe(0)
+  })
+
+  test('a daily-cost refusal schedules the next local midnight in the user tz', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, deps } = mkWorld()
+    w.gateReason = 'over_daily_cost_cap:$10.42>=$10.00'
+    await createCorchDispatcher(deps).evaluateUser('u1')
+    expect(w.ends[0]!.input.notBefore).toEqual({ midnightTz: 'UTC' })
+  })
+
+  test('governedLaunch failed: attempt consumed with end_reason launch_failed', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, deps } = mkWorld()
+    w.launchThrows = true
+    await createCorchDispatcher(deps).evaluateUser('u1')
+    expect(w.ends[0]!.input).toMatchObject({ endReason: 'launch_failed', consumeAttempt: true })
+    expect(w.attempts).toBe(1)
+    expect(w.releases.length).toBe(1) // governedLaunch released its own reservation through the closure
+  })
+
+  test('launched then dispatch skipped automation_halted:user: no attempt, reservation released once even on double delivery', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, deps } = mkWorld({ dispatchOutcome: { kind: 'skipped', reason: 'automation_halted:user' } })
+    await createCorchDispatcher(deps).evaluateUser('u1')
+    const first = w.ends.filter((e) => e.result.changed)
+    expect(first.length).toBe(1)
+    expect(first[0]!.input).toMatchObject({ endReason: 'automation_halted', consumeAttempt: false })
+    // the pipeline's own markSkipped callback delivers the same transition again
+    await w.dispatched[0]!.pdeps.store.markSkipped('corch-run:run-1', 'automation_halted:user')
+    expect(w.attempts).toBe(0)
+    expect(w.releases.length).toBe(1)
+  })
+
+  test('parked_offline then onParkExpire: spawn_timeout with an attempt and one release', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, deps } = mkWorld({ dispatchOutcome: { kind: 'parked_offline' } })
+    await createCorchDispatcher(deps).evaluateUser('u1')
+    expect(w.ends.length).toBe(0)
+    await w.dispatched[0]!.pdeps.onParkExpire(w.dispatched[0]!.req)
+    expect(w.ends[0]!.input).toMatchObject({ endReason: 'spawn_timeout', consumeAttempt: true })
+    expect(w.releases.length).toBe(1)
+  })
+
+  test('dropped_busy consumes an attempt and releases', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, deps } = mkWorld({ dispatchOutcome: { kind: 'dropped_busy' } })
+    await createCorchDispatcher(deps).evaluateUser('u1')
+    expect(w.ends[0]!.input).toMatchObject({ endReason: 'dropped_busy', consumeAttempt: true })
+    expect(w.releases.length).toBe(1)
+  })
+
+  test('onFinalize with PrLookup open => PR recorded, then evaluateUser re-triggered once', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, deps } = mkWorld({ prLookup: { lookup: async () => ({ kind: 'open', url: 'https://github.com/acme/app/pull/1' }) } })
+    await createCorchDispatcher(deps).evaluateUser('u1')
+    const before = w.claims
+    await w.dispatched[0]!.pdeps.store.onFinalize('corch-run:run-1', 'done')
+    expect(w.prOpen).toEqual(['https://github.com/acme/app/pull/1'])
+    expect(w.attempts).toBe(0)
+    expect(w.claims).toBe(before + 1)
+  })
+
+  test('onFinalize with PrLookup none => no_pr attempt; unavailable (default) => pr_lookup_unavailable attempt', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    for (const [lookup, reason] of [
+      [{ lookup: async () => ({ kind: 'none' }) }, 'no_pr'],
+      [DEFAULT_PR_LOOKUP, 'pr_lookup_unavailable'],
+    ] as const) {
+      const { w, deps } = mkWorld({ prLookup: lookup })
+      await createCorchDispatcher(deps).evaluateUser('u1')
+      const before = w.claims
+      await w.dispatched[0]!.pdeps.store.onFinalize('corch-run:run-1', 'done')
+      expect(w.ends.at(-1)!.input).toMatchObject({ endReason: reason, consumeAttempt: true })
+      expect(w.attempts).toBe(1)
+      expect(w.claims).toBe(before + 1)
+    }
+  })
+
+  test('third consumed attempt blocks the item and notifies exactly once, even when delivered twice', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, deps } = mkWorld({ attempts: 2, dispatchOutcome: { kind: 'failed', reason: 'send_threw' } })
+    await createCorchDispatcher(deps).evaluateUser('u1')
+    await w.dispatched[0]!.pdeps.store.markFailed('corch-run:run-1', 'send_threw') // callback delivery
+    expect(w.status).toBe('blocked')
+    expect(w.attempts).toBe(3)
+    expect(w.notifications.length).toBe(1)
+    expect(w.notifications[0]).toMatchObject({ kind: 'blocked', workItemId: 'w1', repoIdent: 'github://acme/app', attempts: 3, endReason: 'dispatch_failed' })
+    expect(Object.keys(w.notifications[0]).sort()).toEqual(['attempts', 'endReason', 'kind', 'repoIdent', 'sessionId', 'userId', 'workItemId'])
+  })
+
+  test('armNotBeforeTimer: one timer for the earliest future not_before (clamped), clears the previous, none when empty', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, deps } = mkWorld()
+    const d = createCorchDispatcher(deps)
+    w.earliest = null
+    await d.armNotBeforeTimer()
+    expect(w.setTimeouts).toEqual([])
+    w.earliest = new Date(Date.now() + 3_600_000)
+    await d.armNotBeforeTimer()
+    expect(w.setTimeouts.length).toBe(1)
+    expect(Math.abs(w.setTimeouts[0]! - 3_600_000)).toBeLessThan(5_000)
+    w.earliest = new Date(Date.now() + 10 * 365 * 86_400_000)
+    await d.armNotBeforeTimer()
+    expect(w.setTimeouts.length).toBe(2)
+    expect(w.setTimeouts[1]).toBe(2147483647)
+    expect(w.clearTimeouts).toBe(1) // the first timer was cleared before the second was set
+    w.earliest = null
+    await d.armNotBeforeTimer()
+    expect(w.setTimeouts.length).toBe(2)
+    expect(w.clearTimeouts).toBe(2)
+  })
+})

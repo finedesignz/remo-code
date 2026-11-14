@@ -3,16 +3,23 @@
 // CORCH-01: the central-orchestrator dispatcher. No top-level value import of the DB client,
 // store.ts, heal/*, ws/*, telegram/* or orchestrator/* (LD-2): real dependencies are assembled by
 // dynamic import so unit tests import this module with zero DB.
+//
+// One evaluation (LD-6): flag check, claim txn, Workspace.resolve, attach session, build request and
+// prompt, governedLaunch (HEAL policy), then on `launched` the single shared dispatch(). Refusals never
+// consume an attempt (LD-7); failures do, with bounded backoff and a blocked state (LD-8); every
+// end-of-run transition is idempotent and side effects run only when it changed a row (LD-9, LD-10).
 
 import type { AutospawnDeps } from '../heal/autospawn-deps.ts'
-import type { DispatchRequest, PipelineDeps, RunStore } from '../dispatch/pipeline.ts'
+import type { DispatchOutcome, DispatchRequest, PipelineDeps, RunStore } from '../dispatch/pipeline.ts'
+import { governedLaunch } from '../dispatch/governed-launch.ts'
 import { automationKillSwitchGate, automationLifetimeCounterGate } from '../dispatch/automation-controls.ts'
 import { dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate } from '../dispatch/gates.ts'
 import { corchEnabled, corchLeaseMs } from './flag.ts'
-import { buildCorchKey, buildCorchRunToken } from './keys.ts'
+import { buildCorchKey, buildCorchRunToken, CORCH_ACTOR } from './keys.ts'
 import { corchProjectBudgetGate, corchConcurrencyGate, corchQuotaGate } from './gates.ts'
 import { DEFAULT_QUOTA_PROVIDER, type QuotaProvider } from './quota-provider.ts'
-import type { CorchStore, CorchWorkItem, CorchProject, EndRequeueInput, NotBefore } from './store.ts'
+import { buildCorchPrompt } from './prompt.ts'
+import type { CorchStore, CorchWorkItem, CorchProject, EndRequeueInput, EndResult, NotBefore } from './store.ts'
 
 // ── Seams with fail-closed defaults (LD-11) ──────────────────────────────────
 
@@ -48,12 +55,35 @@ export interface PipelineSeams {
   finalizeTimeoutMs?: number
 }
 
+/** Owner notification. Carries ids, repo_ident, attempts and end_reason only (LD-14). */
+export interface CorchNotification {
+  kind: 'blocked' | 'stalled'
+  userId: string
+  workItemId: string
+  repoIdent: string
+  attempts: number
+  endReason: string
+  sessionId: string | null
+}
+
+export interface CorchTimers {
+  setTimeout(fn: () => void, ms: number): unknown
+  clearTimeout(handle: unknown): void
+}
+
 export interface CorchDeps {
   store: CorchStore
   workspace: Workspace
+  /** Launch deps: REAL_AUTOSPAWN with the CORCH enrollment check as isRepoAutospawnAllowed (LD-1). */
   launch: AutospawnDeps
+  /** The run-log command the autospawn daily launch cap counts (AUTOSPAWN_LAUNCH_COMMAND). */
+  launchCommand: string
   quota: QuotaProvider
   pipeline: PipelineSeams
+  dispatch: (req: DispatchRequest, deps: PipelineDeps) => Promise<DispatchOutcome>
+  prLookup: PrLookup
+  notify: (n: CorchNotification) => Promise<void>
+  timers: CorchTimers
 }
 
 /** Hooks the dispatcher wires into the pipeline for one run (filled by the launch path). */
@@ -95,7 +125,7 @@ export function buildCorchPipelineDeps(deps: CorchDeps, hooks: PipelineHooks = N
   }
 }
 
-/** The dispatch request for a run. The ONLY place the lifetime key is attached (LD-4). */
+/** The dispatch request for a run. The ONLY place the request's lifetime key is attached (LD-4). */
 export function buildCorchRequest(a: {
   userId: string
   sessionId: string
@@ -111,8 +141,6 @@ export function buildCorchRequest(a: {
     counterKey: buildCorchKey(a.workItemId),
   }
 }
-
-export type EvaluateResult = { kind: 'disabled' } | { kind: 'done'; claimed: number }
 
 // ── Refusal schedule (LD-7) ──────────────────────────────────────────────────
 
@@ -137,7 +165,7 @@ export function refusalSchedule(reason: string): { endReason: string; waitReason
   return { endReason, waitReason: reason, notBefore }
 }
 
-/** Turn a schedule kind into the store's NotBefore (needs the user tz only for midnight). */
+/** Turn a schedule kind into the store's NotBefore (the user tz is needed only for midnight). */
 export function toNotBefore(kind: NotBeforeKind, tz: string): NotBefore {
   switch (kind) {
     case 'midnight':
@@ -153,21 +181,227 @@ export function toNotBefore(kind: NotBeforeKind, tz: string): NotBefore {
 
 // ── Dispatcher ───────────────────────────────────────────────────────────────
 
+export type EvaluateResult = { kind: 'disabled' } | { kind: 'done'; claimed: number }
+
 const MAX_CLAIMS_PER_EVALUATION = 10
+/** setTimeout's largest delay (a larger value fires immediately). */
+const MAX_TIMEOUT_MS = 2147483647
+
+type ReleaseArgs = Parameters<AutospawnDeps['release']>[0]
+
+/** Everything one launched run's callbacks need. */
+interface RunCtx {
+  userId: string
+  runId: string
+  itemId: string
+  repoIdent: string
+  branch: string
+  sessionId: string
+  /** true while the launch is still inside the evaluation loop that claimed it (no re-trigger then). */
+  inline: boolean
+  lifetime: ReleaseArgs
+}
+
+function log(msg: string): void {
+  console.error(`[corch] ${msg}`)
+}
+
+function errMsg(err: unknown): string {
+  return (err as { message?: string })?.message ?? String(err)
+}
 
 export function createCorchDispatcher(deps: CorchDeps) {
   /** Items this process is currently launching (never reclaimed as orphans). */
   const inFlight = new Set<string>()
+  let timer: unknown = null
 
-  async function refuseNoAttempt(runId: string, tz: string, reason: string): Promise<void> {
+  async function notifyBlocked(c: RunCtx, attempts: number, endReason: string): Promise<void> {
+    try {
+      await deps.notify({
+        kind: 'blocked',
+        userId: c.userId,
+        workItemId: c.itemId,
+        repoIdent: c.repoIdent,
+        attempts,
+        endReason,
+        sessionId: c.sessionId,
+      })
+    } catch (err) {
+      log(`notify failed run=${c.runId}: ${errMsg(err)}`)
+    }
+  }
+
+  /** LD-10: a throw is logged with the run id and left. */
+  async function releaseReservation(c: RunCtx): Promise<void> {
+    try {
+      await deps.launch.release(c.lifetime)
+    } catch (err) {
+      log(`reservation release failed run=${c.runId}: ${errMsg(err)}`)
+    }
+  }
+
+  /** No-attempt refusal (LD-7): the run ends, the item goes back to queued. */
+  async function refuseRun(runId: string, userId: string, reason: string): Promise<EndResult> {
     const s = refusalSchedule(reason)
+    const tz = s.notBefore === 'midnight' ? await deps.launch.tzForUser(userId) : 'UTC'
     const input: EndRequeueInput = {
       endReason: s.endReason,
       consumeAttempt: false,
       waitReason: s.waitReason,
       notBefore: toNotBefore(s.notBefore, tz),
     }
-    await deps.store.endRunAndRequeue(runId, input)
+    return deps.store.endRunAndRequeue(runId, input)
+  }
+
+  async function endRefusal(c: RunCtx, reason: string, release: boolean): Promise<void> {
+    const r = await refuseRun(c.runId, c.userId, reason)
+    if (!r.changed) return
+    if (release) await releaseReservation(c)
+    if (!c.inline) await armNotBeforeTimer()
+  }
+
+  /** Attempt-consuming failure (LD-8): bounded backoff, blocked at max_attempts, one notification. */
+  async function endFailure(c: RunCtx, endReason: string, release: boolean): Promise<void> {
+    const r = await deps.store.endRunAndRequeue(c.runId, {
+      endReason,
+      consumeAttempt: true,
+      waitReason: null,
+      notBefore: null,
+    })
+    if (!r.changed) return
+    if (release) await releaseReservation(c)
+    if (r.itemStatus === 'blocked') await notifyBlocked(c, r.attempts, endReason)
+    await afterRunEnd(c)
+  }
+
+  /** A run ended: free slot may start another item. Not re-entered from inside the claiming loop. */
+  async function afterRunEnd(c: RunCtx): Promise<void> {
+    if (c.inline) return // the claiming evaluation continues and re-arms the timer itself
+    await evaluateUser(c.userId)
+  }
+
+  /** Run end signal from the shared pipeline (the agent's next assistant_message). */
+  async function handleRunEnd(c: RunCtx): Promise<void> {
+    let pr: Awaited<ReturnType<PrLookup['lookup']>>
+    try {
+      pr = await deps.prLookup.lookup({ userId: c.userId, repoIdent: c.repoIdent, branch: c.branch, workItemId: c.itemId })
+    } catch (err) {
+      log(`pr lookup failed run=${c.runId}: ${errMsg(err)}`)
+      pr = { kind: 'unavailable' }
+    }
+    if (pr.kind === 'open') {
+      const r = await deps.store.endRunMarkPrOpen(c.runId, pr.url)
+      if (r.changed) await afterRunEnd(c)
+      return
+    }
+    await endFailure(c, pr.kind === 'none' ? 'no_pr' : 'pr_lookup_unavailable', false)
+  }
+
+  async function applyOutcome(c: RunCtx, outcome: DispatchOutcome): Promise<void> {
+    switch (outcome.kind) {
+      case 'dispatched':
+        await deps.store.markRunRunning(c.runId)
+        return
+      case 'skipped':
+        await endRefusal(c, outcome.reason, true)
+        return
+      case 'failed':
+        await endFailure(c, 'dispatch_failed', false)
+        return
+      case 'dropped_busy':
+        await endFailure(c, 'dropped_busy', true)
+        return
+      default:
+        return // queued / parked_offline: the pipeline's replay or park-expiry hook finishes it
+    }
+  }
+
+  function runStoreFor(c: RunCtx): RunStore {
+    return {
+      open: async () => null,
+      markDispatched: async () => {
+        await deps.store.markRunRunning(c.runId)
+      },
+      markSkipped: async (_token, reason) => endRefusal(c, reason, true),
+      markFailed: async () => endFailure(c, 'dispatch_failed', false),
+      onFinalize: async () => handleRunEnd(c),
+    }
+  }
+
+  async function launchAndDispatch(claimed: NonNullable<Awaited<ReturnType<CorchStore['claimNext']>>>, ws: Extract<WorkspaceResult, { ok: true }>): Promise<void> {
+    const { run, item, project } = claimed
+    const userId = run.user_id
+    await deps.store.attachSession(run.id, ws.sessionId, ws.worktreePath)
+    const prompt = buildCorchPrompt({ item, project, worktreePath: ws.worktreePath })
+    const req = buildCorchRequest({ userId, sessionId: ws.sessionId, runId: run.id, workItemId: item.id, prompt })
+    const lifetime = { counterKey: buildCorchKey(item.id), token: req.token }
+    const c: RunCtx = {
+      userId,
+      runId: run.id,
+      itemId: item.id,
+      repoIdent: project.repo_ident,
+      branch: item.branch,
+      sessionId: ws.sessionId,
+      inline: true,
+      lifetime,
+    }
+    const pdeps: PipelineDeps = buildCorchPipelineDeps(deps, {
+      store: runStoreFor(c),
+      // A parked turn can be minutes stale: it re-enters dispatch() and is fully re-gated.
+      replay: async (r) => {
+        await applyOutcome(c, await deps.dispatch(r ?? req, pdeps))
+      },
+      onParkExpire: async () => endFailure(c, 'spawn_timeout', true),
+    })
+
+    const a = deps.launch
+    const launched = await governedLaunch(
+      {
+        userId,
+        sessionId: ws.sessionId,
+        repoIdent: project.repo_ident,
+        tz: await a.tzForUser(userId),
+        armed: corchEnabled(),
+        ledger: {
+          repoKey: project.repo_ident,
+          command: deps.launchCommand,
+          rationale: () => `corch work_item=${item.id} run=${run.id}`,
+        },
+        preLaunch: {
+          checkGates: () => a.checkGates(req, pdeps.gates),
+          reserve: () =>
+            a.reserve({ userId, sessionId: ws.sessionId, ...lifetime, actor: CORCH_ACTOR, enforceRate: true }),
+          release: () => releaseReservation(c),
+        },
+      },
+      a,
+    )
+
+    try {
+      switch (launched.kind) {
+        case 'refused':
+          await endRefusal(c, launched.reason, false) // governedLaunch released its own reservation
+          return
+        case 'in_flight':
+          await endRefusal(c, 'in_flight', false)
+          return
+        case 'failed':
+          log(`launch failed run=${run.id}: ${launched.reason}`)
+          await endFailure(c, 'launch_failed', false)
+          return
+        case 'launched':
+          await deps.store.markRunLaunched(run.id, launched.supervisorId)
+          try {
+            await applyOutcome(c, await deps.dispatch(req, pdeps))
+          } catch (err) {
+            log(`dispatch threw run=${run.id}: ${errMsg(err)}`)
+            await endFailure(c, 'dispatch_failed', false)
+          }
+          return
+      }
+    } finally {
+      c.inline = false // from here on, later callbacks (replay, finalize, park expiry) may re-trigger
+    }
   }
 
   async function evaluateUser(userId: string): Promise<EvaluateResult> {
@@ -183,47 +417,88 @@ export function createCorchDispatcher(deps: CorchDeps) {
       try {
         const ws = await deps.workspace.resolve({ userId, item: c.item, project: c.project, runId: c.run.id })
         if (!ws.ok) {
-          await refuseNoAttempt(c.run.id, 'UTC', ws.reason)
+          await refuseRun(c.run.id, userId, ws.reason)
           continue
         }
-        // Task 4 replaces this line with the governed launch + dispatch turn. Never reachable in prod:
-        // DEFAULT_WORKSPACE refuses.
-        await deps.store.endRunAndRequeue(c.run.id, {
-          endReason: 'launch_not_wired',
-          consumeAttempt: false,
-          waitReason: 'launch_not_wired',
-          notBefore: null,
-        })
+        await launchAndDispatch(c, ws)
       } finally {
         inFlight.delete(c.item.id)
       }
     }
+    await armNotBeforeTimer()
     return { kind: 'done', claimed }
   }
 
-  return { evaluateUser, inFlight }
+  /** Evaluate every user that has due queued work (the not_before timer and global triggers). */
+  async function evaluateAll(): Promise<void> {
+    if (!corchEnabled()) return
+    for (const userId of await deps.store.usersWithDueItems()) await evaluateUser(userId)
+    await armNotBeforeTimer()
+  }
+
+  /** ONE timer for the earliest future not_before (clamped), replacing the previous one. */
+  async function armNotBeforeTimer(): Promise<void> {
+    if (!corchEnabled()) return
+    const next = await deps.store.earliestFutureNotBefore()
+    if (timer != null) {
+      deps.timers.clearTimeout(timer)
+      timer = null
+    }
+    if (!next) return
+    const ms = Math.min(Math.max(next.getTime() - Date.now(), 0), MAX_TIMEOUT_MS)
+    timer = deps.timers.setTimeout(() => {
+      timer = null
+      void evaluateAll().catch((err) => log(`not_before timer evaluation failed: ${errMsg(err)}`))
+    }, ms)
+  }
+
+  return { evaluateUser, evaluateAll, armNotBeforeTimer, inFlight }
 }
 
 // ── Real dependencies + singleton (LD-2: dynamic imports only) ───────────────
 
-/** CORCH-01 defaults: the quota/workspace seams refuse, so nothing can launch until later phases. */
 export async function realCorchDeps(): Promise<CorchDeps> {
   const { corchStore } = await import('./store.ts')
   const { REAL_AUTOSPAWN } = await import('../heal/autospawn-deps.ts')
+  const { AUTOSPAWN_LAUNCH_COMMAND } = await import('../db/orchestrator-rows-dal.ts')
+  const { dispatch } = await import('../dispatch/pipeline.ts')
+  const { getChannel } = await import('../ws/registry.ts')
+  const { sendUserMessage } = await import('../heal/sinks/shared.ts')
   return {
     store: corchStore,
     workspace: DEFAULT_WORKSPACE,
-    quota: DEFAULT_QUOTA_PROVIDER,
-    // Task 4 binds the real heal send/isOnline here; until then nothing can reach a send (workspace refuses).
-    pipeline: {
-      isOnline: async () => false,
-      send: async () => {
-        throw new Error('corch pipeline send is not wired')
-      },
-    },
     // LD-1: the heal/orchestrator launch deps with ONE override: CORCH enrollment replaces the allowlist.
     launch: { ...REAL_AUTOSPAWN, isRepoAutospawnAllowed: (u, r) => corchStore.isEnrolledEnabled(u, r) },
+    launchCommand: AUTOSPAWN_LAUNCH_COMMAND,
+    quota: DEFAULT_QUOTA_PROVIDER,
+    pipeline: {
+      isOnline: (req) => getChannel(req.sessionId) != null,
+      send: (req) => sendUserMessage(req, { storedContent: req.prompt }),
+    },
+    dispatch,
+    prLookup: DEFAULT_PR_LOOKUP,
+    notify: async (n) => {
+      const { fanOutNotify } = await import('../orchestrator/notify.ts')
+      await fanOutNotify({
+        userId: n.userId,
+        sessionId: n.sessionId ?? '',
+        event: 'failure',
+        level: 'blocking',
+        detail: `CORCH ${n.kind}: work_item=${n.workItemId} repo=${n.repoIdent} attempts=${n.attempts} reason=${n.endReason}`,
+        channels: ['telegram', 'inapp', 'email', 'push'],
+      })
+    },
+    timers: REAL_TIMERS,
   }
+}
+
+const REAL_TIMERS: CorchTimers = {
+  setTimeout: (fn, ms) => {
+    const t = setTimeout(fn, ms)
+    ;(t as { unref?: () => void })?.unref?.()
+    return t
+  },
+  clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
 }
 
 let singleton: Promise<ReturnType<typeof createCorchDispatcher>> | null = null
@@ -233,8 +508,24 @@ export function getCorch(): Promise<ReturnType<typeof createCorchDispatcher>> {
   return singleton
 }
 
-/** Event trigger for enqueue / enrollment: no-op (and no DB access) when the flag is OFF. */
+// ── Event triggers: each returns immediately, with no DB access, when the flag is OFF (LD-12) ──
+
+/** Enqueue / enrollment trigger. */
 export async function evaluateUserNow(userId: string): Promise<void> {
   if (!corchEnabled()) return
   await (await getCorch()).evaluateUser(userId)
+}
+
+/** A supervisor connected: queued work waiting on supervisor_offline can proceed. */
+export async function onSupervisorHello(userId: string): Promise<void> {
+  if (!corchEnabled()) return
+  await (await getCorch()).evaluateUser(userId)
+}
+
+/** A kill switch scope was released: the deferred work in that scope can proceed. */
+export async function onKillSwitchReleased(scope: 'global' | 'user' | 'session', userId: string): Promise<void> {
+  if (!corchEnabled()) return
+  const d = await getCorch()
+  if (scope === 'global') await d.evaluateAll()
+  else await d.evaluateUser(userId)
 }

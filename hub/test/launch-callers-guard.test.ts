@@ -114,3 +114,22 @@ describe('PTYCAP-07-10: heal reaches launch only through the governed adapter', 
     expect(sites().some((s) => s.file === 'dispatch/governed-launch.ts')).toBe(true)
   })
 })
+
+describe('CORCH-01: corch reaches launch only through the governed adapter', () => {
+  const corchFiles = () => walk(join(SRC, 'corch')).map((f) => relative(SRC, f).split('\\').join('/'))
+
+  test('self-check: the corch tree is found', () => {
+    expect(corchFiles().length).toBeGreaterThanOrEqual(8)
+  })
+
+  test('no file under hub/src/corch contains the launchSessionForUser token', () => {
+    const hits = corchFiles().filter((f) => readFileSync(join(SRC, f), 'utf8').includes('launchSessionForUser'))
+    expect(hits).toEqual([])
+  })
+
+  test('dispatcher.ts imports and calls governedLaunch', () => {
+    const src = codeLines(join(SRC, 'corch/dispatcher.ts')).join('\n')
+    expect(src).toMatch(/import \{ governedLaunch \} from '\.\.\/dispatch\/governed-launch\.ts'/)
+    expect(src).toMatch(/\bgovernedLaunch\(/)
+  })
+})

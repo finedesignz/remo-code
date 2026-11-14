@@ -11,6 +11,8 @@
  * bun-mock-pollution.
  */
 import { describe, test, expect, beforeEach, mock } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'x'.repeat(32)
 process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgres://localhost:5432/placeholder'
@@ -162,5 +164,18 @@ describe('launchSessionForUser machine option', () => {
     expect(res.ok).toBe(true)
     expect(s.lateCalls).toBe(0)
     expect(s.sends).toHaveLength(1)
+  })
+})
+
+describe('CORCH-01: the corch dispatcher launches only via governedLaunch with a preLaunch governor', () => {
+  const src = readFileSync(join(import.meta.dir, '..', 'src', 'corch', 'dispatcher.ts'), 'utf8')
+    .split(/\r?\n/)
+    .filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('*'))
+    .join('\n')
+
+  test('dispatcher.ts calls governedLaunch( exactly once, passes preLaunch, and never names the launch primitive', () => {
+    expect((src.match(/\bgovernedLaunch\(/g) ?? []).length).toBe(1)
+    expect(src).toMatch(/preLaunch:\s*\{/)
+    expect(src).not.toContain('launchSessionForUser')
   })
 })

@@ -137,6 +137,14 @@ export interface CorchStore {
   liveRunsForUser(userId: string, excludeRunId: string): Promise<number>
   /** Today's four-bucket token total for the project's CORCH sessions, in the user's tz-day. */
   projectTokensToday(projectId: string, tz: string): Promise<number>
+  /** Record the hosting supervisor once the governed launch succeeded (run stays `launching`). */
+  markRunLaunched(runId: string, supervisorId: string): Promise<boolean>
+  /** The turn was actually sent: status running, heartbeat now (no-op once the run ended). */
+  markRunRunning(runId: string): Promise<boolean>
+  /** Earliest not_before in the future over queued items of enabled projects, or null. */
+  earliestFutureNotBefore(): Promise<Date | null>
+  /** Users that currently have a queued item whose not_before has passed (or is unset). */
+  usersWithDueItems(): Promise<string[]>
 }
 
 export const corchStore: CorchStore = {
@@ -345,5 +353,35 @@ export const corchStore: CorchStore = {
       WHERE session_id IN (SELECT session_id FROM corch_runs WHERE project_id = ${projectId} AND session_id IS NOT NULL)
         AND created_at >= date_trunc('day', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}`
     return Number(r[0]?.sum ?? 0)
+  },
+
+  async markRunLaunched(runId, supervisorId) {
+    const r = await sql`
+      UPDATE corch_runs SET supervisor_id = ${supervisorId}, heartbeat_at = now()
+      WHERE id = ${runId} AND ended_at IS NULL RETURNING id`
+    return r.length > 0
+  },
+
+  async markRunRunning(runId) {
+    const r = await sql`
+      UPDATE corch_runs SET status = 'running', heartbeat_at = now()
+      WHERE id = ${runId} AND ended_at IS NULL RETURNING id`
+    return r.length > 0
+  },
+
+  async earliestFutureNotBefore() {
+    const r = await sql<{ t: Date | null }[]>`
+      SELECT min(i.not_before) AS t
+      FROM corch_work_items i JOIN corch_projects p ON p.id = i.project_id
+      WHERE i.status = 'queued' AND p.enabled = true AND i.not_before > now()`
+    return r[0]?.t ?? null
+  },
+
+  async usersWithDueItems() {
+    const r = await sql<{ user_id: string }[]>`
+      SELECT DISTINCT i.user_id
+      FROM corch_work_items i JOIN corch_projects p ON p.id = i.project_id
+      WHERE i.status = 'queued' AND p.enabled = true AND (i.not_before IS NULL OR i.not_before <= now())`
+    return r.map((x) => x.user_id)
   },
 }
