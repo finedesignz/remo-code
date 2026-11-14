@@ -74,12 +74,22 @@ export function startCorchReconciler(deps: CorchDeps, d: CorchDispatcher): () =>
 
 let started = false
 
-/** Boot start: when enabled, build the singleton, start the reconciler and arm the not_before timer once. */
+/**
+ * Start the reconciler and evaluate the backlog that is ALREADY due once, event-driven: work whose
+ * backoff or not_before expired while the hub was down gets no other trigger. evaluateAll() re-arms the
+ * single not_before timer for the next future deadline when it finishes. No new loop (R3.6).
+ */
+export async function startCorchWith(d: CorchDispatcher): Promise<() => void> {
+  if (!corchEnabled()) return () => {}
+  const stop = startCorchReconciler(d.deps, d)
+  await d.evaluateAll()
+  return stop
+}
+
+/** Boot start: when enabled, build the singleton, start the reconciler, evaluate due backlog and arm the timer once. */
 export async function startCorch(): Promise<void> {
   if (!corchEnabled()) return
   if (started) return
   started = true
-  const d = await getCorch()
-  startCorchReconciler(d.deps, d)
-  await d.armNotBeforeTimer()
+  await startCorchWith(await getCorch())
 }
