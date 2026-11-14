@@ -51,6 +51,8 @@ export interface GsdcDeps {
   reportTicket?: (signature: string) => Promise<boolean>
   /** A new item was queued for this user: evaluate now (event-driven). */
   onEnqueued: (userId: string) => Promise<void>
+  /** CORCH-09: queued items this event cancelled (their kept worktree/claim is cleaned up). Best effort. */
+  onCancelled?: (items: Array<{ userId: string; itemId: string }>) => Promise<void>
   now?: () => number
 }
 
@@ -253,12 +255,20 @@ export function createGsdcIngest(deps: GsdcDeps) {
     // stopped or superseded: the store re-checks `alive` inside the transaction and rolls back.
     if (!alive()) return
     let touched: string[]
+    const cancelled: Array<{ userId: string; itemId: string }> = []
     try {
-      touched = await deps.store.applyGsdcBoards(entries, alive)
+      touched = await deps.store.applyGsdcBoards(entries, alive, cancelled)
     } catch (err: any) {
       if (!alive()) return // stopped mid-transaction: rolled back, not a failure
       console.error(`[corch.gsdc] apply failed: ${err?.message ?? err}`)
       throw new GsdcFailure('apply_failed')
+    }
+    if (cancelled.length > 0) {
+      try {
+        await deps.onCancelled?.(cancelled)
+      } catch (err: any) {
+        console.error(`[corch.gsdc] cancelled-item cleanup failed: ${err?.message ?? err}`)
+      }
     }
     for (const userId of touched) {
       if (!alive()) return // no evaluation (launch) once stopped, superseded or aborted

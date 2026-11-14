@@ -243,6 +243,40 @@ maybe('CORCH-09 e2e - slot worktree, memlog claim and PR lookup on real Postgres
     expect(w.tickets).toEqual(['corch.memlog_unavailable'])
   })
 
+  test('a requeue after a run that had a worktree releases the claim (no live run left to heartbeat it); pr_open items are heartbeated', async () => {
+    const userId = await mkUser()
+    const projectId = await mkProject(userId, 'github://acme/requeue')
+    const a = await enq(userId, projectId, 'rq-1')
+    const { w, deps, d } = world({ prUrl: null })
+    await d.evaluateUser(userId)
+    const [run] = await runRows(a.item.id)
+    await w.dispatches[0]!.pdeps.store.onFinalize(`corch-run:${run!.id}`, 'done') // no PR -> requeued (attempt 1 of 3)
+    expect((await itemRow(a.item.id)).status).toBe('queued')
+    expect(w.events.filter((e) => e === `memlog.release corch:${a.item.id} DONE`).length).toBe(1)
+    expect(w.frames.some((f) => f.command === 'corch.worktree_remove')).toBe(false) // worktree kept
+
+    // pr_open: the claim is kept and heartbeated by the reconciler although the run has ended
+    await h.sql`UPDATE corch_work_items SET status = 'pr_open', pr_url = 'https://github.com/acme/requeue/pull/1' WHERE id = ${a.item.id}`
+    w.events.length = 0
+    await recMod.reconcilePass(deps, d)
+    expect(w.events).toContain(`memlog.heartbeat corch:${a.item.id}`)
+    await h.sql`UPDATE corch_work_items SET status = 'done' WHERE id = ${a.item.id}`
+  })
+
+  test('applyGsdcBoards reports the queued items it cancels (their kept worktree is then removed)', async () => {
+    const userId = await mkUser()
+    const projectId = await mkProject(userId, 'github://acme/gsdc')
+    const a = await storeMod.corchStore.enqueueWorkItem({ userId, projectId, source: 'gsd_console', sourceRef: 'phase-1', title: 't', body: 'b', priority: 0 })
+    const cancelled: Array<{ userId: string; itemId: string }> = []
+    await storeMod.corchStore.applyGsdcBoards([{ userId, projectId, doneRefs: ['phase-1'], candidate: null, priority: 0 } as any], () => true, cancelled)
+    expect(cancelled).toEqual([{ userId, itemId: a.item.id }])
+    expect((await itemRow(a.item.id)).status).toBe('cancelled')
+    // the dispatcher hook removes the worktree and releases the claim for a cancelled item
+    const { w, d } = world()
+    await d.releaseItem(userId, a.item.id, 'cancelled')
+    expect(w.events.length).toBe(0) // no run existed for it: nothing to remove or release
+  })
+
   test('blocked item releases the claim but keeps the worktree', async () => {
     const userId = await mkUser()
     const projectId = await mkProject(userId, 'github://acme/blocked')

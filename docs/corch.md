@@ -435,10 +435,17 @@ rather than "let through"; the human PTY paths are untouched. No hub source, sch
 `worktree_ensure`, then find or create the `sessions` row for the path (hostname = the slot supervisor). A refusal
 (`quota:*`, `memlog_conflict`, `memlog_unavailable`, halt) is a no-attempt wait; a worktree command failure throws (bounded
 failure with an attempt, blocked plus one notification). The real `PrLookup` asks the run's own supervisor (`open` => `pr_open`
-plus `pr_url`; none => requeue per R3.4; any failure => `unavailable`). The item terminal hook (`release`) runs when an AAF
-closure makes an item done or blocked (and when the dispatcher blocks it after max attempts): remove the worktree (done and
-cancelled only) then release the claim. The reconciler heartbeats the claim for every run it sees alive. There is no cancel
-path today; `release` already accepts `cancelled`.
+plus `pr_url`; none => requeue per R3.4; any failure => `unavailable`). Claim lifecycle: the claim is taken in `resolve` and released (a) when a run ends and the item goes back to the queue (a refusal,
+failure, quota death or reclaim after a worktree was attached; the worktree is kept and the next attempt re-claims), (b) when the item
+is blocked (worktree kept), (c) when it is done (AAF merged) or cancelled (gsd-console cancelled a queued item), which also removes
+the worktree, and (d) on any throw inside `resolve` after the claim (an RPC timeout excepted: the command may still be mutating the
+worktree, so the claim is left to lapse and re-taken by the same session). While an item is `pr_open` the claim is KEPT and the
+reconciler heartbeats it, together with the claims of live runs, until AAF closes the item. The supervisor kills any git/gh
+command after 240s, below the hub's 600s RPC timeout, so the hub always receives a real reply. The supervisor never advertises the
+`corch.*` commands, so a scheduled task cannot invoke them; clone identity is bound (`origin` must equal the expected remote,
+`clone_origin_mismatch` otherwise), the git credential helper is scoped to `https://github.com`, a worktree on any branch other than
+`corch/<id>` is never force-removed (`worktree_wrong_branch`), and with the slot set every runner event is scrubbed of the exact
+token value before it reaches the hub.
 
 **Memlog claim (R3.8): BLOCKED-ON-MCP.** memlog is a gateway-only MCP Factory server; the hub holds no gateway credential
 and has no MCP client, so no verified hub->memlog transport exists (7e request filed to `mcp-servers`). The `MemlogClient`

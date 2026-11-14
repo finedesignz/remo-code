@@ -60,6 +60,11 @@ export function startGsdcIngest(): void {
     notifyOutage,
     reportTicket,
     onEnqueued: evaluateUserNow,
+    // CORCH-09: an item the console cancelled releases its kept worktree and memlog claim.
+    onCancelled: async (items) => {
+      const { releaseWorkItemNow } = await import('./dispatcher.ts')
+      for (const i of items) await releaseWorkItemNow({ userId: i.userId, itemId: i.itemId, status: 'cancelled' })
+    },
   })
   current.start()
 }

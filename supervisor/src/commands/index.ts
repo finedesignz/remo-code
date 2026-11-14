@@ -81,9 +81,8 @@ const NATIVE: Array<{ name: string; description: string }> = [
   { name: 'work_diff_scope', description: 'READ-ONLY: file list + head sha of a work/<id> branch vs the default branch' },
   { name: 'work_build', description: 'Run the operator-configured build cmd against a work/<id> branch (deploy creds scrubbed)' },
   { name: 'work_publish', description: 'HUB-ONLY: ff-only merge a work/<id> branch into the default branch + run the operator publish cmd' },
-  { name: 'corch.worktree_ensure', description: 'CORCH: ensure the canonical clone and the deterministic corch/<id> worktree for a work item' },
-  { name: 'corch.worktree_remove', description: 'CORCH: remove the corch/<id> worktree of a done or cancelled work item' },
-  { name: 'corch.pr_lookup', description: 'READ-ONLY: open same-repo PR for a corch/<id> branch (gh, worker credential)' },
+  // corch.* are deliberately NOT advertised: the generic scheduled-task sender runs only advertised commands, so a
+  // scheduled task can never reach them. Only the hub's CORCH workspace sender (allowlisted RPC) does.
 ]
 
 export function nativeSupervisorCommands(): ScannedCommand[] {

@@ -198,6 +198,8 @@ export interface CorchStore {
   runContext(runId: string): Promise<RunContext | null>
   /** CORCH-09: the most recent run of a work item (ended or not) with its repo_ident, for worktree removal and the memlog release. */
   latestRunForItem(userId: string, itemId: string): Promise<(CorchRun & { repo_ident: string }) | null>
+  /** CORCH-09: items waiting on their PR (pr_open): their memlog claim is heartbeated until the item is done/blocked. */
+  prOpenItems?(limit: number): Promise<Array<{ id: string; user_id: string; repo_ident: string }>>
   /** Live (not ended) runs for the user, excluding one run (the request's own). */
   liveRunsForUser(userId: string, excludeRunId: string): Promise<number>
   /** Today's four-bucket token total for the project's CORCH sessions, in the user's tz-day. */
@@ -233,7 +235,7 @@ export interface CorchStore {
    * row lock that conflicts with updateProject) is skipped. `shouldCommit` is re-checked before each entry and
    * before the commit; false rolls everything back (throws).
    */
-  applyGsdcBoards(entries: GsdcApplyEntry[], shouldCommit?: () => boolean): Promise<string[]>
+  applyGsdcBoards(entries: GsdcApplyEntry[], shouldCommit?: () => boolean, cancelled?: Array<{ userId: string; itemId: string }>): Promise<string[]>
 }
 
 export interface GsdcApplyEntry {
@@ -645,6 +647,14 @@ export const corchStore: CorchStore = {
     return rows[0] ?? null
   },
 
+  async prOpenItems(limit) {
+    return sql<{ id: string; user_id: string; repo_ident: string }[]>`
+      SELECT i.id, i.user_id, p.repo_ident
+      FROM corch_work_items i JOIN corch_projects p ON p.id = i.project_id
+      WHERE i.status = 'pr_open'
+      ORDER BY i.updated_at ASC LIMIT ${limit}`
+  },
+
   async liveRunsForSupervisor(supervisorId) {
     return sql<LiveRun[]>`
       SELECT r.*, p.repo_ident, i.attempts AS item_attempts
@@ -674,7 +684,7 @@ export const corchStore: CorchStore = {
       SELECT * FROM corch_projects WHERE enabled = true ORDER BY user_id, repo_ident`
   },
 
-  async applyGsdcBoards(entries, shouldCommit = () => true) {
+  async applyGsdcBoards(entries, shouldCommit = () => true, cancelled) {
     if (entries.length === 0) return []
     return sql.begin(async (tx) => {
       const created = new Set<string>()
@@ -684,11 +694,14 @@ export const corchStore: CorchStore = {
           SELECT 1 FROM corch_projects WHERE id = ${e.projectId} AND user_id = ${e.userId} AND enabled = true FOR SHARE`
         if (enrolled.length === 0) continue
         if (e.doneRefs.length > 0) {
-          await tx`
+          const cancelledRows = await tx`
             UPDATE corch_work_items
             SET status = 'cancelled', wait_reason = NULL, not_before = NULL, updated_at = now()
             WHERE project_id = ${e.projectId} AND source = 'gsd_console' AND status = 'queued'
-              AND source_ref = ANY(${e.doneRefs}::text[])`
+              AND source_ref = ANY(${e.doneRefs}::text[])
+            RETURNING id`
+          // Reported to the caller only; it is read AFTER the transaction commits (a throw discards the whole call).
+          for (const r of cancelledRows) cancelled?.push({ userId: e.userId, itemId: r.id as string })
         }
         if (e.candidate) {
           const id = randomUUID()
