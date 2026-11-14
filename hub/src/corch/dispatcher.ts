@@ -523,9 +523,34 @@ export function createCorchDispatcher(deps: CorchDeps) {
     await armNotBeforeTimer()
   }
 
-  /** ONE timer for the earliest future not_before (clamped), replacing the previous one. */
-  async function armNotBeforeTimer(): Promise<void> {
-    if (!corchEnabled()) return
+  let arming: Promise<void> | null = null
+  let rearm = false
+
+  /**
+   * ONE timer for the earliest future not_before (clamped), replacing the previous one. Calls are
+   * serialized and coalesced: a call that arrives while a query is in flight marks a re-run, so the last
+   * query always runs AFTER the newest request and an older, slower result can never cancel a newer timer.
+   */
+  function armNotBeforeTimer(): Promise<void> {
+    if (!corchEnabled()) return Promise.resolve()
+    if (arming) {
+      rearm = true
+      return arming
+    }
+    arming = (async () => {
+      try {
+        do {
+          rearm = false
+          await armNotBeforeTimerOnce()
+        } while (rearm)
+      } finally {
+        arming = null
+      }
+    })()
+    return arming
+  }
+
+  async function armNotBeforeTimerOnce(): Promise<void> {
     const next = await deps.store.earliestFutureNotBefore()
     if (timer != null) {
       deps.timers.clearTimeout(timer)
