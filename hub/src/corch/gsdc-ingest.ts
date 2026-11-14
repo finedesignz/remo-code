@@ -135,6 +135,8 @@ export function createGsdcIngest(deps: GsdcDeps) {
   let timer: unknown = null
   let failures = 0
   let outage = false
+  /** True once the owner notification of the CURRENT outage was actually delivered (retried until it is). */
+  let notified = false
   let generation = 0
 
   const clearTimer = () => {
@@ -144,11 +146,12 @@ export function createGsdcIngest(deps: GsdcDeps) {
 
   async function reportFailure(signature: string): Promise<void> {
     failures++
-    if (outage) return
     outage = true
+    if (notified) return
     try {
       const users = [...new Set((await deps.store.listEnabledProjects()).map((p) => p.user_id))]
       await deps.notifyOutage({ userIds: users, signature })
+      notified = true // only after delivery: a failed recipient lookup is retried on the next failure of this outage
     } catch (err: any) {
       console.error(`[corch.gsdc] outage notification failed: ${err?.message ?? err}`)
     }
@@ -298,6 +301,7 @@ export function createGsdcIngest(deps: GsdcDeps) {
           if (ev.event === 'snapshot') gotSnapshot = true
           // A fully applied event ends any outage.
           outage = false
+          notified = false
           if (now() - startedAt >= GSDC_HEALTHY_STREAM_MS) failures = 0
         }
       } catch (err) {
