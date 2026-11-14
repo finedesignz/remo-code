@@ -214,7 +214,7 @@ interface RunCtx {
   itemId: string
   repoIdent: string
   branch: string
-  sessionId: string
+  sessionId: string | null
   /** true while the launch is still inside the evaluation loop that claimed it (no re-trigger then). */
   inline: boolean
   lifetime: ReleaseArgs
@@ -359,6 +359,18 @@ export function createCorchDispatcher(deps: CorchDeps) {
     }
   }
 
+  /** The callback context of a claimed run that has no session yet (end-of-run transitions only). */
+  const claimedCtx = (c: NonNullable<Awaited<ReturnType<CorchStore['claimNext']>>>): RunCtx => ({
+    userId: c.run.user_id,
+    runId: c.run.id,
+    itemId: c.item.id,
+    repoIdent: c.project.repo_ident,
+    branch: c.item.branch,
+    sessionId: null,
+    inline: true, // the claiming loop continues and re-arms the timer itself
+    lifetime: { counterKey: buildCorchKey(c.item.id), token: buildCorchRunToken(c.run.id) },
+  })
+
   /** True only while the run row exists and has not ended (fail closed on any lookup problem). */
   async function runIsLive(runId: string): Promise<boolean> {
     try {
@@ -498,24 +510,43 @@ export function createCorchDispatcher(deps: CorchDeps) {
     if (!corchEnabled()) return { kind: 'disabled' }
     const excluded: string[] = []
     let claimed = 0
-    for (let n = 0; n < MAX_CLAIMS_PER_EVALUATION; n++) {
-      const c = await deps.store.claimNext(userId, excluded)
-      if (!c) break
-      claimed++
-      excluded.push(c.item.id)
-      inFlight.add(c.item.id)
-      try {
-        const ws = await deps.workspace.resolve({ userId, item: c.item, project: c.project, runId: c.run.id })
-        if (!ws.ok) {
-          await refuseRun(c.run.id, userId, ws.reason)
-          continue
+    try {
+      for (let n = 0; n < MAX_CLAIMS_PER_EVALUATION; n++) {
+        const c = await deps.store.claimNext(userId, excluded)
+        if (!c) break
+        claimed++
+        excluded.push(c.item.id)
+        inFlight.add(c.item.id)
+        try {
+          let ws: WorkspaceResult
+          try {
+            ws = await deps.workspace.resolve({ userId, item: c.item, project: c.project, runId: c.run.id })
+          } catch (err) {
+            // A throwing Workspace is a failure with an attempt (bounded backoff, blocked + one notification):
+            // ending the run as an orphan would requeue it with no attempt and retry forever (QC MED 2).
+            log(`workspace resolve threw run=${c.run.id}: ${errMsg(err)}`)
+            await endFailure(claimedCtx(c), 'workspace_error', false)
+            continue
+          }
+          if (!ws.ok) {
+            await refuseRun(c.run.id, userId, ws.reason)
+            continue
+          }
+          await launchAndDispatch(c, ws)
+        } catch (err) {
+          // Anything that escapes the launch path (a gate/store/launch dependency, attachSession,
+          // markRunLaunched) must not leave the claimed run live: it would hold the project slot and the
+          // user's cap and later be mis-judged stalled or absent. Failure with an attempt and backoff; the
+          // reservation was never spent on a send, so it is released (idempotent when none was taken).
+          log(`launch threw run=${c.run.id}: ${errMsg(err)}`)
+          await endFailure(claimedCtx(c), 'launch_error', true)
+        } finally {
+          inFlight.delete(c.item.id)
         }
-        await launchAndDispatch(c, ws)
-      } finally {
-        inFlight.delete(c.item.id)
       }
+    } finally {
+      await armNotBeforeTimer() // an aborted evaluation must still leave the earliest wakeup armed
     }
-    await armNotBeforeTimer()
     return { kind: 'done', claimed }
   }
 

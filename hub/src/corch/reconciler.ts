@@ -33,9 +33,11 @@ export async function reconcilePass(deps: CorchDeps, d: CorchDispatcher): Promis
       // A launch this process is still performing is not a candidate.
       if (d.inFlight.has(run.work_item_id)) continue
 
-      // Launch needs a session id, so a run without one never launched anything: free it, no attempt.
+      // Launch needs a session id, so a run without one never launched anything: free it. It still consumes
+      // an attempt so a deterministic crash/throw before the session is attached is bounded (blocked + one
+      // notification) instead of re-claimed forever with attempts stuck at 0 (QC MED 2).
       if (!run.session_id) {
-        if (now - new Date(run.started_at).getTime() > lease) await d.reclaimRun(run, 'claim_orphaned', false)
+        if (now - new Date(run.started_at).getTime() > lease) await d.reclaimRun(run, 'claim_orphaned', true)
         continue
       }
 
