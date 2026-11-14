@@ -420,3 +420,176 @@ describe('dispatcher (CORCH-R1.11, R3.4, R3.5)', () => {
     expect(w.clearTimeouts).toBe(2)
   })
 })
+
+// ── reconciler (CORCH-R3.3): positive-knowledge reclaim ──────────────────────
+
+import { reconcilePass } from '../src/corch/reconciler.ts'
+
+type Inv = { fresh: boolean; sessionIds: Set<string> }
+
+function mkRecon(opts: { runs?: any[]; inv?: Record<string, Inv>; userInv?: Inv; online?: boolean } = {}) {
+  const { w, deps } = mkWorld({ attempts: 0 })
+  w.pending = 0 // follow-up evaluations must not claim anything
+  const r = {
+    runs: opts.runs ?? [],
+    readLimits: [] as number[],
+    touched: [] as string[][],
+    stalledCalls: [] as string[],
+    stalledSet: new Set<string>(),
+    releases: [] as Array<[string, string]>,
+    supervisorRuns: [] as any[],
+  }
+  deps.store.liveRunsOldestHeartbeat = async (limit: number) => (r.readLimits.push(limit), r.runs)
+  deps.store.touchHeartbeat = async (ids: string[]) => void r.touched.push(ids)
+  deps.store.markStalled = async (id: string) => {
+    r.stalledCalls.push(id)
+    if (r.stalledSet.has(id)) return false
+    r.stalledSet.add(id)
+    return true
+  }
+  deps.store.liveRunsForSupervisor = async () => r.supervisorRuns
+  deps.pipeline.releaseByToken = async (token: string, reason: string) => void r.releases.push([token, reason])
+  deps.inventory = {
+    forSupervisor: (id: string): Inv => opts.inv?.[id] ?? { fresh: false, sessionIds: new Set() },
+    forUser: (): Inv => opts.userInv ?? { fresh: false, sessionIds: new Set() },
+    isOnline: () => opts.online ?? false,
+  }
+  const d = createCorchDispatcher(deps)
+  return { w, deps, r, d }
+}
+
+const LEASE = 120_000
+function liveRun(over: Record<string, unknown> = {}) {
+  return {
+    id: 'run-1',
+    work_item_id: 'w1',
+    project_id: 'p1',
+    user_id: 'u1',
+    supervisor_id: 'sup-1',
+    session_id: 's1',
+    status: 'running',
+    heartbeat_at: new Date(Date.now() - LEASE - 30_000),
+    started_at: new Date(Date.now() - LEASE - 60_000),
+    repo_ident: 'github://acme/app',
+    item_attempts: 0,
+    ...over,
+  }
+}
+
+describe('reconciler (CORCH-R3.3)', () => {
+  test('a listed session gets a heartbeat and nothing else', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, r, d, deps } = mkRecon({ runs: [liveRun()], inv: { 'sup-1': { fresh: true, sessionIds: new Set(['s1']) } } })
+    await reconcilePass(deps, d)
+    expect(r.touched).toEqual([['run-1']])
+    expect(w.ends).toEqual([])
+    expect(w.notifications).toEqual([])
+  })
+
+  test('fresh inventory lacking the session beyond the lease reclaims session_absent with an attempt', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, r, d, deps } = mkRecon({ runs: [liveRun()], inv: { 'sup-1': { fresh: true, sessionIds: new Set(['other']) } } })
+    await reconcilePass(deps, d)
+    expect(w.ends.map((e) => e.input)).toMatchObject([{ endReason: 'session_absent', consumeAttempt: true }])
+    expect(w.attempts).toBe(1)
+    expect(r.releases).toEqual([['corch-run:run-1', 'session_absent']]) // disarms the reclaimed run's pipeline hook
+    expect(r.stalledCalls).toEqual([])
+    expect(w.releases).toEqual([]) // the reservation is not released on reclaim (the send happened)
+  })
+
+  test('fresh and not listed but still inside the lease: nothing', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, r, d, deps } = mkRecon({
+      runs: [liveRun({ heartbeat_at: new Date(Date.now() - 10_000) })],
+      inv: { 'sup-1': { fresh: true, sessionIds: new Set() } },
+    })
+    await reconcilePass(deps, d)
+    expect(w.ends).toEqual([])
+    expect(r.touched.flat()).toEqual([])
+    expect(r.stalledCalls).toEqual([])
+  })
+
+  test('no fresh inventory beyond the lease: stalled once and ONE notification across two passes, never reclaimed', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, r, d, deps } = mkRecon({ runs: [liveRun()] }) // inventory unknown for sup-1
+    await reconcilePass(deps, d)
+    await reconcilePass(deps, d)
+    expect(r.stalledCalls).toEqual(['run-1', 'run-1'])
+    expect(w.notifications.length).toBe(1)
+    expect(w.notifications[0]).toMatchObject({ kind: 'stalled', workItemId: 'w1', repoIdent: 'github://acme/app', endReason: 'no_fresh_inventory' })
+    expect(w.ends).toEqual([]) // unknown is never "gone"
+  })
+
+  test('a stalled run that is listed again is heartbeated (store flips it back to running)', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { r, d, deps } = mkRecon({ runs: [liveRun({ status: 'stalled' })], inv: { 'sup-1': { fresh: true, sessionIds: new Set(['s1']) } } })
+    await reconcilePass(deps, d)
+    expect(r.touched).toEqual([['run-1']])
+  })
+
+  test('without a supervisor id the union of the user fresh inventories decides', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, d, deps } = mkRecon({ runs: [liveRun({ supervisor_id: null })], userInv: { fresh: true, sessionIds: new Set(['x']) } })
+    await reconcilePass(deps, d)
+    expect(w.ends.map((e) => e.input.endReason)).toEqual(['session_absent'])
+  })
+
+  test('no session id, not in flight, older than the lease: claim_orphaned without an attempt', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, d, deps } = mkRecon({ runs: [liveRun({ session_id: null, supervisor_id: null })] })
+    await reconcilePass(deps, d)
+    expect(w.ends.map((e) => e.input)).toMatchObject([{ endReason: 'claim_orphaned', consumeAttempt: false }])
+    expect(w.attempts).toBe(0)
+  })
+
+  test('runs of this process in-flight launches are skipped', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, d, deps } = mkRecon({ runs: [liveRun({ session_id: null, supervisor_id: null })] })
+    d.inFlight.add('w1')
+    await reconcilePass(deps, d)
+    expect(w.ends).toEqual([])
+  })
+
+  test('reads at most 100 runs per pass', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { r, d, deps } = mkRecon()
+    await reconcilePass(deps, d)
+    expect(r.readLimits).toEqual([100])
+  })
+
+  test('an overlapping pass is skipped', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { r, d, deps } = mkRecon()
+    let release!: () => void
+    const gate = new Promise<void>((res) => (release = res))
+    deps.store.liveRunsOldestHeartbeat = async (limit: number) => {
+      r.readLimits.push(limit)
+      await gate
+      return []
+    }
+    const first = reconcilePass(deps, d)
+    await reconcilePass(deps, d) // returns immediately: the first pass is still running
+    release()
+    await first
+    expect(r.readLimits).toEqual([100])
+    await reconcilePass(deps, d) // and the guard is released afterwards
+    expect(r.readLimits).toEqual([100, 100])
+  })
+
+  test('supervisor socket close seen by this process reclaims its live runs (supervisor_closed, attempt)', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, r, d } = mkRecon({ online: false })
+    r.supervisorRuns = [liveRun()]
+    await d.onSupervisorClosed('sup-1')
+    expect(w.ends.map((e) => e.input)).toMatchObject([{ endReason: 'supervisor_closed', consumeAttempt: true }])
+    expect(w.attempts).toBe(1)
+  })
+
+  test('a close that a reconnect already replaced reclaims nothing', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, r, d } = mkRecon({ online: true })
+    r.supervisorRuns = [liveRun()]
+    await d.onSupervisorClosed('sup-1')
+    expect(w.ends).toEqual([])
+  })
+})

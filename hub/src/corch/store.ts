@@ -117,6 +117,12 @@ export interface ProjectPatch {
   acceptExternal?: boolean
 }
 
+/** A live run with the item facts the reconciler needs (no untrusted text). */
+export interface LiveRun extends CorchRun {
+  repo_ident: string
+  item_attempts: number
+}
+
 /** Every store method, so tests can implement fakes. */
 export interface CorchStore {
   createProject(i: CreateProjectInput): Promise<{ project: CorchProject; created: boolean }>
@@ -145,6 +151,14 @@ export interface CorchStore {
   earliestFutureNotBefore(): Promise<Date | null>
   /** Users that currently have a queued item whose not_before has passed (or is unset). */
   usersWithDueItems(): Promise<string[]>
+  /** Live runs, oldest heartbeat first, at most `limit` (the reconciler's per-pass read). */
+  liveRunsOldestHeartbeat(limit: number): Promise<LiveRun[]>
+  /** Live runs hosted by one supervisor (socket-close reclaim). */
+  liveRunsForSupervisor(supervisorId: string): Promise<LiveRun[]>
+  /** Positive liveness: heartbeat now, and a stalled run is running again. */
+  touchHeartbeat(runIds: string[]): Promise<void>
+  /** Mark a live run stalled; true only when this call changed it (so the owner is told once). */
+  markStalled(runId: string): Promise<boolean>
 }
 
 export const corchStore: CorchStore = {
@@ -383,5 +397,40 @@ export const corchStore: CorchStore = {
       FROM corch_work_items i JOIN corch_projects p ON p.id = i.project_id
       WHERE i.status = 'queued' AND p.enabled = true AND (i.not_before IS NULL OR i.not_before <= now())`
     return r.map((x) => x.user_id)
+  },
+
+  async liveRunsOldestHeartbeat(limit) {
+    return sql<LiveRun[]>`
+      SELECT r.*, p.repo_ident, i.attempts AS item_attempts
+      FROM corch_runs r
+      JOIN corch_projects p ON p.id = r.project_id
+      JOIN corch_work_items i ON i.id = r.work_item_id
+      WHERE r.ended_at IS NULL
+      ORDER BY r.heartbeat_at ASC
+      LIMIT ${limit}`
+  },
+
+  async liveRunsForSupervisor(supervisorId) {
+    return sql<LiveRun[]>`
+      SELECT r.*, p.repo_ident, i.attempts AS item_attempts
+      FROM corch_runs r
+      JOIN corch_projects p ON p.id = r.project_id
+      JOIN corch_work_items i ON i.id = r.work_item_id
+      WHERE r.ended_at IS NULL AND r.supervisor_id = ${supervisorId}`
+  },
+
+  async touchHeartbeat(runIds) {
+    if (runIds.length === 0) return
+    await sql`
+      UPDATE corch_runs
+      SET heartbeat_at = now(), status = CASE WHEN status = 'stalled' THEN 'running' ELSE status END
+      WHERE id = ANY(${runIds}::uuid[]) AND ended_at IS NULL`
+  },
+
+  async markStalled(runId) {
+    const r = await sql`
+      UPDATE corch_runs SET status = 'stalled'
+      WHERE id = ${runId} AND ended_at IS NULL AND status <> 'stalled' RETURNING id`
+    return r.length > 0
   },
 }

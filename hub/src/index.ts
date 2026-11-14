@@ -72,6 +72,7 @@ import { healUnifiedEnabled } from './heal/config.ts'
 import { assertTokenCapConfig } from './dispatch/gates.ts'
 import { assertCorchConfig } from './corch/flag.ts'
 import { corchRoutes } from './corch/routes.ts'
+import { startCorch } from './corch/reconciler.ts'
 import { assertAutomationControlsEnv, assertAutomationControlsTables } from './dispatch/automation-controls.ts'
 import { registerTokenCapAlarm } from './observability/token-cap-alarm.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
@@ -764,6 +765,9 @@ runMigrations()
     // session's queue slot was held forever and every later annotation for that
     // repo came back `session_busy`.
     startHookReaper()
+    // CORCH-01 — central orchestrator: reconciler interval + not_before timer. True no-op unless
+    // REMO_CORCH_ENABLED (default OFF); never started alongside the old orchestrator (assertCorchConfig).
+    void startCorch().catch((err) => console.error(`[corch] boot start failed: ${err?.message ?? err}`))
     // Milestone ASK — periodic sweep that finalizes `session_asks` stuck
     // queued/dispatched past REMO_ASK_MAX_MS (default 15min) as `timeout`, so an
     // external caller never polls a dead ask forever. Conditional finalize, so a

@@ -19,7 +19,7 @@ import { buildCorchKey, buildCorchRunToken, CORCH_ACTOR } from './keys.ts'
 import { corchProjectBudgetGate, corchConcurrencyGate, corchQuotaGate } from './gates.ts'
 import { DEFAULT_QUOTA_PROVIDER, type QuotaProvider } from './quota-provider.ts'
 import { buildCorchPrompt } from './prompt.ts'
-import type { CorchStore, CorchWorkItem, CorchProject, EndRequeueInput, EndResult, NotBefore } from './store.ts'
+import type { CorchStore, CorchWorkItem, CorchProject, EndRequeueInput, EndResult, LiveRun, NotBefore } from './store.ts'
 
 // ── Seams with fail-closed defaults (LD-11) ──────────────────────────────────
 
@@ -53,6 +53,23 @@ export interface PipelineSeams {
   send: PipelineDeps['send']
   graceKey?: PipelineDeps['graceKey']
   finalizeTimeoutMs?: number
+  /** Disarm the pipeline hook and free the dispatch slot of a run closed elsewhere (reclaim). */
+  releaseByToken(token: string, reason: string): Promise<void>
+}
+
+/** What this hub process positively knows about one supervisor's (or one user's) live sessions. */
+export interface InventorySnapshot {
+  /** A recent session_inventory frame exists. false = unknown, which is never "nothing is alive". */
+  fresh: boolean
+  sessionIds: Set<string>
+}
+
+/** Liveness knowledge the reconciler reclaims on (LD-13). */
+export interface CorchInventory {
+  forSupervisor(supervisorId: string): InventorySnapshot
+  /** Union of the fresh inventories of the user's online supervisors (fresh = at least one is fresh). */
+  forUser(userId: string): InventorySnapshot
+  isOnline(supervisorId: string): boolean
 }
 
 /** Owner notification. Carries ids, repo_ident, attempts and end_reason only (LD-14). */
@@ -83,6 +100,7 @@ export interface CorchDeps {
   dispatch: (req: DispatchRequest, deps: PipelineDeps) => Promise<DispatchOutcome>
   prLookup: PrLookup
   notify: (n: CorchNotification) => Promise<void>
+  inventory: CorchInventory
   timers: CorchTimers
 }
 
@@ -215,10 +233,15 @@ export function createCorchDispatcher(deps: CorchDeps) {
   const inFlight = new Set<string>()
   let timer: unknown = null
 
-  async function notifyBlocked(c: RunCtx, attempts: number, endReason: string): Promise<void> {
+  async function notifyOwner(
+    kind: CorchNotification['kind'],
+    c: { userId: string; runId: string; itemId: string; repoIdent: string; sessionId: string | null },
+    attempts: number,
+    endReason: string,
+  ): Promise<void> {
     try {
       await deps.notify({
-        kind: 'blocked',
+        kind,
         userId: c.userId,
         workItemId: c.itemId,
         repoIdent: c.repoIdent,
@@ -230,6 +253,9 @@ export function createCorchDispatcher(deps: CorchDeps) {
       log(`notify failed run=${c.runId}: ${errMsg(err)}`)
     }
   }
+
+  const notifyBlocked = (c: Parameters<typeof notifyOwner>[1], attempts: number, endReason: string) =>
+    notifyOwner('blocked', c, attempts, endReason)
 
   /** LD-10: a throw is logged with the run id and left. */
   async function releaseReservation(c: RunCtx): Promise<void> {
@@ -404,6 +430,52 @@ export function createCorchDispatcher(deps: CorchDeps) {
     }
   }
 
+  const liveRunCtx = (run: LiveRun) => ({
+    userId: run.user_id,
+    runId: run.id,
+    itemId: run.work_item_id,
+    repoIdent: run.repo_ident,
+    sessionId: run.session_id,
+  })
+
+  /**
+   * Reclaim a live run on positive knowledge only (LD-13). The transition is the idempotent LD-9 one; the
+   * reservation is NOT released (the turn was sent); the pipeline hook is disarmed after the end so its
+   * own markFailed cannot end the run a second way.
+   */
+  async function reclaimRun(run: LiveRun, endReason: string, consumeAttempt: boolean): Promise<EndResult> {
+    const r = await deps.store.endRunAndRequeue(run.id, {
+      endReason,
+      consumeAttempt,
+      waitReason: consumeAttempt ? null : endReason,
+      notBefore: null,
+    })
+    if (!r.changed) return r
+    try {
+      await deps.pipeline.releaseByToken(buildCorchRunToken(run.id), endReason)
+    } catch (err) {
+      log(`pipeline release failed run=${run.id}: ${errMsg(err)}`)
+    }
+    if (r.itemStatus === 'blocked') await notifyBlocked(liveRunCtx(run), r.attempts, endReason)
+    await evaluateUser(run.user_id) // a run ended: the free slot may start another item
+    return r
+  }
+
+  /** Stalled once: the owner is told only when this call changed the row. */
+  async function stallRun(run: LiveRun): Promise<void> {
+    if (!(await deps.store.markStalled(run.id))) return
+    await notifyOwner('stalled', liveRunCtx(run), run.item_attempts, 'no_fresh_inventory')
+  }
+
+  /** The supervisor socket closed (seen by THIS process, not replaced by a reconnect): its runs are gone. */
+  async function onSupervisorClosed(supervisorId: string): Promise<void> {
+    if (!corchEnabled()) return
+    if (deps.inventory.isOnline(supervisorId)) return // a reconnect replaced the closed socket
+    for (const run of await deps.store.liveRunsForSupervisor(supervisorId)) {
+      await reclaimRun(run, 'supervisor_closed', true)
+    }
+  }
+
   async function evaluateUser(userId: string): Promise<EvaluateResult> {
     if (!corchEnabled()) return { kind: 'disabled' }
     const excluded: string[] = []
@@ -452,8 +524,10 @@ export function createCorchDispatcher(deps: CorchDeps) {
     }, ms)
   }
 
-  return { evaluateUser, evaluateAll, armNotBeforeTimer, inFlight }
+  return { deps, evaluateUser, evaluateAll, armNotBeforeTimer, inFlight, reclaimRun, stallRun, onSupervisorClosed }
 }
+
+export type CorchDispatcher = ReturnType<typeof createCorchDispatcher>
 
 // ── Real dependencies + singleton (LD-2: dynamic imports only) ───────────────
 
@@ -464,6 +538,18 @@ export async function realCorchDeps(): Promise<CorchDeps> {
   const { dispatch } = await import('../dispatch/pipeline.ts')
   const { getChannel } = await import('../ws/registry.ts')
   const { sendUserMessage } = await import('../heal/sinks/shared.ts')
+  const { releaseClosedRunByToken } = await import('../dispatch/pipeline.ts')
+  const registry = await import('../ws/supervisor-registry.ts')
+  const { DEAD_SESSION_INVENTORY_MAX_AGE_MS } = await import('../ws/dead-session-reaper.ts')
+  // Freshness is the dead-session reaper rule: an inventory older than its max age is unknown.
+  const snapshot = (supervisorId: string): InventorySnapshot => {
+    const e = registry.getSupervisor(supervisorId)
+    const at = e?.sessionInventoryAt ? Date.parse(e.sessionInventoryAt) : NaN
+    if (!e || !Number.isFinite(at) || Date.now() - at > DEAD_SESSION_INVENTORY_MAX_AGE_MS) {
+      return { fresh: false, sessionIds: new Set() }
+    }
+    return { fresh: true, sessionIds: new Set(e.sessionInventory.map((s) => s.session_id)) }
+  }
   return {
     store: corchStore,
     workspace: DEFAULT_WORKSPACE,
@@ -474,6 +560,9 @@ export async function realCorchDeps(): Promise<CorchDeps> {
     pipeline: {
       isOnline: (req) => getChannel(req.sessionId) != null,
       send: (req) => sendUserMessage(req, { storedContent: req.prompt }),
+      releaseByToken: async (token, reason) => {
+        await releaseClosedRunByToken(token, reason)
+      },
     },
     dispatch,
     prLookup: DEFAULT_PR_LOOKUP,
@@ -488,6 +577,14 @@ export async function realCorchDeps(): Promise<CorchDeps> {
         channels: ['telegram', 'inapp', 'email', 'push'],
       })
     },
+    inventory: {
+      forSupervisor: snapshot,
+      forUser: (userId) => {
+        const snaps = registry.listOnlineSupervisorIdsForUser(userId).map(snapshot).filter((x) => x.fresh)
+        return { fresh: snaps.length > 0, sessionIds: new Set(snaps.flatMap((x) => [...x.sessionIds])) }
+      },
+      isOnline: (supervisorId) => registry.isSupervisorOnline(supervisorId),
+    },
     timers: REAL_TIMERS,
   }
 }
@@ -501,11 +598,16 @@ const REAL_TIMERS: CorchTimers = {
   clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
 }
 
-let singleton: Promise<ReturnType<typeof createCorchDispatcher>> | null = null
+let singleton: Promise<CorchDispatcher> | null = null
 
-export function getCorch(): Promise<ReturnType<typeof createCorchDispatcher>> {
+export function getCorch(): Promise<CorchDispatcher> {
   singleton ??= realCorchDeps().then(createCorchDispatcher)
   return singleton
+}
+
+/** Whether the real singleton was ever built (a flag-OFF process must never build it). */
+export function corchSingletonConstructed(): boolean {
+  return singleton !== null
 }
 
 // ── Event triggers: each returns immediately, with no DB access, when the flag is OFF (LD-12) ──
@@ -520,6 +622,12 @@ export async function evaluateUserNow(userId: string): Promise<void> {
 export async function onSupervisorHello(userId: string): Promise<void> {
   if (!corchEnabled()) return
   await (await getCorch()).evaluateUser(userId)
+}
+
+/** A supervisor socket closed (seen by this process): reclaim its live runs, then re-evaluate. */
+export async function onSupervisorClosed(supervisorId: string): Promise<void> {
+  if (!corchEnabled()) return
+  await (await getCorch()).onSupervisorClosed(supervisorId)
 }
 
 /** A kill switch scope was released: the deferred work in that scope can proceed. */
