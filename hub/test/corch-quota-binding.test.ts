@@ -13,7 +13,7 @@ afterEach(() => {
   else process.env.REMO_CORCH_ENABLED = savedFlag
 })
 
-function world(opts: { accountSlot: string | null; supervisorFor?: (u: string, a: string) => Promise<string | null>; supervisorAccountSlot?: (u: string, s: string) => Promise<string | null> }) {
+function world(opts: { accountSlot: string | null; supervisorFor?: (u: string, a: string) => Promise<string | null>; supervisorAccountSlot?: (u: string, s: string) => Promise<string | null>; recordedSupervisor?: string | null }) {
   const ends: any[] = []
   const launches: any[] = []
   const dispatched: any[] = []
@@ -34,7 +34,7 @@ function world(opts: { accountSlot: string | null; supervisorFor?: (u: string, a
     endRunMarkPrOpen: async () => ({ changed: true }),
     earliestFutureNotBefore: async () => null,
     usersWithDueItems: async () => [],
-    runContext: async () => ({ run: { id: 'run-1', user_id: 'u1', account_slot: opts.accountSlot, ended_at: null } }),
+    runContext: async () => ({ run: { id: 'run-1', user_id: 'u1', account_slot: opts.accountSlot, supervisor_id: opts.recordedSupervisor ?? null, ended_at: null } }),
   }
   const launch: any = {
     tzForUser: async () => 'UTC', checkGates: async () => null, reserve: async () => ({ ok: true }), release: async () => {},
@@ -124,6 +124,17 @@ describe('CORCH-02 QC F5: account bound to the launch supervisor', () => {
       expect(w.launches.length).toBe(0)
       expect(w.ends[0]).toMatchObject({ endReason: 'quota:supervisor_unbound', consumeAttempt: false })
     }
+  })
+
+  test('QC5: the worktree host recorded before ensure pins the launch: a rebinding to another host refuses, the recorded one launches', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const moved = world({ accountSlot: 'acct_b', recordedSupervisor: 'sup-A', supervisorFor: lookup })
+    await createCorchDispatcher(moved.deps).evaluateUser('u1')
+    expect(moved.launches.length).toBe(0)
+    expect(moved.ends[0]).toMatchObject({ endReason: 'quota:supervisor_unbound', consumeAttempt: false })
+    const same = world({ accountSlot: 'acct_b', recordedSupervisor: 'sup-B', supervisorFor: lookup })
+    await createCorchDispatcher(same.deps).evaluateUser('u1')
+    expect(same.launches[0]).toMatchObject({ targetSupervisorId: 'sup-B' })
   })
 
   test('QC2 G3: the target still advertises the run account => launches targeted (the matching case)', async () => {

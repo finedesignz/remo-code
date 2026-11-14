@@ -10,7 +10,7 @@ const ROOT = '/data/repos'
 const item: any = { id: 'item-1', branch: 'corch/item-1', title: 'secret title' }
 const project: any = { id: 'proj-1', repo_ident: 'github://acme/app' }
 
-function world(o: { claim?: MemlogClaimResult; halted?: string | null; ensure?: CommandResult; prUrl?: string | null | 'fail'; quota?: any; run?: any } = {}) {
+function world(o: { claim?: MemlogClaimResult; halted?: string | null; ensure?: CommandResult; prUrl?: string | null | 'fail'; quota?: any; run?: any; hosts?: string[] } = {}) {
   const log: string[] = []
   const frames: Array<{ command: CorchCommand; args: string[]; supervisorId: string }> = []
   const tickets: string[] = []
@@ -24,6 +24,8 @@ function world(o: { claim?: MemlogClaimResult; halted?: string | null; ensure?: 
     memlog,
     store: {
       latestRunForItem: async () => o.run ?? { supervisor_id: 'sup-1', worktree_path: `${ROOT}/corch/app-item-1`, repo_ident: 'github://acme/app' } as any,
+      workspaceHostsForItem: async () => o.hosts ?? (((o.run ?? { supervisor_id: 'sup-1' }) as any).supervisor_id ? [((o.run ?? { supervisor_id: 'sup-1' }) as any).supervisor_id] : []),
+      recordRunSupervisor: async (runId: string, sup: string) => (log.push(`record:${runId}:${sup}`), true),
       runContext: async () => ({ run: o.run ?? { supervisor_id: 'sup-1', worktree_path: `${ROOT}/corch/app-item-1` } } as any),
     },
     runCommand: async (supervisorId, _u, command, args) => {
@@ -109,13 +111,24 @@ describe('R3.8 memlog claim', () => {
     expect(b.log.at(-1)).toBe('release:corch:item-1:DONE:corch: item blocked')
   })
 
-  test('QC3: removal finds the host through the bound account when the run never recorded a supervisor (launch refused after ensure)', async () => {
-    const w = world({ run: { supervisor_id: null, worktree_path: null, account_slot: 'acct-1', repo_ident: 'github://acme/app' } })
+  test('QC4: the host is recorded BEFORE worktree_ensure; release never guesses a host for a run that recorded none', async () => {
+    const r = world()
+    await r.ws.resolve({ userId: 'u1', item: { id: 'item-1', branch: 'corch/item-1' } as any, project: { id: 'p1', repo_ident: 'github://acme/app' } as any, runId: 'run-1' })
+    expect(r.log.indexOf('record:run-1:sup-1')).toBeGreaterThan(-1)
+    expect(r.log.indexOf('record:run-1:sup-1')).toBeLessThan(r.log.indexOf('frame:corch.worktree_ensure'))
+    // account rebound to another supervisor after the worktree was made: remove targets only the recorded host
+    const w = world({ quota: { snapshotFor: async () => ({ ok: true, account_slot: 'acct-1', supervisor_id: 'sup-1' }), supervisorFor: async () => 'sup-B' } as any, run: { supervisor_id: 'sup-A', worktree_path: null, account_slot: 'acct-1', repo_ident: 'github://acme/app' } })
     await w.ws.release({ userId: 'u1', itemId: 'item-1', status: 'cancelled' })
-    expect(w.frames).toEqual([{ command: 'corch.worktree_remove', args: ['github://acme/app', 'item-1'], supervisorId: 'sup-1' }])
-    const none = world({ run: { supervisor_id: null, worktree_path: null, account_slot: null, repo_ident: 'github://acme/app' } })
+    expect(w.frames).toEqual([{ command: 'corch.worktree_remove', args: ['github://acme/app', 'item-1'], supervisorId: 'sup-A' }])
+    // no recorded host: no frame at all (left for reconcile), claim still released
+    const none = world({ run: { supervisor_id: null, worktree_path: null, account_slot: 'acct-1', repo_ident: 'github://acme/app' } })
     await none.ws.release({ userId: 'u1', itemId: 'item-1', status: 'cancelled' })
     expect(none.frames.length).toBe(0)
+    expect(none.log.some((l) => l.startsWith('release:'))).toBe(true)
+    // QC5: an older run's host and a newer run's host are both reached
+    const two = world({ hosts: ['sup-A', 'sup-B'], run: { supervisor_id: 'sup-B', worktree_path: null, repo_ident: 'github://acme/app' } })
+    await two.ws.release({ userId: 'u1', itemId: 'item-1', status: 'done' })
+    expect(two.frames.map((f) => f.supervisorId).sort()).toEqual(['sup-A', 'sup-B'])
   })
 
   test('heartbeat reaches memlog for the item session; never throws', async () => {

@@ -174,10 +174,12 @@ describe('QC2 hardening', () => {
       else process.env.GH_REPO = prev
       delete process.env.GH_HOST
     }
-    expect(cmd.join(' ')).toContain('--repo github.com/acme/widget')
+    expect(cmd.join(' ')).toContain('--hostname github.com')
+    expect(cmd.join(' ')).toContain('repos/acme/widget/pulls')
     expect(env!.GH_REPO).toBeUndefined()
     expect(env!.GH_HOST).toBeUndefined()
-    expect(cmd).toContain('100') // fork PRs sharing the branch name cannot hide the same-repo PR
+    // the head filter is server-side: newer fork PRs sharing the branch name cannot push the same-repo PR past a page cut
+    expect(cmd).toContain('head=acme:corch/item-1')
     expect((await runCorchPrLookup([join(root, 'corch', 'widget-item-1'), 'corch/item-1', 'path:///x'])).error).toBe('invalid_args')
   })
 })
@@ -210,20 +212,19 @@ describe('corch.pr_lookup (fake gh)', () => {
 
   test('open same-repo PR => pr_url', async () => {
     const seen: { cmd?: string[] } = {}
-    __setCorchWorktreeForTest({ exec: fakeGh(0, JSON.stringify([{ url: 'https://github.com/acme/widget/pull/7', headRefName: 'corch/item-1', isCrossRepository: false }]), seen) })
+    __setCorchWorktreeForTest({ exec: fakeGh(0, JSON.stringify([{ html_url: 'https://github.com/acme/widget/pull/7', head: { ref: 'corch/item-1', repo: { full_name: 'acme/widget' } } }]), seen) })
     const r = await runCorchPrLookup([wt(), 'corch/item-1', 'github://acme/widget'])
     expect(r.exit_code).toBe(0)
     expect(JSON.parse(r.snippet!)).toEqual({ pr_url: 'https://github.com/acme/widget/pull/7' })
-    expect(seen.cmd!.slice(0, 3)).toEqual(['gh', 'pr', 'list'])
-    expect(seen.cmd).toContain('--head')
-    expect(seen.cmd!.join(' ')).toContain('--repo github.com/acme/widget')
-    expect(seen.cmd).toContain('open')
+    expect(seen.cmd!.slice(0, 2)).toEqual(['gh', 'api'])
+    expect(seen.cmd).toContain('head=acme:corch/item-1')
+    expect(seen.cmd).toContain('state=open')
   })
 
   test('no PR, or only a cross-repo (fork) PR => pr_url null', async () => {
     __setCorchWorktreeForTest({ exec: fakeGh(0, '[]') })
     expect(JSON.parse((await runCorchPrLookup([wt(), 'corch/item-1', 'github://acme/widget'])).snippet!)).toEqual({ pr_url: null })
-    __setCorchWorktreeForTest({ exec: fakeGh(0, JSON.stringify([{ url: 'https://github.com/evil/widget/pull/1', headRefName: 'corch/item-1', isCrossRepository: true }])) })
+    __setCorchWorktreeForTest({ exec: fakeGh(0, JSON.stringify([{ html_url: 'https://github.com/evil/widget/pull/1', head: { ref: 'corch/item-1', repo: { full_name: 'evil/widget' } } }])) })
     expect(JSON.parse((await runCorchPrLookup([wt(), 'corch/item-1', 'github://acme/widget'])).snippet!)).toEqual({ pr_url: null })
   })
 

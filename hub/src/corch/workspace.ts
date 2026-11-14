@@ -33,6 +33,9 @@ export interface WorkspaceDeps {
   store: {
     latestRunForItem(userId: string, itemId: string): Promise<(CorchRun & { repo_ident: string }) | null>
     runContext(runId: string): Promise<{ run: CorchRun } | null>
+    /** Persist the host a worktree is about to be created on, BEFORE the command, so release can only ever target that host. */
+    workspaceHostsForItem(userId: string, itemId: string): Promise<string[]>
+    recordRunSupervisor(runId: string, supervisorId: string): Promise<boolean>
   }
   /** The allowlisted hub->supervisor RPC (hub/src/ext/supervisor-read.ts). Never throws. */
   runCommand(supervisorId: string, userId: string, command: CorchCommand, args: string[]): Promise<CommandResult>
@@ -148,7 +151,8 @@ export function createWorkspace(deps: WorkspaceDeps): CorchWorkspace {
       // From here a claim is held: ANY throw or rejection unwinds it (an RPC timeout excepted: the command may still be
       // mutating the worktree, so the claim is NOT released and simply lapses/re-claims on the next attempt).
       try {
-        // 3. worktree on the slot supervisor.
+        // 3. record the host FIRST (release targets only this host), then the worktree on the slot supervisor.
+        if (!(await deps.store.recordRunSupervisor(runId, supervisorId))) throw new Error('run_supervisor_not_recorded')
         const r = await send(userId, supervisorId, 'corch.worktree_ensure', [project.repo_ident, item.id])
         if ('refused' in r) {
           await releaseClaim(ident.name, item.id, 'corch: halted before worktree')
@@ -182,17 +186,24 @@ export function createWorkspace(deps: WorkspaceDeps): CorchWorkspace {
       }
       if (!run) return
       const ident = parseRepoIdent(run.repo_ident)
-      // The supervisor id is only persisted after a successful launch, so a run whose launch was refused after the worktree
-      // was created still resolves its host through the account it was bound to. Removal is idempotent on the supervisor
-      // (`removed: false` when nothing exists), so no worktree_path is required to attempt it.
-      const supId =
-        run.supervisor_id ?? (run.account_slot && deps.quota.supervisorFor ? await deps.quota.supervisorFor(a.userId, run.account_slot).catch(() => null) : null)
-      if ((a.status === 'done' || a.status === 'cancelled') && supId) {
-        try {
-          const r = await send(a.userId, supId, 'corch.worktree_remove', [run.repo_ident, a.itemId])
-          if ('refused' in r || r.exit_code !== 0) log(`worktree remove not done item=${a.itemId}: ${'refused' in r ? r.refused : (r.error ?? 'error')}`)
-        } catch (err) {
-          log(`worktree remove threw item=${a.itemId}: ${(err as Error)?.message ?? err}`)
+      // Only hosts RECORDED by a run of this item (persisted before worktree_ensure) are commanded: the account's current
+      // supervisor can have changed since, and a different host would leave the real worktree behind. A host with no
+      // record is never guessed; with none recorded nothing was created and the reconciler owns the rest.
+      let hosts: string[] = []
+      try {
+        hosts = await deps.store.workspaceHostsForItem(a.userId, a.itemId)
+      } catch (err) {
+        log(`release host lookup failed item=${a.itemId}: ${(err as Error)?.message ?? err}`)
+      }
+      if ((a.status === 'done' || a.status === 'cancelled') && hosts.length === 0) log(`worktree remove skipped item=${a.itemId}: no supervisor recorded`)
+      if (a.status === 'done' || a.status === 'cancelled') {
+        for (const supId of hosts) {
+          try {
+            const r = await send(a.userId, supId, 'corch.worktree_remove', [run.repo_ident, a.itemId])
+            if ('refused' in r || r.exit_code !== 0) log(`worktree remove not done item=${a.itemId}: ${'refused' in r ? r.refused : (r.error ?? 'error')}`)
+          } catch (err) {
+            log(`worktree remove threw item=${a.itemId}: ${(err as Error)?.message ?? err}`)
+          }
         }
       }
       if (ident) await releaseClaim(ident.name, a.itemId, `corch: item ${a.status}`)
