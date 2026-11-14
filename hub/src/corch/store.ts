@@ -166,10 +166,21 @@ export interface CorchStore {
   /** CORCH-04: every ENABLED project of every user (the gsd-console ingest joins them to console slugs). */
   listEnabledProjects(): Promise<CorchProject[]>
   /**
-   * CORCH-04: cancel QUEUED items of one project and source whose source_ref is in `refs` (exact match).
-   * Running, pr_open, done, blocked and already cancelled items are never touched. Returns the count.
+   * CORCH-04: apply the derived gsd-console boards of ONE stream event in a single transaction (all or
+   * nothing). Per entry: cancel QUEUED `gsd_console` items of that project whose source_ref is in `doneRefs`
+   * (exact match; running, pr_open, done, blocked and already cancelled items are never touched), then upsert
+   * the candidate (ON CONFLICT DO NOTHING on (user_id, source, source_ref)). Returns the user ids that got
+   * a NEWLY created item.
    */
-  cancelQueuedBySourceRefs(projectId: string, source: WorkSource, refs: string[]): Promise<number>
+  applyGsdcBoards(entries: GsdcApplyEntry[]): Promise<string[]>
+}
+
+export interface GsdcApplyEntry {
+  projectId: string
+  userId: string
+  priority: number
+  doneRefs: string[]
+  candidate: { sourceRef: string; title: string; body: string } | null
 }
 
 export const corchStore: CorchStore = {
@@ -262,7 +273,8 @@ export const corchStore: CorchStore = {
             AND NOT EXISTS (SELECT 1 FROM corch_work_items x WHERE x.project_id = p.id AND x.status = 'pr_open')
             AND i.id <> ALL(${excludeIds}::uuid[])
           ORDER BY p.priority DESC, i.priority DESC, i.created_at ASC, i.id ASC
-          LIMIT 1`
+          LIMIT 1
+          FOR UPDATE OF i`
         const item = cand[0]
         if (!item) return null
 
@@ -452,14 +464,29 @@ export const corchStore: CorchStore = {
       SELECT * FROM corch_projects WHERE enabled = true ORDER BY user_id, repo_ident`
   },
 
-  async cancelQueuedBySourceRefs(projectId, source, refs) {
-    if (refs.length === 0) return 0
-    const r = await sql`
-      UPDATE corch_work_items
-      SET status = 'cancelled', wait_reason = NULL, not_before = NULL, updated_at = now()
-      WHERE project_id = ${projectId} AND source = ${source} AND status = 'queued'
-        AND source_ref = ANY(${refs}::text[])
-      RETURNING id`
-    return r.length
+  async applyGsdcBoards(entries) {
+    if (entries.length === 0) return []
+    return sql.begin(async (tx) => {
+      const created = new Set<string>()
+      for (const e of entries) {
+        if (e.doneRefs.length > 0) {
+          await tx`
+            UPDATE corch_work_items
+            SET status = 'cancelled', wait_reason = NULL, not_before = NULL, updated_at = now()
+            WHERE project_id = ${e.projectId} AND source = 'gsd_console' AND status = 'queued'
+              AND source_ref = ANY(${e.doneRefs}::text[])`
+        }
+        if (e.candidate) {
+          const id = randomUUID()
+          const r = await tx`
+            INSERT INTO corch_work_items (id, user_id, project_id, source, source_ref, title, body, priority, branch)
+            VALUES (${id}, ${e.userId}, ${e.projectId}, 'gsd_console', ${e.candidate.sourceRef}, ${e.candidate.title}, ${e.candidate.body}, ${e.priority}, ${corchBranch(id)})
+            ON CONFLICT (user_id, source, source_ref) DO NOTHING
+            RETURNING id`
+          if (r.length > 0) created.add(e.userId)
+        }
+      }
+      return [...created]
+    })
   },
 }

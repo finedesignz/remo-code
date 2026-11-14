@@ -69,7 +69,7 @@ function project(id: string, userId: string, ident: string, priority = 5) {
 
 type Make = () => Response | Promise<Response>
 
-function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<string, Make> } = {}) {
+function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<string, Make>; applyThrows?: boolean } = {}) {
   const log = {
     fetches: [] as string[],
     auth: [] as string[],
@@ -77,6 +77,7 @@ function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<st
     cancels: [] as any[],
     outages: [] as GsdcOutage[],
     enqueued: [] as string[],
+    signals: [] as AbortSignal[],
   }
   const timers: Array<{ fn: () => void; ms: number; cleared: boolean }> = []
   const streams = [...(opts.streams ?? [])]
@@ -84,18 +85,23 @@ function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<st
   const ingest = createGsdcIngest({
     store: {
       listEnabledProjects: async () => opts.projects ?? [],
-      enqueueWorkItem: async (i: any) => {
-        log.upserts.push(i)
-        return { item: { id: `item-${log.upserts.length}` } as any, created: true }
-      },
-      cancelQueuedBySourceRefs: async (projectId: string, source: any, refs: string[]) => {
-        log.cancels.push({ projectId, source, refs })
-        return 0
+      applyGsdcBoards: async (entries: any[]) => {
+        if (opts.applyThrows) throw new Error('db down')
+        const users = new Set<string>()
+        for (const e of entries) {
+          log.cancels.push({ projectId: e.projectId, source: 'gsd_console', refs: e.doneRefs })
+          if (e.candidate) {
+            log.upserts.push({ projectId: e.projectId, source: 'gsd_console', sourceRef: e.candidate.sourceRef, title: e.candidate.title, body: e.candidate.body, priority: e.priority })
+            users.add(e.userId)
+          }
+        }
+        return [...users]
       },
     } as any,
     fetch: async (url, init) => {
       log.fetches.push(url.replace(URL_, ''))
       log.auth.push(init.headers.Authorization ?? '')
+      log.signals.push(init.signal)
       if (url.endsWith('/api/board/stream')) {
         const next = streams.shift()
         if (!next) throw new Error('no more streams')
@@ -190,7 +196,7 @@ describe('snapshot / project events', () => {
     expect(h.log.auth.every((a) => a === `Bearer ${TOKEN}`)).toBe(true)
     expect(h.log.upserts.map((u) => [u.projectId, u.source, u.sourceRef, u.title, u.priority])).toEqual([
       ['pa', 'gsd_console', 'acme/app:v1:2', 'Phase 2: Two', 7],
-      ['pb', 'gsd_console', 'Acme/Other:v1:9', 'Phase 9: Nine', 5],
+      ['pb', 'gsd_console', 'acme/other:v1:9', 'Phase 9: Nine', 5],
     ])
     expect(h.log.cancels).toEqual([
       { projectId: 'pa', source: 'gsd_console', refs: ['acme/app:v1:1'] },
@@ -460,5 +466,109 @@ describe('boot wiring', () => {
     } finally {
       globalThis.fetch = realFetch
     }
+  })
+})
+
+describe('review hardening (QC round 1)', () => {
+  test('a CRLF delimiter split across two chunks still frames the event', async () => {
+    const h = harness({
+      projects: [project('pa', 'u1', 'github://acme/app')],
+      streams: [
+        () => {
+          const body = JSON.stringify({ projects: [sum('c1', 'acme/app')] })
+          const chunks = ['event: snapshot\r\ndata: ' + body + '\r\n\r', '\n']
+          return new Response(new ReadableStream({ start(c) { for (const x of chunks) c.enqueue(enc.encode(x)); c.close() } }))
+        },
+      ],
+      details: { c1: () => json(detail({ current: [{ number: '4' }] })) },
+    })
+    h.ingest.start()
+    await flush()
+    expect(h.log.upserts.length).toBe(1)
+    h.ingest.stop()
+  })
+
+  test('keepalive comments re-arm the idle timeout (bytes, not events)', async () => {
+    const h = harness({
+      projects: [],
+      streams: [() => sseResponse([': ka\n\n', ': ka\n\n', frame('snapshot', { projects: [] })], { hold: true })],
+    })
+    h.ingest.start()
+    await flush()
+    const idle = h.timers.filter((t) => t.ms === GSDC_IDLE_TIMEOUT_MS)
+    expect(idle.length).toBeGreaterThanOrEqual(4) // initial + one per chunk
+    h.ingest.stop()
+  })
+
+  test('a failed connection is aborted, not left open', async () => {
+    const h = harness({
+      projects: [project('pa', 'u1', 'github://acme/app')],
+      streams: [() => sseResponse([frame('stream-error', { code: 'x' })], { hold: true })],
+    })
+    h.ingest.start()
+    await flush()
+    expect(h.log.signals[0]!.aborted).toBe(true)
+    h.ingest.stop()
+  })
+
+  test('stop() while a board read is in flight: nothing is written afterwards', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const h = harness({
+      projects: [project('pa', 'u1', 'github://acme/app')],
+      streams: [() => sseResponse([frame('snapshot', { projects: [sum('c1', 'acme/app')] })])],
+      details: { c1: async () => (await gate, json(detail({ current: [{ number: '4' }] }))) },
+    })
+    h.ingest.start()
+    await flush()
+    h.ingest.stop()
+    release()
+    await flush()
+    expect(h.log.upserts).toEqual([])
+    expect(h.log.cancels).toEqual([])
+    expect(h.log.outages).toEqual([])
+  })
+
+  test('a store failure during apply is reported once as apply_failed (a failed transaction wrote nothing)', async () => {
+    const h = harness({
+      projects: [project('pa', 'u1', 'github://acme/app')],
+      streams: [() => sseResponse([frame('snapshot', { projects: [sum('c1', 'acme/app')] })])],
+      details: { c1: () => json(detail({ current: [{ number: '4' }] })) },
+      applyThrows: true,
+    })
+    h.ingest.start()
+    await flush()
+    expect(h.log.upserts).toEqual([])
+    expect(h.log.outages).toEqual([{ userIds: ['u1'], signature: 'apply_failed' }])
+    h.ingest.stop()
+  })
+
+  test('an oversized board response is refused (bad_payload) and writes nothing', async () => {
+    const h = harness({
+      projects: [project('pa', 'u1', 'github://acme/app')],
+      streams: [() => sseResponse([frame('snapshot', { projects: [sum('c1', 'acme/app')] })])],
+      details: { c1: () => new Response('{}', { status: 200, headers: { 'content-length': String(64 * 1024 * 1024) } }) },
+    })
+    h.ingest.start()
+    await flush()
+    expect(h.log.upserts).toEqual([])
+    expect(h.log.outages).toEqual([{ userIds: ['u1'], signature: 'bad_payload' }])
+    h.ingest.stop()
+  })
+
+  test('no board read without an SSE event: after a snapshot, firing every pending non-idle timer reads nothing new', async () => {
+    const h = harness({
+      projects: [project('pa', 'u1', 'github://acme/app')],
+      streams: [() => sseResponse([frame('snapshot', { projects: [sum('c1', 'acme/app')] })], { hold: true })],
+      details: { c1: () => json(detail({ current: [{ number: '4' }] })) },
+    })
+    h.ingest.start()
+    await flush()
+    const reads = () => h.log.fetches.filter((x) => x.startsWith('/api/board/projects/')).length
+    expect(reads()).toBe(1)
+    for (const t of h.reconnects()) t.fn()
+    await flush()
+    expect(reads()).toBe(1)
+    h.ingest.stop()
   })
 })

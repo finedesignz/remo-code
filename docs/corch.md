@@ -283,7 +283,7 @@ order); `backlog` (999.x) is never a candidate. Upsert as source `gsd_console`, 
 <owner/name>:<milestone>:<phase>` where milestone is `position.milestone.version`, else its heading, else `none`;
 `title` = `Phase <n>: <name>`, `body` = the phase goal, `priority` = the project's priority. The unique index
 `(user_id, source, source_ref)` makes the upsert idempotent. A QUEUED `gsd_console` item whose phase the console now
-reports in `done` is cancelled (`cancelQueuedBySourceRefs`); running, `pr_open`, done, blocked and manual/other-source
+reports in `done` is cancelled; the whole event (every enrolled board of it: cancellations then upserts) is written by ONE transaction, `store.applyGsdcBoards`, and `claimNext` now locks its candidate row (`FOR UPDATE OF i`) so a concurrent cancel can never be overwritten back to `running`; running, `pr_open`, done, blocked and manual/other-source
 items are never touched. A board whose snapshot is not `ready` or is stale is skipped (no upsert, no cancel).
 Mirrored text is stored as data and reaches a prompt only through `fenceUntrusted` (`prompt.ts`). No supervisor
 `.planning/` read, no auto-enrollment.
@@ -297,7 +297,8 @@ next fully applied event. Reconnect after an error uses bounded exponential back
 a stream that stayed up at least 30s resets the ladder, and a stream that ends right after its snapshot is backed
 off too, so a console that closes immediately cannot cause a reconnect storm. No fallback source.
 Error signatures: `unreachable`, `http_5xx`, `http_401|402|403|<n>`, `stream_error[:<code>]`, `stream_ended`,
-`bad_payload`, `token_unset`, `url_unset`.
+`bad_payload` (malformed/oversized frame or board, 8 MB board cap), `apply_failed` (the hub database write failed and rolled back), `token_unset`, `url_unset`.
+Every failed or finished connection is aborted; any received bytes (keepalive comments included) re-arm the 3 minute inactivity timeout.
 
 ## Fail-closed defaults (LD-11)
 

@@ -38,7 +38,7 @@ maybe('CORCH-04 e2e - gsd-console ingest on real Postgres', () => {
 
   const ident = () => `github://e2e-${randomUUID().slice(0, 8)}/app`
 
-  test('listEnabledProjects returns enabled projects only; cancelQueuedBySourceRefs is exact, queued-only, source- and project-scoped', async () => {
+  test('listEnabledProjects returns enabled projects only; applyGsdcBoards cancels exactly, queued-only, gsd_console-only, in one transaction', async () => {
     const on = await store.createProject({ userId: h.userId, repoIdent: ident(), priority: 3, dailyTokenBudget: 1000, enabled: true, acceptExternal: false })
     const off = await store.createProject({ userId: h.userId, repoIdent: ident(), priority: 3, dailyTokenBudget: 1000, enabled: false, acceptExternal: false })
     const enabled = (await store.listEnabledProjects()).map((p) => p.id)
@@ -53,14 +53,24 @@ maybe('CORCH-04 e2e - gsd-console ingest on real Postgres', () => {
     const running = await mk(on.project.id, 'gsd_console', 'o/n:v1:3')
     await h.sql`UPDATE corch_work_items SET status = 'running' WHERE id = ${running.item.id}`
 
-    const n = await store.cancelQueuedBySourceRefs(on.project.id, 'gsd_console', ['o/n:v1:1', 'o/n:v1:3'])
-    expect(n).toBe(1)
+    const users = await store.applyGsdcBoards([
+      { projectId: on.project.id, userId: h.userId, priority: 1, doneRefs: ['o/n:v1:1', 'o/n:v1:3'], candidate: null },
+    ])
+    expect(users).toEqual([])
     const st = async (id: string) => (await h.sql`SELECT status FROM corch_work_items WHERE id = ${id}`)[0]!.status as string
     expect(await st(target.item.id)).toBe('cancelled')
     expect(await st(otherRef.item.id)).toBe('queued')
     expect(await st(manual.item.id)).toBe('queued')
     expect(await st(running.item.id)).toBe('running')
-    expect(await store.cancelQueuedBySourceRefs(on.project.id, 'gsd_console', [])).toBe(0)
+    // All or nothing: a failing entry rolls back the earlier entries of the same call.
+    const before = await st(otherRef.item.id)
+    await expect(
+      store.applyGsdcBoards([
+        { projectId: on.project.id, userId: h.userId, priority: 1, doneRefs: ['o/n:v1:2'], candidate: null },
+        { projectId: '00000000-0000-4000-8000-000000000000', userId: h.userId, priority: 1, doneRefs: [], candidate: { sourceRef: 'x', title: 't', body: '' } },
+      ]),
+    ).rejects.toBeDefined()
+    expect(await st(otherRef.item.id)).toBe(before)
   })
 
   test('ingest end to end: snapshot queues the phase once (idempotent), a later done snapshot cancels it, a failure changes nothing', async () => {
