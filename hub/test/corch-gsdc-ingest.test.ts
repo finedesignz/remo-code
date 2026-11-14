@@ -676,3 +676,47 @@ describe('review hardening (QC round 3, idle abort)', () => {
     h.ingest.stop()
   })
 })
+
+describe('review hardening (QC round 4)', () => {
+  test('two over-long milestones sharing a prefix keep distinct source_refs', async () => {
+    const prefix = 'm'.repeat(150)
+    const run = async (tail: string) => {
+      const h = harness({
+        projects: [project('pa', 'u1', 'github://acme/app')],
+        streams: [() => sseResponse([frame('snapshot', { projects: [sum('c1', 'acme/app')] })])],
+        details: { c1: () => json(detail({ current: [{ number: '4' }] }, { position: { milestone: { version: prefix + tail, heading: 'x' } } })) },
+      })
+      h.ingest.start()
+      await flush()
+      h.ingest.stop()
+      return h.log.upserts[0].sourceRef as string
+    }
+    const a = await run('A')
+    const b = await run('B')
+    expect(a).not.toBe(b)
+    expect(a.length).toBeLessThan(200)
+  })
+
+  test('a superseded connection finishing late does not reset the new connection outage bookkeeping', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const h = harness({
+      projects: [project('pa', 'u1', 'github://acme/app')],
+      streams: [() => sseResponse([frame('snapshot', { projects: [sum('c1', 'acme/app')] })]), () => json({}, 503)],
+      details: { c1: async () => (await gate, json(detail({ current: [{ number: '4' }] }))) },
+    })
+    h.ingest.start()
+    await flush()
+    h.ingest.stop()
+    h.ingest.start() // new generation: its stream fails with 503
+    await flush()
+    expect(h.log.outages.length).toBe(1)
+    const failuresBefore = h.ingest.failures
+    release() // the old read completes late
+    await flush()
+    expect(h.ingest.failures).toBe(failuresBefore)
+    expect(h.log.outages.length).toBe(1)
+    expect(h.log.upserts).toEqual([])
+    h.ingest.stop()
+  })
+})

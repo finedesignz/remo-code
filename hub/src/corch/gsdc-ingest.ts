@@ -289,7 +289,10 @@ export function createGsdcIngest(deps: GsdcDeps) {
             if (!s.success) throw new GsdcFailure('bad_payload')
             summaries.push(s.data)
           }
-          await handleSummaries(summaries, cfg.baseUrl, cfg.token, ac.signal, () => !stopped && gen === generation && !ac.signal.aborted)
+          const live = () => !stopped && gen === generation && !ac.signal.aborted
+          await handleSummaries(summaries, cfg.baseUrl, cfg.token, ac.signal, live)
+          // A superseded, stopped or aborted connection must not touch the shared outage / backoff bookkeeping.
+          if (!live()) return
           if (ev.event === 'snapshot') gotSnapshot = true
           // A fully applied event ends any outage.
           outage = false

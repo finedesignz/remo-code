@@ -4,6 +4,7 @@
 // The board JSON is untrusted data: this module only reads structure (column membership, phase number)
 // and copies title/goal text into a work item, where it stays data (the prompt fences it, CORCH-R1.12).
 
+import { createHash } from 'node:crypto'
 import { z } from 'zod'
 
 const Phase = z.object({
@@ -86,7 +87,12 @@ export function comparePhaseNumbers(a: string, b: string): number {
 
 export function milestoneOf(b: BoardDetail): string {
   const m = b.position?.milestone
-  return m ? (m.version ?? m.heading).trim().slice(0, MAX_MILESTONE_CHARS) || 'none' : 'none'
+  const raw = m ? (m.version ?? m.heading).trim() : ''
+  if (!raw) return 'none'
+  if (raw.length <= MAX_MILESTONE_CHARS) return raw
+  // Over-long identity: keep a readable prefix plus a hash of the whole string, so two different milestones
+  // that share a long prefix can never collide on source_ref.
+  return `${raw.slice(0, MAX_MILESTONE_CHARS - 17)}#${createHash('sha256').update(raw).digest('hex').slice(0, 16)}`
 }
 
 export function sourceRefOf(slug: string, milestone: string, phaseNumber: string): string {
