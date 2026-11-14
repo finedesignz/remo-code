@@ -107,7 +107,8 @@ export const quotaStore = {
    * blocked_at = now() (the death instant); blocked_until = min(candidate reset, now + window cap) where the cap is
    * 7d for the 7d window and 5h otherwise, and the candidate is the signal's reset when in the future, else the named
    * window's reset from the reading, else the earliest future reading reset, else the cap. A far-future or past
-   * epoch therefore clamps; the next live reading fetched after blocked_at clears the block (upsertSnapshot).
+   * epoch therefore clamps; F2: the later of the existing and the new blocked_until is kept (a session death never
+   * shortens a weekly block); the next live reading fetched after blocked_at clears the block (upsertSnapshot).
    * Returns the resulting blocked_until (null only when the account has no row).
    */
   async markDeath(a: { userId: string; accountId: string; resetAt: Date | null; window?: '5h' | '7d' | null }): Promise<Date | null> {
@@ -116,7 +117,7 @@ export const quotaStore = {
     const rows = await sql<{ blocked_until: Date | null }[]>`
       UPDATE corch_quota_accounts SET
         blocked_at = now(),
-        blocked_until = LEAST(
+        blocked_until = GREATEST(blocked_until, LEAST(
           now() + (CASE WHEN ${window}::text = '7d' THEN interval '7 days' ELSE interval '5 hours' END),
           COALESCE(
             CASE WHEN ${resetAt}::timestamptz > now() THEN ${resetAt}::timestamptz END,
@@ -124,7 +125,7 @@ export const quotaStore = {
                  WHEN ${window}::text = '7d' THEN CASE WHEN resets_7d > now() THEN resets_7d END
                  ELSE (SELECT min(t) FROM (VALUES (resets_5h), (resets_7d)) AS v(t) WHERE t > now())
             END,
-            'infinity'::timestamptz))
+            'infinity'::timestamptz)))
       WHERE user_id = ${a.userId} AND account_id = ${a.accountId}
       RETURNING blocked_until`
     return rows[0]?.blocked_until ?? null

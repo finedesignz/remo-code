@@ -360,6 +360,23 @@ maybe('CORCH-02 e2e - quota ingest on real Postgres', () => {
     expect(((await (await get(u.read)).json()) as any).accounts[0]).toMatchObject({ eligible: true, reason: null })
   })
 
+  test('F2: markDeath keeps the later of the existing and the new blocked_until, in both orders', async () => {
+    const u = await newUser()
+    await post(snapshot([acct('g1'), acct('g2')]), u.publish)
+    const { quotaStore } = await provider([])
+    const in4h = new Date(Date.now() + 4 * 3600_000)
+    const in1h = new Date(Date.now() + 3600_000)
+    // long then short: stays long
+    await quotaStore.markDeath({ userId: u.userId, accountId: 'g1', resetAt: in4h })
+    const r1 = await quotaStore.markDeath({ userId: u.userId, accountId: 'g1', resetAt: in1h })
+    expect(r1!.getTime()).toBe(in4h.getTime())
+    expect((await blockRow(u.userId, 'g1')).blocked_until.getTime()).toBe(in4h.getTime())
+    // short then long: becomes long
+    await quotaStore.markDeath({ userId: u.userId, accountId: 'g2', resetAt: in1h })
+    const r2 = await quotaStore.markDeath({ userId: u.userId, accountId: 'g2', resetAt: in4h })
+    expect(r2!.getTime()).toBe(in4h.getTime())
+  })
+
   test('an explicit in-cap resetAt wins; a past resetAt falls back; an unknown account has nothing to block', async () => {
     const u = await newUser()
     await post(snapshot([acct('tb')]), u.publish)
