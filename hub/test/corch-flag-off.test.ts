@@ -108,7 +108,7 @@ describe('flag OFF: quota ingest still stores and never constructs the dispatche
     const upserts: string[] = []
     const app = createQuotaRoutes({
       verifyKey: async () => ({ id: 'k1', user_id: 'user-A', scopes: ['quota:publish'] }),
-      store: { upsertSnapshot: async (u, a) => (upserts.push(u), a.length), accountsFor: async () => [] },
+      store: { upsertSnapshot: async (u, a) => (upserts.push(u), a.length), accountsFor: async () => [], liveRunsByAccount: async () => ({}) },
       ceilingPct: () => 55,
       evaluate: defaultQuotaEvaluate,
       now: () => new Date(),

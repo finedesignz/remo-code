@@ -160,7 +160,7 @@ function ingest(evaluate: (u: string) => Promise<void>) {
   const upserts: string[] = []
   const app = createQuotaRoutes({
     verifyKey: async (raw) => (raw === 'remokey_ok' ? KEY : raw === 'remokey_read' ? { ...KEY, scopes: ['quota:read'] } : null),
-    store: { upsertSnapshot: async (u, a) => (upserts.push(u), a.length), accountsFor: async () => [] },
+    store: { upsertSnapshot: async (u, a) => (upserts.push(u), a.length), accountsFor: async () => [], liveRunsByAccount: async () => ({}) },
     ceilingPct: () => 55, evaluate, now: () => new Date(),
   })
   const post = (key: string | null, payload: unknown, raw?: string) =>

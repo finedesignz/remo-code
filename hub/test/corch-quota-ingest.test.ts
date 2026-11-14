@@ -26,7 +26,7 @@ function row(id: string, over: Partial<QuotaAccountRow> = {}): QuotaAccountRow {
   }
 }
 
-function setup(rowsByUser: Record<string, QuotaAccountRow[]> = {}) {
+function setup(rowsByUser: Record<string, QuotaAccountRow[]> = {}, busyByUser: Record<string, Record<string, number>> = {}) {
   const upserts: Array<{ userId: string; accounts: unknown[] }> = []
   const evaluated: string[] = []
   const deps: QuotaRouteDeps = {
@@ -37,6 +37,7 @@ function setup(rowsByUser: Record<string, QuotaAccountRow[]> = {}) {
         return accounts.length
       },
       accountsFor: async (userId) => rowsByUser[userId] ?? [],
+      liveRunsByAccount: async (userId) => busyByUser[userId] ?? {},
     },
     ceilingPct: () => 55,
     evaluate: async (userId) => {
@@ -77,7 +78,7 @@ describe('CORCH-R2.1 SC1: POST /snapshot auth is explicit-scope only', () => {
     const { app } = setup()
     const deps2: QuotaRouteDeps = {
       verifyKey: async () => { throw new Error('db down') },
-      store: { upsertSnapshot: async () => 0, accountsFor: async () => [] },
+      store: { upsertSnapshot: async () => 0, accountsFor: async () => [], liveRunsByAccount: async () => ({}) },
       ceilingPct: () => 55, evaluate: async () => {}, now: () => new Date(),
     }
     const res = await post(createQuotaRoutes(deps2), 'remokey_publish', snap([]))
@@ -220,6 +221,16 @@ describe('CORCH-R2.2: GET /snapshot is per key owner', () => {
     }
   })
 
+  test('F6: eligibility counts live runs per account (same as dispatch): null-5h + a live run => eligible false', async () => {
+    const { app } = setup(
+      { 'user-A': [row('acct_n', { five_h_pct: null }), row('acct_ok')], 'user-B': [row('acct_z', { five_h_pct: null })] },
+      { 'user-A': { acct_n: 1, acct_ok: 1 }, 'user-B': { acct_z: 0 } },
+    )
+    const body = (await (await get(app, 'remokey_read')).json()) as any
+    expect(body.accounts[0]).toMatchObject({ account_id: 'acct_n', eligible: false, reason: 'quota:five_h_unknown_busy' })
+    expect(body.accounts[1]).toMatchObject({ account_id: 'acct_ok', eligible: true }) // known 5h is not capped by busy
+  })
+
   test('no rows => accounts []', async () => {
     const { app } = setup()
     const res = await get(app, 'remokey_read')
@@ -232,7 +243,7 @@ describe('CORCH-R2.3 LD-Q7: an invalid ceiling is a 500 on GET, never a silent d
   test('ceilingPct throwing => 500 quota_ceiling_invalid', async () => {
     const deps: QuotaRouteDeps = {
       verifyKey: async (raw) => KEYS[raw] ?? null,
-      store: { upsertSnapshot: async () => 0, accountsFor: async () => [row('acct_a')] },
+      store: { upsertSnapshot: async () => 0, accountsFor: async () => [row('acct_a')], liveRunsByAccount: async () => ({}) },
       ceilingPct: () => { throw new Error('bad') },
       evaluate: async () => {}, now: () => new Date('2026-11-13T12:00:10Z'),
     }

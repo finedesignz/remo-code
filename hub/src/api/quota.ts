@@ -63,6 +63,8 @@ export interface QuotaRouteDeps {
   store: {
     upsertSnapshot: (userId: string, accounts: QuotaAccountInput[]) => Promise<number>
     accountsFor: (userId: string) => Promise<QuotaAccountRow[]>
+    /** Live CORCH runs per account for the user: the same busy input dispatch evaluates with (F6). */
+    liveRunsByAccount: (userId: string) => Promise<Record<string, number>>
   }
   ceilingPct: () => number
   /** Called exactly once after a successful POST commit. */
@@ -148,7 +150,8 @@ export function createQuotaRoutes(deps: QuotaRouteDeps) {
       return c.json({ error: 'quota_ceiling_invalid' }, 500)
     }
     const rows = await deps.store.accountsFor(key.user_id)
-    const evals = evaluateAccounts(rows, { now: deps.now(), ceilingPct: ceiling })
+    const busyByAccount = await deps.store.liveRunsByAccount(key.user_id)
+    const evals = evaluateAccounts(rows, { now: deps.now(), ceilingPct: ceiling, busyByAccount })
     const iso = (d: Date | null) => (d ? d.toISOString() : null)
     return c.json({
       ceiling_pct: ceiling,
