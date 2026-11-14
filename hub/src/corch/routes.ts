@@ -68,8 +68,11 @@ const ProjectCreate = z.object({
   accept_external: z.boolean().default(false),
 })
 
+/** Postgres INTEGER bounds: a larger value would be a 500 from the column, so it is a 400 here. */
+const Prio32 = z.number().int().min(-2147483648).max(2147483647)
+
 const ProjectPatch = z.object({
-  priority: z.number().int().optional(),
+  priority: Prio32.optional(),
   daily_token_budget: z.number().int().positive().optional(),
   enabled: z.boolean().optional(),
   accept_external: z.boolean().optional(),
@@ -82,7 +85,7 @@ const SettingsPatch = z
   })
   .refine((b) => b.paused !== undefined || b.max_concurrent_runs !== undefined, { message: 'empty patch' })
 
-const ItemPatch = z.object({ priority: z.number().int() })
+const ItemPatch = z.object({ priority: Prio32 })
 
 const WorkItemFields = {
   title: z.string().min(1).max(500),

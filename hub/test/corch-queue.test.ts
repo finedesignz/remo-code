@@ -143,6 +143,7 @@ describe('priority + cancel (R6.3)', () => {
     expect(published).toEqual(['u1'])
     expect((await a.request('/api/corch/work-items/not-a-uuid', send('PATCH', { priority: 1 }))).status).toBe(404)
     expect((await a.request(`/api/corch/work-items/${ITEM}`, send('PATCH', { priority: 1.5 }))).status).toBe(400)
+    expect((await a.request(`/api/corch/work-items/${ITEM}`, send('PATCH', { priority: 2147483648 }))).status).toBe(400)
     expect((await a.request('/api/corch/work-items/20000000-0000-4000-8000-000000000009', send('PATCH', { priority: 1 }))).status).toBe(404)
   })
   test('cancel works on queued, every other state is 409 and publishes nothing', async () => {

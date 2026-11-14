@@ -93,7 +93,8 @@ export function useCorchQueue(token: string, subscribe: Subscribe, connectionId:
       subscribe((msg) => {
         const q = reduceCorchQueue(msg)
         if (q) {
-          setQueue(q)
+          // Same ordering rule as the read: an event built before the current snapshot never replaces it.
+          setQueue((cur) => (cur && cur.generated_at > q.generated_at ? cur : q))
           setError(null)
         }
       }),

@@ -476,6 +476,9 @@ Everything here is additive and works with `REMO_CORCH_ENABLED` OFF (the routes 
   order (`ORDER BY project.priority, item.priority, created_at, id`, R1.6). `POST /api/corch/work-items/:id/cancel` is ONE guarded
   `UPDATE ... WHERE status = 'queued'`: a queued item becomes terminal `cancelled`; any other state returns 409 `not_cancellable` with the status
   and changes nothing (a concurrent claim wins cleanly).
+- **Known display limit.** `quota_accounts.eligible` is the verdict at publish time. Snapshot-TTL expiry (10 min without a CUG POST) is time-based and
+  schedules nothing, so an idle panel keeps the last verdict until the next transition or reconnect read; dispatch itself re-evaluates quota live on every
+  claim, so the view is advisory only.
 - **Telegram `/queue`** is read-only (paused flag, live runs, top 5 queued with wait reasons, blocked count) and is in `BOT_COMMANDS`, `parseCommand`,
   `HELP_TEXT` and the webhook switch together (`corch-queue.test.ts` lockstep test). It is a human surface and is not kill-switch gated. Pause,
   priority and cancel stay web-only.
