@@ -597,6 +597,115 @@ maybe('CORCH-01 e2e - criterion 5: claims, requeue, refusals, reclaim', () => {
     })
   })
 
+  // ── QC round 1: real-store behaviour behind the unit regressions ──
+  describe('QC round 1 fixes on real Postgres', () => {
+    const near = (t: Date, secs: number) => Math.abs(new Date(t).getTime() - (Date.now() + secs * 1000)) < 10_000
+
+    test('C1: a reclaimed run can no longer send: gates refuse, markDispatched throws, a parked replay is dropped', async () => {
+      const userId = await mkUser(1)
+      const projectId = await mkProject(userId, 'github://acme/c1')
+      const { item } = await enq(userId, projectId, 'c1')
+      const { w, d } = mkWorld(userId, { outcome: { kind: 'parked_offline' } })
+      await d.evaluateUser(userId)
+      const run = (await runRows(item.id))[0]!
+      const { req, pdeps } = w.dispatches[0]!
+      const [liveRun] = await storeMod.corchStore.liveRunsForSupervisor('sup-1').then((rs) => rs.filter((r) => r.id === run.id))
+      expect((await d.reclaimRun(liveRun!, 'session_absent', true)).changed).toBe(true)
+      const dispatchesBefore = w.dispatches.length
+      await pdeps.replay(req)
+      expect(w.dispatches.length).toBe(dispatchesBefore)
+      await expect(pdeps.store.markDispatched(req.token)).rejects.toThrow('corch_run_not_live')
+      const gate = pdeps.gates.find((g: any) => g.name === 'corch_concurrency')
+      expect(await gate.check(req)).toEqual({ ok: false, reason: 'corch_run_not_live' })
+    })
+
+    test('C5: the real pipeline order (markSkipped session_busy, then dropped_busy) is ONE attempt with a 60s backoff', async () => {
+      const userId = await mkUser(1)
+      const projectId = await mkProject(userId, 'github://acme/c5')
+      const { item } = await enq(userId, projectId, 'c5')
+      const { d, deps } = mkWorld(userId)
+      deps.dispatch = async (req: any, pdeps: any) => {
+        await pdeps.store.markSkipped(req.token, 'session_busy')
+        return { kind: 'dropped_busy' }
+      }
+      await d.evaluateUser(userId)
+      const it = await itemRow(item.id)
+      expect(it.attempts).toBe(1)
+      expect(it.status).toBe('queued')
+      expect(near(it.not_before, 60)).toBe(true)
+      expect((await runRows(item.id))[0]!.end_reason).toBe('dropped_busy')
+    })
+
+    test('MED 2: a throwing Workspace consumes attempts, the third blocks with exactly one notification', async () => {
+      const userId = await mkUser(1)
+      const projectId = await mkProject(userId, 'github://acme/m2')
+      const { item } = await enq(userId, projectId, 'm2')
+      const { w, d } = mkWorld(userId, { workspace: { resolve: async () => { throw new Error('worktree boom') } } })
+      for (let i = 1; i <= 3; i++) {
+        await h.sql`UPDATE corch_work_items SET not_before = now() - interval '1 second' WHERE id = ${item.id}`
+        await d.evaluateUser(userId)
+        expect((await itemRow(item.id)).attempts).toBe(i)
+      }
+      const it = await itemRow(item.id)
+      expect(it.status).toBe('blocked')
+      expect(it.wait_reason).toBe('workspace_error')
+      expect(w.notes.length).toBe(1)
+      expect(await liveCount(userId)).toBe(0)
+    })
+
+    test('MED 1: a throwing launch dependency ends the run as launch_error with an attempt (no live run)', async () => {
+      const userId = await mkUser(1)
+      const projectId = await mkProject(userId, 'github://acme/m1')
+      const { item } = await enq(userId, projectId, 'm1')
+      const { deps, d } = mkWorld(userId)
+      deps.launch.checkGates = async () => {
+        throw new Error('db down')
+      }
+      expect((await d.evaluateUser(userId)).kind).toBe('done')
+      const it = await itemRow(item.id)
+      expect(it.attempts).toBe(1)
+      expect(it.status).toBe('queued')
+      expect((await runRows(item.id))[0]!.end_reason).toBe('launch_error')
+      expect(await liveCount(userId)).toBe(0)
+    })
+
+    test('C4: liveRunsPage walks live runs in stable id order without overlap', async () => {
+      const a = await mkUser(1)
+      const b = await mkUser(1)
+      for (const [u, repo] of [[a, 'github://acme/pg1'], [b, 'github://acme/pg2']] as const) {
+        const projectId = await mkProject(u, repo)
+        await enq(u, projectId, 'pg')
+        await mkWorld(u).d.evaluateUser(u)
+      }
+      const all = await storeMod.corchStore.liveRunsPage(null, 1000)
+      expect(all.length).toBeGreaterThanOrEqual(2)
+      expect(all.map((r) => r.id)).toEqual([...all.map((r) => r.id)].sort())
+      const walked: string[] = []
+      let cursor: string | null = null
+      for (;;) {
+        const page = await storeMod.corchStore.liveRunsPage(cursor, 1)
+        if (page.length === 0) break
+        walked.push(page[0]!.id)
+        cursor = page[0]!.id
+      }
+      expect(walked).toEqual(all.map((r) => r.id))
+    })
+
+    test('C6: boot evaluates backlog whose not_before already passed, with no other trigger', async () => {
+      const userId = await mkUser(1)
+      const projectId = await mkProject(userId, 'github://acme/c6')
+      const { item } = await enq(userId, projectId, 'c6')
+      await h.sql`UPDATE corch_work_items SET not_before = now() - interval '5 minutes' WHERE id = ${item.id}`
+      // evaluateAll is global: park every other user's work so only this item is in play.
+      await h.sql`UPDATE corch_projects SET enabled = false WHERE user_id = ANY(${users}) AND user_id <> ${userId}`
+      const { w, d } = mkWorld(userId)
+      const stop = await recMod.startCorchWith(d)
+      stop()
+      expect(w.launches.length).toBe(1)
+      expect((await runRows(item.id)).length).toBe(1)
+    })
+  })
+
   // ── end to end: a pushed PR ends the run and parks the item as pr_open ──
   describe('success path', () => {
     test('PrLookup open on finalize: item pr_open with the url, run ended', async () => {
