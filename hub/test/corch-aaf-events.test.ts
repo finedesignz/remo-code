@@ -25,6 +25,7 @@ let notifyState = new Map<string, 'pending' | 'sending' | 'sent'>()
 let storeThrows = false
 let notified: Array<[string, string]> = []
 let evaluated: string[] = []
+let cancelled: string[] = []
 let secret: string | null = SECRET
 
 const deps = () => ({
@@ -35,16 +36,19 @@ const deps = () => ({
       if (seen.has(e.eventId)) return { kind: 'duplicate' }
       seen.add(e.eventId)
       applied.push(e)
-      const r = nextResult ?? { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'done' }
+      const r = nextResult ?? { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'done', endedRunIds: [] }
       if (r.kind === 'transitioned' && nextNotify) notifyState.set(e.eventId, 'pending')
       return r
     },
     async claimAafNotify(eventId: string) {
-      if (notifyState.get(eventId) !== 'pending') return null
+      const st = notifyState.get(eventId)
+      if (st === 'sending') return { kind: 'busy' as const }
+      if (st !== 'pending') return { kind: 'none' as const }
       notifyState.set(eventId, 'sending')
-      return { userId: 'u1', workItemId: 'w1' }
+      return { kind: 'claimed' as const, userId: 'u1', workItemId: 'w1', token: 'tok-' + eventId }
     },
-    async finishAafNotify(eventId: string, delivered: boolean) {
+    async finishAafNotify(eventId: string, token: string, delivered: boolean) {
+      if (token !== 'tok-' + eventId || notifyState.get(eventId) !== 'sending') return
       notifyState.set(eventId, delivered ? 'sent' : 'pending')
     },
   },
@@ -54,6 +58,9 @@ const deps = () => ({
   },
   evaluate: async (u: string) => {
     evaluated.push(u)
+  },
+  cancelRunSends: async (ids: string[]) => {
+    cancelled.push(...ids)
   },
 })
 
@@ -93,6 +100,7 @@ beforeEach(() => {
   storeThrows = false
   notified = []
   evaluated = []
+  cancelled = []
   secret = SECRET
   delete process.env.REMO_CORCH_ENABLED
 })
@@ -206,7 +214,7 @@ describe('POST /api/corch-events/aaf receiver', () => {
   })
 
   test('pr.failed transition sends exactly one notification (identifiers only), also across replays', async () => {
-    nextResult = { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'blocked' }
+    nextResult = { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'blocked', endedRunIds: [] }
     nextNotify = true
     const b = bodyOf({ event: 'pr.failed' })
     expect((await post(b)).status).toBe(200)
@@ -215,7 +223,7 @@ describe('POST /api/corch-events/aaf receiver', () => {
   })
 
   test('a failed notification is not lost: 503 now, the sender retry (same event_id) delivers it exactly once', async () => {
-    nextResult = { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'blocked' }
+    nextResult = { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'blocked', endedRunIds: [] }
     nextNotify = true
     let fail = true
     const app = createAafEventRoutes({
@@ -244,8 +252,27 @@ describe('POST /api/corch-events/aaf receiver', () => {
     expect(applied.length).toBe(1)
   })
 
+  test('a fresh claim held by another delivery is NOT a success: 503 busy until it finishes', async () => {
+    nextResult = { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'blocked', endedRunIds: [] }
+    nextNotify = true
+    const b = bodyOf({ event: 'pr.failed' })
+    expect((await post(b, {})).status).toBe(200) // first delivery sends and marks sent
+    notifyState.set('evt-0000000001', 'sending') // a crashed/in-flight delivery holds the claim
+    const res = await post(b)
+    expect(res.status).toBe(503)
+    expect(await res.json()).toEqual({ error: 'notification_pending' })
+  })
+
+  test('a transition that ended live runs cancels their in-process send guard exactly once', async () => {
+    nextResult = { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'done', endedRunIds: ['run-1', 'run-2'] }
+    expect((await post(bodyOf())).status).toBe(200)
+    expect(cancelled).toEqual(['run-1', 'run-2'])
+    await post(bodyOf()) // replay: nothing more to cancel
+    expect(cancelled).toEqual(['run-1', 'run-2'])
+  })
+
   test('an undelivered (false) notification also answers 503 so the sender retries', async () => {
-    nextResult = { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'blocked' }
+    nextResult = { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'blocked', endedRunIds: [] }
     nextNotify = true
     const app = createAafEventRoutes({ ...deps(), notifyFailed: async () => false } as any)
     const b = bodyOf({ event: 'pr.failed' })

@@ -29,6 +29,7 @@ maybe('CORCH-08 e2e - AAF event receiver, closure transitions and provision gate
 
   let notified: Array<[string, string]> = []
   let evaluated: string[] = []
+  let cancelled: string[] = []
 
   beforeAll(async () => {
     for (const k of ENV) savedEnv[k] = process.env[k]
@@ -82,6 +83,9 @@ maybe('CORCH-08 e2e - AAF event receiver, closure transitions and provision gate
       },
       evaluate: async (u) => {
         evaluated.push(u)
+      },
+      cancelRunSends: async (ids) => {
+        cancelled.push(...ids)
       },
     })
   }
@@ -311,6 +315,7 @@ maybe('CORCH-08 e2e - AAF event receiver, closure transitions and provision gate
         return true
       },
       evaluate: async () => {},
+      cancelRunSends: async () => {},
     })
     const eventId = `evt-${randomUUID()}`
     const body = JSON.stringify({ event_id: eventId, event: 'pr.failed', repo: 'acme/notify-retry', pr_number: 3, head_ref: it.branch })
@@ -339,10 +344,69 @@ maybe('CORCH-08 e2e - AAF event receiver, closure transitions and provision gate
     const r = await send({ event: 'pr.failed', repo: 'acme/notify-stale', headRef: it.branch })
     expect(r.res.status).toBe(200) // delivered through the injected notifier
     expect((await eventRow(r.eventId)).notify_state).toBe('sent')
+    expect(await storeMod.corchStore.claimAafNotify(r.eventId)).toEqual({ kind: 'none' }) // already delivered
     await h.sql`UPDATE corch_events SET notify_state = 'sending', notify_claimed_at = now() WHERE event_id = ${r.eventId}`
-    expect(await storeMod.corchStore.claimAafNotify(r.eventId)).toBeNull()
+    expect(await storeMod.corchStore.claimAafNotify(r.eventId)).toEqual({ kind: 'busy' }) // fresh claim: not done
     await h.sql`UPDATE corch_events SET notify_claimed_at = now() - interval '6 minutes' WHERE event_id = ${r.eventId}`
-    expect(await storeMod.corchStore.claimAafNotify(r.eventId)).toEqual({ userId: u, workItemId: it.id })
+    const reclaimed = await storeMod.corchStore.claimAafNotify(r.eventId)
+    expect(reclaimed.kind).toBe('claimed')
+    expect(reclaimed.kind === 'claimed' && reclaimed.userId).toBe(u)
+    expect(reclaimed.kind === 'claimed' && reclaimed.workItemId).toBe(it.id)
+  })
+
+  test('claim fencing: a superseded delivery cannot overwrite the new claim owner', async () => {
+    const u = await mkUser()
+    const proj = await mkProject(u, 'github://acme/notify-fence')
+    const it = await mkItem(u, proj)
+    const failing = evMod.createAafEventRoutes({
+      secret: () => SECRET, store: storeMod.corchStore, notifyFailed: async () => false, evaluate: async () => {}, cancelRunSends: async () => {},
+    })
+    const eventId = `evt-${randomUUID()}`
+    const body = JSON.stringify({ event_id: eventId, event: 'pr.failed', repo: 'acme/notify-fence', pr_number: 3, head_ref: it.branch })
+    const ts = Math.floor(Date.now() / 1000)
+    expect((await failing.request('/aaf', { method: 'POST', body, headers: { 'x-zeroexposure-timestamp': String(ts), 'x-zeroexposure-signature': sign(ts, body) } })).status).toBe(503)
+    const old = await storeMod.corchStore.claimAafNotify(eventId)
+    expect(old.kind).toBe('claimed')
+    await h.sql`UPDATE corch_events SET notify_claimed_at = now() - interval '6 minutes' WHERE event_id = ${eventId}`
+    const fresh = await storeMod.corchStore.claimAafNotify(eventId)
+    expect(fresh.kind).toBe('claimed')
+    // The old (slow) delivery finishes late with its stale token: ignored.
+    await storeMod.corchStore.finishAafNotify(eventId, (old as any).token, true)
+    expect((await eventRow(eventId)).notify_state).toBe('sending')
+    await storeMod.corchStore.finishAafNotify(eventId, (fresh as any).token, true)
+    expect((await eventRow(eventId)).notify_state).toBe('sent')
+  })
+
+  test('a closure that ends a live run cancels its in-process send guard', async () => {
+    const u = await mkUser()
+    const proj = await mkProject(u, 'github://acme/cancel-guard')
+    const it = await mkItem(u, proj, 'queued')
+    const c = await storeMod.corchStore.claimNext(u, [])
+    expect(c?.item.id).toBe(it.id)
+    cancelled = []
+    await send({ event: 'pr.closed', repo: 'acme/cancel-guard', headRef: it.branch })
+    expect(cancelled).toEqual([c!.run.id])
+  })
+
+  test('no deadlock: closure racing claimNext and a run end, repeated, always completes and the item ends closed', async () => {
+    const u = await mkUser()
+    const proj = await mkProject(u, 'github://acme/deadlock')
+    for (let i = 0; i < 12; i++) {
+      const it = await mkItem(u, proj, 'queued')
+      const [claim, ev] = await Promise.all([
+        storeMod.corchStore.claimNext(u, []),
+        send({ event: i % 2 ? 'pr.failed' : 'pr.closed', repo: 'acme/deadlock', headRef: it.branch }),
+      ])
+      expect(ev.res.status).toBe(200)
+      if (claim) {
+        // The watcher's run end racing the closure must never deadlock or requeue.
+        await storeMod.corchStore.endRunAndRequeue(claim.run.id, { endReason: 'no_pr', consumeAttempt: true, waitReason: null, notBefore: null })
+      }
+      const row = await itemRow(it.id)
+      // Either the closure won (blocked) or the claim won first and the closure then blocked it: never queued/running.
+      expect(['blocked']).toContain(row.status)
+      expect((await h.sql`SELECT count(*)::int AS n FROM corch_runs WHERE work_item_id = ${it.id} AND ended_at IS NULL`)[0]!.n).toBe(0)
+    }
   })
 
   test('pr.failed => blocked + exactly ONE notification, even on replay and on a second failed event', async () => {
@@ -367,9 +431,12 @@ maybe('CORCH-08 e2e - AAF event receiver, closure transitions and provision gate
     const it = await mkItem(u, proj)
     const eventId = `evt-${randomUUID()}`
     const rs = await Promise.all(Array.from({ length: 6 }, () => send({ event: 'pr.failed', repo: 'acme/race', headRef: it.branch, eventId })))
-    const statuses = (await Promise.all(rs.map((r) => r.res.json()))).map((j: any) => j.status).sort()
-    expect(statuses.filter((s) => s === 'applied').length).toBe(1)
-    expect(statuses.filter((s) => s === 'duplicate').length).toBe(5)
+    const bodies: any[] = await Promise.all(rs.map((r) => r.res.json()))
+    // Exactly one delivery applied the transition. A concurrent duplicate that finds the notification still in
+    // flight is a 503 (not delivered yet, the sender retries), never a second apply or a second send.
+    expect(bodies.filter((j) => j.status === 'applied').length).toBe(1)
+    for (const j of bodies) expect(['applied', 'duplicate', undefined]).toContain(j.status)
+    expect(bodies.filter((j) => j.status === undefined).every((j) => j.error === 'notification_pending')).toBe(true)
     expect(notified.filter(([, w]) => w === it.id).length).toBe(1)
     expect(await eventCount(eventId)).toBe(1)
   })

@@ -726,7 +726,15 @@ export function createCorchDispatcher(deps: CorchDeps) {
     }, ms)
   }
 
-  return { deps, evaluateUser, evaluateAll, armNotBeforeTimer, inFlight, reclaimRun, stallRun, onSupervisorClosed }
+  /**
+   * CORCH-08: an AAF closure ended these runs in the database. Cancel their in-process send guard so a turn that
+   * already passed its liveness check cannot still reach the socket (same SYNCHRONOUS cancel reclaimRun does).
+   */
+  function cancelRunSends(runIds: string[]): void {
+    for (const id of runIds) sendable.delete(id)
+  }
+
+  return { deps, evaluateUser, evaluateAll, armNotBeforeTimer, inFlight, reclaimRun, stallRun, onSupervisorClosed, cancelRunSends }
 }
 
 export type CorchDispatcher = ReturnType<typeof createCorchDispatcher>
@@ -868,6 +876,12 @@ let singleton: Promise<CorchDispatcher> | null = null
 export function getCorch(): Promise<CorchDispatcher> {
   singleton ??= realCorchDeps().then(createCorchDispatcher)
   return singleton
+}
+
+/** CORCH-08: cancel the send guard of runs an AAF closure ended. A no-op (builds nothing) while no dispatcher exists. */
+export async function cancelRunSendsNow(runIds: string[]): Promise<void> {
+  if (singleton === null || runIds.length === 0) return
+  ;(await singleton).cancelRunSends(runIds)
 }
 
 /** Whether the real singleton was ever built (a flag-OFF process must never build it). */

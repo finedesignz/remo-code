@@ -23,7 +23,7 @@ import { bodyLimit } from 'hono/body-limit'
 import { z } from 'zod'
 import { runIntake } from '../webhooks/intake.ts'
 import { aafEventSecret, corchEnabled } from './flag.ts'
-import { corchStore, type AafEventInput, type AafEventResult } from './store.ts'
+import { corchStore, type AafEventInput, type AafEventResult, type AafNotifyClaim } from './store.ts'
 
 export const AAF_EVENT_MAX_BODY_BYTES = 16 * 1024
 export const AAF_EVENT_SIGNATURE_HEADER = 'x-zeroexposure-signature'
@@ -42,9 +42,11 @@ export interface AafEventDeps {
   secret: () => string | null
   store: {
     applyAafEvent(e: AafEventInput): Promise<AafEventResult>
-    claimAafNotify(eventId: string): Promise<{ userId: string; workItemId: string } | null>
-    finishAafNotify(eventId: string, delivered: boolean): Promise<void>
+    claimAafNotify(eventId: string): Promise<AafNotifyClaim>
+    finishAafNotify(eventId: string, token: string, delivered: boolean): Promise<void>
   }
+  /** Cancel the in-process send guard of runs the closure ended (a send already past its liveness check). */
+  cancelRunSends: (runIds: string[]) => Promise<void>
   /** One owner notification for a failed PR. Resolves true on a durable delivery. Never throws into the route. */
   notifyFailed: (userId: string, workItemId: string) => Promise<boolean>
   /** One dispatch evaluation for the owner (a no-op while the CORCH flag is OFF). */
@@ -55,7 +57,15 @@ const REAL_DEPS: AafEventDeps = {
   secret: aafEventSecret,
   store: corchStore,
   notifyFailed: async (userId, workItemId) => {
-    const { fanOutNotify } = await import('../orchestrator/notify.ts')
+    const { fanOutNotify, applyChannelPrefs } = await import('../orchestrator/notify.ts')
+    // An owner who opted out of BOTH durable channels asked not to be notified: honor it as handled (never a
+    // permanent 503 retry loop). Anything else that delivers nothing is a real failure the sender must retry.
+    const { getUserById } = await import('../db/dal.ts')
+    const owner: any = await getUserById(userId)
+    if (applyChannelPrefs(['telegram', 'email'], owner?.notify_channels ?? null).length === 0) {
+      console.warn(`[corch] aaf pr.failed notification suppressed by owner channel preferences item=${workItemId}`)
+      return true
+    }
     const r = await fanOutNotify({
       userId,
       sessionId: '',
@@ -69,6 +79,7 @@ const REAL_DEPS: AafEventDeps = {
     return r.delivered.includes('email') || r.delivered.includes('telegram')
   },
   evaluate: async (userId) => (await import('./dispatcher.ts')).evaluateUserNow(userId),
+  cancelRunSends: async (runIds) => (await import('./dispatcher.ts')).cancelRunSendsNow(runIds),
 }
 
 export function createAafEventRoutes(deps: AafEventDeps = REAL_DEPS): Hono {
@@ -126,14 +137,17 @@ export function createAafEventRoutes(deps: AafEventDeps = REAL_DEPS): Hono {
       let notifyFailed = false
       try {
         const claim = await deps.store.claimAafNotify(parsed.event_id)
-        if (claim) {
+        if (claim.kind === 'busy') {
+          // Another delivery holds a fresh claim and has not finished: "not delivered yet", never a success.
+          notifyFailed = true
+        } else if (claim.kind === 'claimed') {
           let delivered = false
           try {
             delivered = await deps.notifyFailed(claim.userId, claim.workItemId)
           } catch (err: any) {
             console.warn(`[corch] aaf pr.failed notification failed item=${claim.workItemId}: ${err?.name ?? 'error'}`)
           }
-          await deps.store.finishAafNotify(parsed.event_id, delivered)
+          await deps.store.finishAafNotify(parsed.event_id, claim.token, delivered)
           if (!delivered) {
             console.warn(`[corch] aaf pr.failed notification undelivered item=${claim.workItemId}`)
             notifyFailed = true
@@ -144,6 +158,9 @@ export function createAafEventRoutes(deps: AafEventDeps = REAL_DEPS): Hono {
         notifyFailed = true
       }
 
+      if (result.kind === 'transitioned' && result.endedRunIds.length > 0) {
+        await deps.cancelRunSends(result.endedRunIds).catch((err) => console.warn(`[corch] aaf cancel sends failed: ${err?.name ?? 'error'}`))
+      }
       if (result.kind === 'transitioned' && corchEnabled()) {
         void deps.evaluate(result.userId).catch((err) => console.warn(`[corch] aaf evaluate trigger failed: ${err?.name ?? 'error'}`))
       }

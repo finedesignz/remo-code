@@ -1857,6 +1857,7 @@ CREATE TABLE IF NOT EXISTS corch_events (
   -- (a crash mid-send is reclaimable after 5 minutes); the sender retries a 503 with the same event_id.
   notify_state      TEXT NOT NULL DEFAULT 'none' CHECK (notify_state IN ('none','pending','sending','sent')),
   notify_claimed_at TIMESTAMPTZ NULL,
+  notify_claim_token UUID NULL,
   received_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
