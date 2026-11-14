@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto'
 import { corchStore, type CorchProject, type CorchStore, type CorchWorkItem } from './store.ts'
 import { corchEnabled } from './flag.ts'
 import { provisionProject } from './aaf-provision.ts'
+import { buildQueueSnapshot, publishCorchQueue, realQueueViewDeps, type QueueSnapshot } from './queue-view.ts'
 
 type Env = { Variables: { userId: string } }
 
@@ -32,6 +33,10 @@ export interface RouteDeps {
   evaluate(userId: string): Promise<void>
   /** CORCH-08: provision the repo at AAF and persist the result. Never throws; failure leaves aaf_unprovisioned. */
   provision(project: CorchProject): Promise<CorchProject>
+  /** CORCH-11: the read model behind GET /queue (a throw = 500). */
+  queue(userId: string): Promise<QueueSnapshot>
+  /** CORCH-11: push the user's queue over WS after a mutation. Never throws; never awaited in the response path. */
+  publish(userId: string): void
 }
 
 const REAL_ROUTE_DEPS: RouteDeps = {
@@ -40,6 +45,8 @@ const REAL_ROUTE_DEPS: RouteDeps = {
   // Flag OFF is a true no-op: no AAF call and no write. Projects enrolled while OFF are backfilled with
   // hub/scripts/corch-provision-existing.ts at cutover.
   provision: async (project) => (corchEnabled() ? provisionProject(corchStore, project) : project),
+  queue: async (userId) => buildQueueSnapshot(await realQueueViewDeps(), userId),
+  publish: (userId) => void publishCorchQueue(userId),
 }
 
 /** Fire-and-forget evaluate trigger. Never awaited in the response path; never touches the DB when OFF. */
@@ -64,6 +71,15 @@ const ProjectPatch = z.object({
   enabled: z.boolean().optional(),
   accept_external: z.boolean().optional(),
 })
+
+const SettingsPatch = z
+  .object({
+    paused: z.boolean().optional(),
+    max_concurrent_runs: z.number().int().min(1).max(32).optional(),
+  })
+  .refine((b) => b.paused !== undefined || b.max_concurrent_runs !== undefined, { message: 'empty patch' })
+
+const ItemPatch = z.object({ priority: z.number().int() })
 
 const WorkItemFields = {
   title: z.string().min(1).max(500),
@@ -109,6 +125,7 @@ export function createCorchRoutes(deps: RouteDeps = REAL_ROUTE_DEPS): Hono<Env> 
     // CORCH-08: enrolling calls AAF provision. It never throws and never blocks enrollment: any failure (or unset
     // env) leaves the project aaf_unprovisioned (not dispatchable).
     const project = await deps.provision(r.project).catch(() => r.project)
+    if (r.created) deps.publish(userId)
     return c.json({ project, created: r.created }, r.created ? 201 : 200)
   })
 
@@ -134,6 +151,7 @@ export function createCorchRoutes(deps: RouteDeps = REAL_ROUTE_DEPS): Hono<Env> 
       acceptExternal: body.accept_external,
     })
     if (!r) return c.json({ error: 'project_not_found' }, 404)
+    deps.publish(userId)
     // CORCH-08: re-enabling retries provisioning (an already provisioned project is left alone).
     let project = r.project
     if (!r.previousEnabled && r.project.enabled) {
@@ -162,7 +180,10 @@ export function createCorchRoutes(deps: RouteDeps = REAL_ROUTE_DEPS): Hono<Env> 
       body: body.body,
       priority: body.priority,
     })
-    if (r.created) triggerEvaluate(deps, userId)
+    if (r.created) {
+      deps.publish(userId)
+      triggerEvaluate(deps, userId)
+    }
     return c.json({ item: r.item, created: r.created }, r.created ? 201 : 200)
   })
 
@@ -173,6 +194,63 @@ export function createCorchRoutes(deps: RouteDeps = REAL_ROUTE_DEPS): Hono<Env> 
     }
     const items: CorchWorkItem[] = await deps.store.listWorkItems(c.get('userId'), (raw as CorchWorkItem['status']) ?? null, 200)
     return c.json({ items })
+  })
+
+  // CORCH-11 (R6.1): the status view. Cookie only (an API key never reaches /api/corch/*, authMiddleware).
+  corchRoutes.get('/queue', async (c) => {
+    try {
+      return c.json(await deps.queue(c.get('userId')))
+    } catch (err: any) {
+      console.warn(`[corch] queue view failed: ${err?.message ?? err}`)
+      return c.json({ error: 'queue_unavailable' }, 500)
+    }
+  })
+
+  // CORCH-11 (R6.2): remote pause / resume + concurrency. Distinct from the kill switch: it touches no kill-switch
+  // state and the gate list is unchanged. Pausing stops NEW dispatch only (claimNext), live runs continue.
+  // Resuming triggers exactly one evaluation (a no-op with the flag OFF).
+  corchRoutes.patch('/settings', async (c) => {
+    const userId = c.get('userId')
+    let body: z.infer<typeof SettingsPatch>
+    try {
+      body = SettingsPatch.parse(await c.req.json())
+    } catch (err: any) {
+      return c.json({ error: 'bad_request', detail: err?.message }, 400)
+    }
+    const r = await deps.store.updateSettings(userId, { paused: body.paused, maxConcurrentRuns: body.max_concurrent_runs })
+    if (!r) return c.json({ error: 'user_not_found' }, 404)
+    deps.publish(userId)
+    if ((r.previousPaused && !r.settings.corch_paused) || body.max_concurrent_runs !== undefined) triggerEvaluate(deps, userId)
+    return c.json({ settings: r.settings })
+  })
+
+  // CORCH-11 (R6.3): item priority. Selection order is the existing claimNext ORDER BY (R1.6).
+  corchRoutes.patch('/work-items/:id', async (c) => {
+    const userId = c.get('userId')
+    let body: z.infer<typeof ItemPatch>
+    try {
+      body = ItemPatch.parse(await c.req.json())
+    } catch (err: any) {
+      return c.json({ error: 'bad_request', detail: err?.message }, 400)
+    }
+    const id = c.req.param('id')
+    if (!z.string().uuid().safeParse(id).success) return c.json({ error: 'item_not_found' }, 404)
+    const item = await deps.store.setItemPriority(userId, id, body.priority)
+    if (!item) return c.json({ error: 'item_not_found' }, 404)
+    deps.publish(userId)
+    return c.json({ item })
+  })
+
+  // CORCH-11 (R6.3): cancel is ONLY for `queued` items; any other state is a 409 and nothing changes.
+  corchRoutes.post('/work-items/:id/cancel', async (c) => {
+    const userId = c.get('userId')
+    const id = c.req.param('id')
+    if (!z.string().uuid().safeParse(id).success) return c.json({ error: 'item_not_found' }, 404)
+    const r = await deps.store.cancelQueuedItem(userId, id)
+    if (r.kind === 'not_found') return c.json({ error: 'item_not_found' }, 404)
+    if (r.kind === 'not_queued') return c.json({ error: 'not_cancellable', status: r.status }, 409)
+    deps.publish(userId)
+    return c.json({ item: r.item })
   })
 
   return corchRoutes
@@ -206,7 +284,10 @@ export function createExtCorchRoutes(deps: RouteDeps = REAL_ROUTE_DEPS): Hono<En
       body: body.body,
       priority: body.priority,
     })
-    if (r.created) triggerEvaluate(deps, userId)
+    if (r.created) {
+      deps.publish(userId)
+      triggerEvaluate(deps, userId)
+    }
     return c.json({ item: r.item, created: r.created }, r.created ? 201 : 200)
   })
   return extCorchRoutes

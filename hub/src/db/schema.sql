@@ -1832,6 +1832,9 @@ DO $$ BEGIN
     CHECK (corch_max_concurrent_runs > 0);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- CORCH-11: remote pause. Paused = no new dispatch (live runs continue); distinct from the kill switch. Additive.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS corch_paused BOOLEAN NOT NULL DEFAULT false;
+
 -- CORCH-08 AAF provisioning + closure events (additive). Only a project AAF has provisioned is dispatchable:
 -- the default is 'aaf_unprovisioned' (fail closed), set to 'provisioned' only by a successful AAF provision call.
 ALTER TABLE corch_projects ADD COLUMN IF NOT EXISTS aaf_project_id TEXT NULL;
