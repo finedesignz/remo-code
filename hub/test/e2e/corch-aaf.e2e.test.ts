@@ -345,6 +345,11 @@ maybe('CORCH-08 e2e - AAF event receiver, closure transitions and provision gate
     expect(r.res.status).toBe(200) // delivered through the injected notifier
     expect((await eventRow(r.eventId)).notify_state).toBe('sent')
     expect(await storeMod.corchStore.claimAafNotify(r.eventId)).toEqual({ kind: 'none' }) // already delivered
+    await h.sql`UPDATE corch_events SET notify_state = 'pending' WHERE event_id = ${r.eventId}`
+    const c1 = await storeMod.corchStore.claimAafNotify(r.eventId)
+    expect(c1.kind).toBe('claimed')
+    await storeMod.corchStore.finishAafNotify(r.eventId, (c1 as any).token, false) // released: pending again, not done
+    await h.sql`UPDATE corch_events SET notify_state = 'sent' WHERE event_id = ${r.eventId}`
     await h.sql`UPDATE corch_events SET notify_state = 'sending', notify_claimed_at = now() WHERE event_id = ${r.eventId}`
     expect(await storeMod.corchStore.claimAafNotify(r.eventId)).toEqual({ kind: 'busy' }) // fresh claim: not done
     await h.sql`UPDATE corch_events SET notify_claimed_at = now() - interval '6 minutes' WHERE event_id = ${r.eventId}`
