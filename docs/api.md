@@ -5992,6 +5992,563 @@ To perform this operation, you must be authenticated by means of one of the foll
 bearerAuth
 </aside>
 
+## Queue view: projects, items, live runs, quota accounts, pause flag
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/corch/queue \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/corch/queue',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/corch/queue`
+
+Read model shared with the `corch_queue` WebSocket event and the Telegram `/queue` summary. Works with REMO_CORCH_ENABLED off (it only reads). Items omit `body`.
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "paused": true,
+  "max_concurrent_runs": 0,
+  "counts": {
+    "property1": 0,
+    "property2": 0
+  },
+  "projects": [
+    {
+      "id": "string",
+      "repo_ident": "string",
+      "priority": 0,
+      "enabled": true,
+      "aaf_provision_status": "string"
+    }
+  ],
+  "items": [
+    {
+      "id": "string",
+      "project_id": "string",
+      "repo_ident": "string",
+      "title": "string",
+      "source": "string",
+      "priority": 0,
+      "status": "string",
+      "wait_reason": "string",
+      "not_before": "string",
+      "attempts": 0,
+      "pr_url": "string",
+      "created_at": "string"
+    }
+  ],
+  "live_runs": [
+    {
+      "id": "string",
+      "work_item_id": "string",
+      "repo_ident": "string",
+      "status": "string",
+      "account_slot": "string",
+      "supervisor_id": "string",
+      "started_at": "string",
+      "heartbeat_at": "string",
+      "age_seconds": 0
+    }
+  ],
+  "quota_accounts": [
+    {
+      "account_id": "string",
+      "slot": "string",
+      "eligible": true,
+      "reason": "string",
+      "not_before": "string",
+      "five_h_pct": 0,
+      "seven_d_pct": 0
+    }
+  ],
+  "generated_at": "string"
+}
+```
+
+<h3 id="queue-view:-projects,-items,-live-runs,-quota-accounts,-pause-flag-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Snapshot|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Not authenticated|Inline|
+|500|[Internal Server Error](https://tools.ietf.org/html/rfc7231#section-6.6.1)|queue_unavailable|Inline|
+
+<h3 id="queue-view:-projects,-items,-live-runs,-quota-accounts,-pause-flag-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» paused|boolean|true|none|none|
+|» max_concurrent_runs|integer|true|none|none|
+|» counts|object|true|none|none|
+|»» **additionalProperties**|integer|false|none|none|
+|» projects|[object]|true|none|none|
+|»» id|string|true|none|none|
+|»» repo_ident|string|true|none|none|
+|»» priority|integer|true|none|none|
+|»» enabled|boolean|true|none|none|
+|»» aaf_provision_status|string|true|none|none|
+|» items|[object]|true|none|none|
+|»» id|string|true|none|none|
+|»» project_id|string|true|none|none|
+|»» repo_ident|string|true|none|none|
+|»» title|string|true|none|none|
+|»» source|string|true|none|none|
+|»» priority|integer|true|none|none|
+|»» status|string|true|none|none|
+|»» wait_reason|string¦null|true|none|none|
+|»» not_before|string¦null|true|none|none|
+|»» attempts|integer|true|none|none|
+|»» pr_url|string¦null|true|none|none|
+|»» created_at|string|true|none|none|
+|» live_runs|[object]|true|none|none|
+|»» id|string|true|none|none|
+|»» work_item_id|string|true|none|none|
+|»» repo_ident|string|true|none|none|
+|»» status|string|true|none|none|
+|»» account_slot|string¦null|true|none|none|
+|»» supervisor_id|string¦null|true|none|none|
+|»» started_at|string|true|none|none|
+|»» heartbeat_at|string|true|none|none|
+|»» age_seconds|integer|true|none|none|
+|» quota_accounts|[object]|true|none|none|
+|»» account_id|string|true|none|none|
+|»» slot|string¦null|true|none|none|
+|»» eligible|boolean|true|none|none|
+|»» reason|string¦null|true|none|none|
+|»» not_before|string¦null|true|none|none|
+|»» five_h_pct|number¦null|true|none|none|
+|»» seven_d_pct|number¦null|true|none|none|
+|» generated_at|string|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **500**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
+## Pause or resume dispatch; set the concurrent-run cap
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X PATCH https://app.remo-code.com/api/corch/settings \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "paused": true,
+  "max_concurrent_runs": 1
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/corch/settings',
+{
+  method: 'PATCH',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`PATCH /api/corch/settings`
+
+`paused: true` stops NEW dispatch (live runs continue); it is distinct from the automation kill switch. `paused: false` triggers one evaluation (a no-op with the flag off).
+
+> Body parameter
+
+```json
+{
+  "paused": true,
+  "max_concurrent_runs": 1
+}
+```
+
+<h3 id="pause-or-resume-dispatch;-set-the-concurrent-run-cap-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|body|body|object|false|none|
+|» paused|body|boolean|false|none|
+|» max_concurrent_runs|body|integer|false|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "settings": {
+    "corch_paused": true,
+    "corch_max_concurrent_runs": 0
+  }
+}
+```
+
+<h3 id="pause-or-resume-dispatch;-set-the-concurrent-run-cap-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Updated|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid or empty body|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Not authenticated|Inline|
+
+<h3 id="pause-or-resume-dispatch;-set-the-concurrent-run-cap-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» settings|object|true|none|none|
+|»» corch_paused|boolean|true|none|none|
+|»» corch_max_concurrent_runs|integer|true|none|none|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
+## Change a work item's priority
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X PATCH https://app.remo-code.com/api/corch/work-items/{id} \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "priority": 0
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/corch/work-items/{id}',
+{
+  method: 'PATCH',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`PATCH /api/corch/work-items/{id}`
+
+> Body parameter
+
+```json
+{
+  "priority": 0
+}
+```
+
+<h3 id="change-a-work-item's-priority-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+|body|body|object|false|none|
+|» priority|body|integer|true|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "item": {
+    "id": "string",
+    "project_id": "string",
+    "source": "manual",
+    "source_ref": "string",
+    "title": "string",
+    "status": "queued",
+    "wait_reason": "string",
+    "attempts": 0,
+    "branch": "string"
+  }
+}
+```
+
+<h3 id="change-a-work-item's-priority-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Updated|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid body|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Not authenticated|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such item for this user|Inline|
+
+<h3 id="change-a-work-item's-priority-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» item|[CorchWorkItem](#schemacorchworkitem)|true|none|none|
+|»» id|string|true|none|none|
+|»» project_id|string|true|none|none|
+|»» source|string|true|none|none|
+|»» source_ref|string|true|none|none|
+|»» title|string|true|none|none|
+|»» status|string|true|none|none|
+|»» wait_reason|string¦null|true|none|none|
+|»» attempts|integer|true|none|none|
+|»» branch|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|source|manual|
+|source|gsd_console|
+|source|aaf|
+|source|memlog|
+|status|queued|
+|status|running|
+|status|pr_open|
+|status|done|
+|status|blocked|
+|status|cancelled|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
+## Cancel a queued work item (any other state is 409)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/corch/work-items/{id}/cancel \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/corch/work-items/{id}/cancel',
+{
+  method: 'POST',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/corch/work-items/{id}/cancel`
+
+<h3 id="cancel-a-queued-work-item-(any-other-state-is-409)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "item": {
+    "id": "string",
+    "project_id": "string",
+    "source": "manual",
+    "source_ref": "string",
+    "title": "string",
+    "status": "queued",
+    "wait_reason": "string",
+    "attempts": 0,
+    "branch": "string"
+  }
+}
+```
+
+<h3 id="cancel-a-queued-work-item-(any-other-state-is-409)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Cancelled (terminal)|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Not authenticated|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such item for this user|Inline|
+|409|[Conflict](https://tools.ietf.org/html/rfc7231#section-6.5.8)|not_cancellable: the item is not queued|Inline|
+
+<h3 id="cancel-a-queued-work-item-(any-other-state-is-409)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» item|[CorchWorkItem](#schemacorchworkitem)|true|none|none|
+|»» id|string|true|none|none|
+|»» project_id|string|true|none|none|
+|»» source|string|true|none|none|
+|»» source_ref|string|true|none|none|
+|»» title|string|true|none|none|
+|»» status|string|true|none|none|
+|»» wait_reason|string¦null|true|none|none|
+|»» attempts|integer|true|none|none|
+|»» branch|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|source|manual|
+|source|gsd_console|
+|source|aaf|
+|source|memlog|
+|status|queued|
+|status|running|
+|status|pr_open|
+|status|done|
+|status|blocked|
+|status|cancelled|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **409**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
 ## External enqueue of a work item (EXPLICIT ext:corch scope)
 
 > Code samples

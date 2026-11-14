@@ -134,6 +134,8 @@ export interface CorchDeps {
   timers: CorchTimers
   /** Injectable clock for the quota-death backoff (default: the system clock). */
   now?: () => Date
+  /** CORCH-11: push the owner's queue over WS after a transition (optional; must never throw into the dispatcher). */
+  publishQueue?: (userId: string) => void
 }
 
 /** Hooks the dispatcher wires into the pipeline for one run (filled by the launch path). */
@@ -365,6 +367,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
   async function endRefusal(c: RunCtx, reason: string, release: boolean): Promise<void> {
     const r = await refuseRun(c.runId, c.userId, reason)
     if (!r.changed) return
+    deps.publishQueue?.(c.userId) // a replay refusal ends the run without another evaluation
     if (release) await releaseReservation(c)
     await releaseIfClaimed(c.runId, c.userId, c.itemId)
     if (!c.inline) await armNotBeforeTimer()
@@ -380,6 +383,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
       notBefore: null,
     })
     if (!r.changed) return
+    deps.publishQueue?.(c.userId)
     if (release) await releaseReservation(c)
     if (r.itemStatus === 'blocked' && !r.itemUntouched) {
       await notifyBlocked(c, r.attempts, endReason)
@@ -509,6 +513,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
     switch (outcome.kind) {
       case 'dispatched':
         await deps.store.markRunRunning(c.runId)
+        deps.publishQueue?.(c.userId)
         return
       case 'skipped':
         await endRefusal(c, outcome.reason, true)
@@ -531,6 +536,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
       // ended (reclaim) between the gates and here throws and the pipeline sends nothing.
       markDispatched: async () => {
         if (!(await deps.store.markRunRunning(c.runId))) throw new Error('corch_run_not_live')
+        deps.publishQueue?.(c.userId) // a parked or queued run starting later never passes through evaluateUser
       },
       // The real pipeline reports a busy session as markSkipped('session_busy') BEFORE it returns
       // dropped_busy. It is a dispatch failure (attempt + backoff, LD-8), not a no-deadline refusal.
@@ -710,6 +716,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
   /** Stalled once: the owner is told only when this call changed the row. */
   async function stallRun(run: LiveRun): Promise<void> {
     if (!(await deps.store.markStalled(run.id))) return
+    deps.publishQueue?.(run.user_id)
     await notifyOwner('stalled', liveRunCtx(run), run.item_attempts, 'no_fresh_inventory')
   }
 
@@ -730,6 +737,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
       for (let n = 0; n < MAX_CLAIMS_PER_EVALUATION; n++) {
         const c = await deps.store.claimNext(userId, excluded)
         if (!c) break
+        deps.publishQueue?.(userId) // the committed claim is visible (and no longer cancellable) before slow workspace/launch work
         claimed++
         excluded.push(c.item.id)
         inFlight.add(c.item.id)
@@ -774,6 +782,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
         }
       }
     } finally {
+      deps.publishQueue?.(userId) // CORCH-11: claims, launches and run ends all pass through here
       await armNotBeforeTimer() // an aborted evaluation must still leave the earliest wakeup armed
     }
     return { kind: 'done', claimed }
@@ -974,6 +983,7 @@ export async function realCorchDeps(): Promise<CorchDeps> {
       isOnline: (supervisorId) => registry.isSupervisorOnline(supervisorId),
     },
     timers: REAL_TIMERS,
+    publishQueue: (userId) => void import('./queue-view.ts').then((m) => m.publishCorchQueue(userId)).catch(() => {}),
   }
 }
 

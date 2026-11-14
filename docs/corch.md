@@ -456,3 +456,32 @@ and one ticket is raised per process; nothing dispatches without a claim. A real
 Tests: supervisor `corch-slot` (hello, spawn env, fail closed, frame test), `corch-worktree` (temp git repos, fake gh);
 hub `corch-workspace` (fake memlog and slot supervisor), `corch-no-token-guard`, real-Postgres `e2e/corch-slot.e2e.test.ts`
 (claim, worktree, launch, turn end, lookup, release with the real Workspace and PrLookup).
+
+## Status, pause, priority and Telegram /queue (CORCH-11)
+
+Everything here is additive and works with `REMO_CORCH_ENABLED` OFF (the routes only store and read; the evaluate trigger is a no-op).
+
+- **`GET /api/corch/queue`** (cookie): `paused`, `max_concurrent_runs`, `counts` (per-status, uncapped), `projects`, `items` (open items plus terminal ones from the last 24h, no `body`,
+  in dispatch order), `live_runs` (account slot, supervisor, age, heartbeat) and `quota_accounts` (eligibility from the one pure function in
+  `quota-eligibility.ts`). One builder (`queue-view.ts`) feeds this route, the WS event and the Telegram summary.
+- **Live panel, no polling.** Every transition pushes the whole snapshot to the owner as a `corch_queue` event via `broadcastToUser`: after each
+  dispatcher evaluation (claims, launches and run ends all pass through it), a stall, an AAF closure and every route mutation. The publisher
+  coalesces overlapping triggers with promises (no timer). The web panel (`CorchQueuePanel`, Settings > Usage) does one GET on mount and then only
+  renders events; `corch-queue-panel.test.tsx` pins that the hook schedules nothing.
+- **Pause: `users.corch_paused`** (BOOLEAN NOT NULL DEFAULT false, additive DDL). `PATCH /api/corch/settings {paused?, max_concurrent_runs?}`.
+  `claimNext` reads it under the per-user advisory lock, so a paused user dispatches nothing new; live runs continue to completion. Resuming
+  (true to false) triggers exactly one evaluation. It is NOT the automation kill switch: no kill-switch state is read or written, and the gate
+  list is unchanged (kill switch first).
+- **Priority and cancel.** `PATCH /api/corch/projects/:id {priority}` (existing) and `PATCH /api/corch/work-items/:id {priority}` change selection
+  order (`ORDER BY project.priority, item.priority, created_at, id`, R1.6). `POST /api/corch/work-items/:id/cancel` is ONE guarded
+  `UPDATE ... WHERE status = 'queued'`: a queued item becomes terminal `cancelled`; any other state returns 409 `not_cancellable` with the status
+  and changes nothing (a concurrent claim wins cleanly).
+- **Known display limit.** `quota_accounts.eligible` is the verdict at publish time. Snapshot-TTL expiry (10 min without a CUG POST) is time-based and
+  schedules nothing, so an idle panel keeps the last verdict until the next transition or reconnect read; dispatch itself re-evaluates quota live on every
+  claim, so the view is advisory only.
+- **Telegram `/queue`** is read-only (paused flag, live runs, top 5 queued with wait reasons, blocked count) and is in `BOT_COMMANDS`, `parseCommand`,
+  `HELP_TEXT` and the webhook switch together (`corch-queue.test.ts` lockstep test). It is a human surface and is not kill-switch gated. Pause,
+  priority and cancel stay web-only.
+
+Tests: hub `corch-queue.test.ts` (routes, publisher, lockstep, summary), real-Postgres `e2e/corch-queue.e2e.test.ts` (pause gates `claimNext`,
+priority order, cancel states, view); web `corch-queue-panel.test.tsx`, `no-indigo.test.ts`.

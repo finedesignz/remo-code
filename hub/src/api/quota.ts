@@ -191,6 +191,8 @@ export function createQuotaRoutes(deps: QuotaRouteDeps) {
  * runs one evaluation for the user. No timer, no poll, no retry.
  */
 export async function defaultQuotaEvaluate(userId: string): Promise<void> {
+  // CORCH-11: a stored snapshot changes the queue view's quota accounts whether or not dispatch is enabled.
+  void import('../corch/queue-view.ts').then((m) => m.publishCorchQueue(userId)).catch(() => {})
   if (!corchEnabled()) return
   const m = await import('../corch/dispatcher.ts')
   await m.evaluateUserNow(userId)

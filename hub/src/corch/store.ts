@@ -135,6 +135,42 @@ export interface ProjectPatch {
 }
 
 /** A live run with the item facts the reconciler needs (no untrusted text). */
+/** CORCH-11: per-user dispatch settings (pause is distinct from the kill switch). */
+export interface CorchSettings {
+  corch_paused: boolean
+  corch_max_concurrent_runs: number
+}
+
+/** CORCH-11: one queue-view item row (body is deliberately omitted). */
+export interface QueueViewItem {
+  id: string
+  project_id: string
+  repo_ident: string
+  title: string
+  source: WorkSource
+  priority: number
+  status: CorchWorkItem['status']
+  wait_reason: string | null
+  not_before: Date | null
+  attempts: number
+  pr_url: string | null
+  created_at: Date
+}
+
+/** CORCH-11: one live run in the queue view. */
+export interface QueueViewRun {
+  id: string
+  work_item_id: string
+  repo_ident: string
+  status: CorchRun['status']
+  account_slot: string | null
+  supervisor_id: string | null
+  started_at: Date
+  heartbeat_at: Date
+}
+
+export type CancelItemResult = { kind: 'cancelled'; item: CorchWorkItem } | { kind: 'not_queued'; status: CorchWorkItem['status'] } | { kind: 'not_found' }
+
 export interface LiveRun extends CorchRun {
   repo_ident: string
   item_attempts: number
@@ -190,6 +226,20 @@ export interface CorchStore {
   claimAafNotify(eventId: string): Promise<AafNotifyClaim>
   /** CORCH-08: record the delivery outcome of a claimed notification (false releases it). Fenced by the claim token. */
   finishAafNotify(eventId: string, token: string, delivered: boolean): Promise<void>
+  /** CORCH-11: the user's dispatch settings (null = no such user). */
+  getSettings(userId: string): Promise<CorchSettings | null>
+  /** CORCH-11: partial update; returns the new settings and the previous paused flag (null = no such user). */
+  updateSettings(userId: string, patch: { paused?: boolean; maxConcurrentRuns?: number }): Promise<{ settings: CorchSettings; previousPaused: boolean } | null>
+  /** CORCH-11: set an item's priority (any status; selection only reads queued items). null = no such item. */
+  setItemPriority(userId: string, itemId: string, priority: number): Promise<CorchWorkItem | null>
+  /** CORCH-11: cancel ONLY a queued item (terminal `cancelled`); one guarded UPDATE, so a concurrent claim wins cleanly. */
+  cancelQueuedItem(userId: string, itemId: string): Promise<CancelItemResult>
+  /** CORCH-11: items (open + last 24h of terminal ones, no body) for the queue view, in dispatch order. */
+  queueViewItems(userId: string, limit: number): Promise<QueueViewItem[]>
+  /** CORCH-11: item counts per status over ALL the user's items (not limited by the view's row cap). */
+  queueViewCounts(userId: string): Promise<Record<string, number>>
+  /** CORCH-11: the user's live (not ended) runs for the queue view. */
+  queueViewRuns(userId: string): Promise<QueueViewRun[]>
   claimNext(userId: string, excludeIds: string[]): Promise<Claimed | null>
   attachSession(runId: string, sessionId: string, worktreePath: string | null): Promise<boolean>
   endRunAndRequeue(runId: string, i: EndRequeueInput): Promise<EndResult>
@@ -425,6 +475,76 @@ export const corchStore: CorchStore = {
       WHERE event_id = ${eventId} AND notify_state = 'sending' AND notify_claim_token = ${token}::uuid`
   },
 
+  async getSettings(userId) {
+    const r = await sql<CorchSettings[]>`
+      SELECT corch_paused, corch_max_concurrent_runs FROM users WHERE id = ${userId}`
+    return r[0] ?? null
+  },
+
+  async updateSettings(userId, p) {
+    return sql.begin(async (tx) => {
+      // The SAME per-user advisory lock claimNext holds: a pause can never commit between a claim reading
+      // corch_paused=false and inserting its run. After this returns, no new claim can start.
+      await tx`SELECT pg_advisory_xact_lock(hashtext(${corchUserLockKey(userId)}))`
+      const prev = await tx<{ corch_paused: boolean }[]>`SELECT corch_paused FROM users WHERE id = ${userId} FOR UPDATE`
+      if (prev.length === 0) return null
+      const rows = await tx<CorchSettings[]>`
+        UPDATE users SET
+          corch_paused = COALESCE(${p.paused ?? null}::boolean, corch_paused),
+          corch_max_concurrent_runs = COALESCE(${p.maxConcurrentRuns ?? null}::integer, corch_max_concurrent_runs)
+        WHERE id = ${userId}
+        RETURNING corch_paused, corch_max_concurrent_runs`
+      return { settings: rows[0]!, previousPaused: prev[0]!.corch_paused }
+    })
+  },
+
+  async setItemPriority(userId, itemId, priority) {
+    const r = await sql<CorchWorkItem[]>`
+      UPDATE corch_work_items SET priority = ${priority}, updated_at = now()
+      WHERE id = ${itemId} AND user_id = ${userId} RETURNING *`
+    return r[0] ?? null
+  },
+
+  async cancelQueuedItem(userId, itemId) {
+    const r = await sql<CorchWorkItem[]>`
+      UPDATE corch_work_items SET status = 'cancelled', wait_reason = NULL, updated_at = now()
+      WHERE id = ${itemId} AND user_id = ${userId} AND status = 'queued' RETURNING *`
+    if (r.length > 0) return { kind: 'cancelled', item: r[0]! }
+    const cur = await sql<{ status: CorchWorkItem['status'] }[]>`
+      SELECT status FROM corch_work_items WHERE id = ${itemId} AND user_id = ${userId}`
+    return cur.length > 0 ? { kind: 'not_queued', status: cur[0]!.status } : { kind: 'not_found' }
+  },
+
+  async queueViewItems(userId, limit) {
+    return sql<QueueViewItem[]>`
+      SELECT i.id, i.project_id, p.repo_ident, i.title, i.source, i.priority, i.status, i.wait_reason, i.not_before,
+             i.attempts, i.pr_url, i.created_at
+      FROM corch_work_items i JOIN corch_projects p ON p.id = i.project_id AND p.user_id = i.user_id
+      WHERE i.user_id = ${userId}
+        AND (i.status NOT IN ('done', 'cancelled') OR i.updated_at > now() - interval '24 hours')
+      -- Dispatchable and in-flight work first, then blocked, then recently closed: the row cap can only ever cut the
+      -- least relevant rows (a pile of blocked items cannot hide the queue).
+      ORDER BY CASE WHEN i.status IN ('done', 'cancelled') THEN 2 WHEN i.status = 'blocked' THEN 1 ELSE 0 END,
+               p.priority DESC, i.priority DESC, i.created_at ASC, i.id ASC
+      LIMIT ${limit}`
+  },
+
+  async queueViewCounts(userId) {
+    const r = await sql<{ status: string; n: number }[]>`
+      SELECT status, count(*)::int AS n FROM corch_work_items WHERE user_id = ${userId} GROUP BY status`
+    const out: Record<string, number> = {}
+    for (const x of r) out[x.status] = x.n
+    return out
+  },
+
+  async queueViewRuns(userId) {
+    return sql<QueueViewRun[]>`
+      SELECT r.id, r.work_item_id, p.repo_ident, r.status, r.account_slot, r.supervisor_id, r.started_at, r.heartbeat_at
+      FROM corch_runs r JOIN corch_projects p ON p.id = r.project_id
+      WHERE r.user_id = ${userId} AND r.ended_at IS NULL
+      ORDER BY r.started_at ASC, r.id ASC`
+  },
+
   async claimNext(userId, excludeIds) {
     const lockKey = corchUserLockKey(userId)
     try {
@@ -432,9 +552,11 @@ export const corchStore: CorchStore = {
         await tx`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`
         const live = await tx<{ n: number }[]>`
           SELECT count(*)::int AS n FROM corch_runs WHERE user_id = ${userId} AND ended_at IS NULL`
-        const cap = await tx<{ c: number }[]>`
-          SELECT corch_max_concurrent_runs AS c FROM users WHERE id = ${userId}`
-        if (cap.length === 0 || live[0]!.n >= cap[0]!.c) return null
+        const cap = await tx<{ c: number; paused: boolean }[]>`
+          SELECT corch_max_concurrent_runs AS c, corch_paused AS paused FROM users WHERE id = ${userId}`
+        // CORCH-11: paused dispatches nothing new (live runs continue). Read under the same advisory lock as the claim,
+        // so a pause committed before this statement can never be overtaken by a claim.
+        if (cap.length === 0 || cap[0]!.paused || live[0]!.n >= cap[0]!.c) return null
 
         const cand = await tx<CorchWorkItem[]>`
           SELECT i.*
