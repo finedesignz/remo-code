@@ -2,7 +2,7 @@
 // The whole loop in ONE flow, wiring the REAL pieces the earlier CORCH e2e files prove in isolation:
 //   quota snapshot POST (real hub app) -> real quota provider -> claim -> memlog claim (fake) -> worktree_ensure
 //   (fake slot supervisor) -> launch -> turn end -> pr_lookup -> HMAC-signed AAF event POST (real hub app route)
-//   -> hub status. Fakes: AAF sender, memlog, slot supervisor, launch/spawn. Nothing here touches a live system.
+//   -> hub status. Fakes: AAF sender, memlog, slot supervisor, launch/spawn and the dispatch send (the turn end calls the finalize hook the dispatcher registered; the real gate chain and send are covered by corch-dispatcher.e2e.test.ts). Nothing here touches a live system.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-at-least-32-chars-long-aaaaaaaa'
 process.env.SESSION_SECRET = process.env.SESSION_SECRET || 'session-secret-at-least-32-chars-long-x'
 process.env.MAGIC_LINK_SECRET = process.env.MAGIC_LINK_SECRET || 'magic-link-secret-at-least-32-chars-x'
