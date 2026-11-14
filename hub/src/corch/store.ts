@@ -196,6 +196,8 @@ export interface CorchStore {
   endRunMarkPrOpen(runId: string, prUrl: string): Promise<EndResult>
   isEnrolledEnabled(userId: string, repoIdent: string): Promise<boolean>
   runContext(runId: string): Promise<RunContext | null>
+  /** CORCH-09: the most recent run of a work item (ended or not) with its repo_ident, for worktree removal and the memlog release. */
+  latestRunForItem(userId: string, itemId: string): Promise<(CorchRun & { repo_ident: string }) | null>
   /** Live (not ended) runs for the user, excluding one run (the request's own). */
   liveRunsForUser(userId: string, excludeRunId: string): Promise<number>
   /** Today's four-bucket token total for the project's CORCH sessions, in the user's tz-day. */
@@ -630,6 +632,17 @@ export const corchStore: CorchStore = {
       WHERE r.ended_at IS NULL AND (${afterId}::uuid IS NULL OR r.id > ${afterId}::uuid)
       ORDER BY r.id ASC
       LIMIT ${limit}`
+  },
+
+  async latestRunForItem(userId, itemId) {
+    const rows = await sql<(CorchRun & { repo_ident: string })[]>`
+      SELECT r.*, p.repo_ident
+      FROM corch_runs r
+      JOIN corch_projects p ON p.id = r.project_id
+      WHERE r.work_item_id = ${itemId} AND r.user_id = ${userId}
+      ORDER BY r.started_at DESC, r.id DESC
+      LIMIT 1`
+    return rows[0] ?? null
   },
 
   async liveRunsForSupervisor(supervisorId) {
