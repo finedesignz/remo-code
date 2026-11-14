@@ -97,6 +97,7 @@ Refusals never consume an attempt (LD-7): the run ends, the item returns to `que
 | `corch_concurrency`, `quota_*`, `lifetime_inject_exhausted*`, `workspace_unavailable`, `supervisor_offline`, `disabled`, `not_allowlisted`, `in_flight`, `ledger_unavailable`, unknown | the reason | none |
 
 Failures consume an attempt (LD-8): `launch_failed`, `dispatch_failed`, `dropped_busy`, `spawn_timeout`,
+`launch_error` (any throw in the launch path), `workspace_error` (a throwing Workspace), `claim_orphaned`,
 `supervisor_closed`, `session_absent`, `no_pr` (run ended, no PR found), `pr_lookup_unavailable`. New attempts =
 attempts + 1; at `max_attempts` the item becomes `blocked` and the owner is notified exactly once; otherwise it
 returns to `queued` with `not_before = now + 60s * 5^(attempts-1)` (60s, then 300s). A run that ends with an open PR
@@ -112,10 +113,18 @@ release (LD-10) only on a no-attempt refusal after a successful launch, on park 
 A live run is reclaimed only when this process KNOWS it is gone:
 
 - the supervisor socket closed and was not replaced by a reconnect (`ws/agent.ts` close hook): `supervisor_closed`;
-- a FRESH `session_inventory` (the dead-session reaper's freshness rule) lacks the session and the heartbeat is older
-  than the lease: `session_absent`;
-- a run with no session id, not in this process's in-flight launches, older than the lease: `claim_orphaned`, no
-  attempt (launch needs a session id, so nothing launched).
+- a FRESH `session_inventory` (the dead-session reaper's freshness rule) FROM THE RUN'S OWN SUPERVISOR lacks the
+  session and the heartbeat is older than the lease: `session_absent`. A run with no `supervisor_id` (the hub crashed
+  between launch and `markRunLaunched`) has no owner on record: another supervisor's inventory can prove it ALIVE,
+  never gone, so it can only stall;
+- a run with no session id, not in this process's in-flight launches, older than the lease: `claim_orphaned`. It
+  consumes an attempt so a deterministic failure before the session is attached is bounded (blocked + one
+  notification) rather than re-claimed forever.
+
+The reconciler reads one page of at most 100 live runs per pass in stable id order and carries a cursor, so runs it
+can only mark `stalled` cannot starve the rest. An ended run never sends: the three CORCH gates refuse it
+(`corch_run_not_live`), a parked replay re-checks liveness, and `markDispatched` throws when the conditional update
+finds the run ended. A busy session (`markSkipped('session_busy')`) is a `dropped_busy` failure with an attempt.
 
 No fresh inventory is "unknown", never "gone": past the lease the run becomes `stalled` once, with one owner
 notification. A listed session refreshes the heartbeat (and a stalled run returns to `running`). A hub restart
@@ -124,6 +133,7 @@ Notifications carry ids, `repo_ident`, attempts and `end_reason` only, never ite
 
 ## Triggers and the single interval (LD-12)
 
+On boot (flag ON) the already-due backlog is evaluated once, then the timer is armed for the next future deadline.
 Event-driven: enqueue (both routes), project `enabled` false to true, run end, kill-switch release
 (`api/automation.ts` `resumeDeferredWork`), supervisor hello and close (`ws/agent.ts`), plus ONE `setTimeout`
 re-armed to the earliest future `not_before`. The only periodic loop is the reconciler's single `setInterval`
