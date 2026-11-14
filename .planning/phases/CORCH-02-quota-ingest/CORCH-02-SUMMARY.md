@@ -150,3 +150,26 @@ Docs: `docs/corch.md` updated for F1-F7 semantics (committed with this section).
 ### Final checks (fresh DBs on 127.0.0.1:55432, CI-equivalent env, each file in its own bun process)
 
 All corch unit files (boot-assert 15, flag-off 5, gates 58, no-polling-guard 2, prompt 3, quota-binding 6, quota-death 16, quota-eligibility 37, quota-ingest 29, quota-selection 23, quota-wait 14, routes 13), guards (kill-switch-coverage 10, token-cap-coverage 7, counter-key-assignment-guard 9, launch-callers-guard 12, launch-machine-guard 11, api-keys-scopes 37, mount-order 29) and e2e (corch-quota 17, corch-dispatcher 28) pass with 0 fail. `check-baseline` (CI env, fresh DB) OK: pass=4043 skip=0 fail=0. Typecheck 253 errors (limit 253; no new). `schema-lint` OK (5 allowed, none new). `docs:sync` not run: no route or OpenAPI shape changed.
+
+## QC round 2 fixes
+
+Source: `QC-CODEX-R2.md` (CONTENT BLOCK, 3 MED + 1 LOW). Locked fix spec G1-G3 from the orchestrator. Tests first (red), then fix, one commit per item.
+
+| Item | Finding | Commit | Test |
+|---|---|---|---|
+| G1 | MED #1: a recorded quota death copied the death deadline into the item's `not_before`, so a healthy live snapshot released the account but not the item. Now: block recorded (`markDeath` returned a `blocked_until`) -> item `not_before = now + 600s`; the account block alone governs quota. `markDeath` throwing OR returning null/undefined (block not recorded) keeps the fail-closed `now + 5h` hold (closes the null-result gap). `CorchDeps.now` is an injectable clock. | `0ea4702` | `corch-quota-death` (600s with injected clock, far deadline not copied, null and undefined results -> 5h, F3 cases on the injected clock); `corch-quota.e2e` death -> clearing live snapshot -> `claimNext` null inside the backoff, item reclaimable once the backoff passes |
+| G2 | MED #2: a future-dated stored reading rejected every genuine later reading (the store ignores older `fetched_at`), including block clearing. `POST /api/quota/snapshot` now returns 400 `invalid_snapshot`, no write, no evaluation, when any account `fetched_at` or the top-level `generated_at` is more than 120 s ahead of server time. | `150c17b` | `corch-quota-ingest` (future reading rejected and not stored, a normal reading after it applied; boundary +120s accepted / +121s rejected; `generated_at`); `corch-quota.e2e` (2099 reading 400, stored row unchanged, genuine live reading after a death still clears the block) |
+| G3 | MED #3: supervisor binding was checked once. `resolveTarget` now re-reads the target supervisor's CURRENT advertised `account_slot` from the registry (new `QuotaProvider.supervisorAccountSlot`, null when not connected) and requires it to equal the run's recorded `account_slot`, else `quota:supervisor_unbound` (no attempt, nothing reserved). A provider that has `supervisorFor` but cannot re-read, or a throwing re-read, fails closed. | `7b73b1c` | `corch-quota-binding` (reconnect advertising another account -> refused; not connected -> refused; re-read throws / missing -> refused; matching -> launches targeted), `corch-quota-selection` (`supervisorAccountSlot` reads at call time) |
+| LOW 4 | Clear provenance (`source: live`, `fetched_at > blocked_at`) is publisher-controlled. | none | Accepted, no code change: only a holder of a `quota:publish` key can forge a clear, and it can only affect that key owner's own user. Assistant text alone cannot publish a clear. |
+
+Docs: `docs/corch.md` updated (G1 backoff vs hold, G2 120 s future bound, G3 launch-time re-read).
+
+### Deviations
+
+- G3: the re-read happens at `resolveTarget` time as specified. It is a point-in-time check: a supervisor that reconnects under another account AFTER `resolveTarget` and before the send (across the reservation and ledger awaits) is not re-checked. Closing that window needs a check inside `launchSessionForUser` right before the frame is sent; not done (outside the locked spec).
+- G1: when the run holds no account, or the quota provider has no `markDeath` (CORCH-01 seam), `not_before` stays null as before (nothing was attempted, so nothing failed to record).
+- Commit trailer: the system attribution reminder (Claude Sonnet 5.5) was used rather than the `Claude Opus 5.5` text in the task brief.
+
+### Final checks (fresh DBs on 127.0.0.1:55432, CI-equivalent env, each file in its own bun process)
+
+All corch unit files (boot-assert 15, flag-off 5, gates 58, no-polling-guard 2, prompt 3, quota-binding 10, quota-death 18, quota-eligibility 37, quota-ingest 32, quota-selection 24, quota-wait 14, routes 13), guards (kill-switch-coverage 10, token-cap-coverage 7, counter-key-assignment-guard 9, launch-callers-guard 12, launch-machine-guard 11, api-keys-scopes 37, mount-order 29) and e2e (corch-quota 18, corch-dispatcher 28) pass with 0 fail. `check-baseline` (CI env, fresh DB) OK: pass=4054 skip=0 fail=0. Typecheck (`bunx tsc --noEmit -p hub/tsconfig.json`) 253 errors (limit 253; none in touched files). `schema-lint` OK (5 allowed, none new). `docs:openapi` regenerated with no diff to `docs/openapi.json` (route shape unchanged), so `docs:sync` produced no change.

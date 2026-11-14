@@ -68,7 +68,9 @@ authenticate, rate limit 120/min per key prefix, `/api/quota/` is CSRF-allowlist
   strict at both levels (`.strict()`): `{schema: 1, publisher: "cug", generated_at, poll_interval_secs, accounts[0..32]}`
   with each account `{account_id, slot, five_h_pct, seven_d_pct, resets_5h, resets_7d, fetched_at, source, enabled,
   blocked, current}`. `email`, `label`, `user_id` and any unknown key return `400 {error: "invalid_snapshot"}` with
-  no value echoed and no row written; the body is never logged. Over 64 KiB returns `413` before parsing.
+  no value echoed and no row written; so does an account `fetched_at` (or the top-level `generated_at`) more than 120 s
+  ahead of server time (a future-dated reading would pin the stored row ahead of every genuine later reading); the body
+  is never logged. Over 64 KiB returns `413` before parsing.
   `200 {ok: true, accepted: n}`. Each successful POST triggers exactly one dispatcher evaluation when
   `REMO_CORCH_ENABLED` is on and none when it is off; a 4xx triggers none.
 - `GET /api/quota/snapshot` needs the **EXPLICIT-only `quota:read` scope** and returns the key owner's accounts with
@@ -216,7 +218,9 @@ has an online slot supervisor with a free slot, else `quota:no_eligible_account`
 `(user_id, account_id)` by a transaction advisory lock. The selection carries `supervisor_id` (the lowest-id online
 supervisor advertising the account) and the corch launch targets exactly that supervisor (`governedLaunch`
 `resolveTarget` -> `launchSessionForUser` `targetSupervisorId`, corch only); with no supervisor for the run's account
-the item is refused `quota:supervisor_unbound` (no attempt). `GET /api/quota/snapshot` evaluates eligibility with the
+the item is refused `quota:supervisor_unbound` (no attempt). At launch resolution the target supervisor's CURRENT
+advertised account is re-read from the registry and must equal the run's recorded `account_slot` (and the supervisor
+must be connected), else the same refusal. `GET /api/quota/snapshot` evaluates eligibility with the
 same live per-account busy counts as dispatch.
 
 **Wait.** A `quota:` refusal requeues the item with `wait_reason = quota:<reason>`, no attempt consumed, and
@@ -230,8 +234,11 @@ current `You've hit your session|weekly|Opus|Sonnet limit ...`, at most 500 char
 `blocked_at = now()` and `blocked_until = min(candidate reset, now + cap)`, where the candidate is the signal's reset
 when in the future, else that window's reset from the reading, else the earliest future reset, and the cap is 7 days
 for the weekly window and 5 hours otherwise (a far-future or past epoch therefore clamps; text can never block an
-account indefinitely). A later death keeps the later `blocked_until`. If the account cannot be identified or the block
-cannot be written, the item is held 5 hours (`not_before = now + 5h`), never redispatched at once. The item is requeued with `end_reason quota_death`, `wait_reason quota:death`, no
+account indefinitely). A later death keeps the later `blocked_until`. When the block was recorded the item only backs
+off 600 s (`not_before = now + 600s`): the account block alone governs quota (dispatch refuses a blocked account and a
+clearing live snapshot triggers an evaluation), so a healthy reading releases the item after the backoff. If the
+account cannot be identified or the block was not recorded (`markDeath` threw, or returned no `blocked_until`), the
+item is held 5 hours (`not_before = now + 5h`), never redispatched at once. The item is requeued with `end_reason quota_death`, `wait_reason quota:death`, no
 attempt, and the PR lookup is skipped. A long assistant message that merely mentions a limit is not a death. Known
 limit: the supervisor relays a whole turn's text, so a run that wrote prose and then hit the limit does not match
 the whole-text anchor and follows the CORCH-01 `no_pr` path (fail-safe direction). Details and evidence:
