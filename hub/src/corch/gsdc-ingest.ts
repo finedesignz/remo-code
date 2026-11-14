@@ -37,6 +37,8 @@ export interface GsdcOutage {
   userIds: string[]
   /** Stable error signature: unreachable | http_5xx | http_401 | http_402 | http_403 | http_<n> | stream_error | stream_error:<code> | stream_ended | bad_payload | apply_failed | token_unset | url_unset */
   signature: string
+  /** False once the ingest was stopped or superseded: the notifier must not start another recipient. */
+  isLive: () => boolean
 }
 
 export interface GsdcDeps {
@@ -152,7 +154,7 @@ export function createGsdcIngest(deps: GsdcDeps) {
       const users = [...new Set((await deps.store.listEnabledProjects()).map((p) => p.user_id))]
       // A stopped or superseded connection must neither send a stale notification nor flip shared state.
       if (stopped || gen !== generation) return
-      await deps.notifyOutage({ userIds: users, signature })
+      await deps.notifyOutage({ userIds: users, signature, isLive: () => !stopped && gen === generation })
       if (stopped || gen !== generation) return
       notified = true // only after delivery: a failed recipient lookup is retried on the next failure of this outage
     } catch (err: any) {

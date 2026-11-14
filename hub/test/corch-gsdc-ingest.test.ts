@@ -7,7 +7,7 @@ import {
   backoffMs,
   GSDC_BACKOFF_CAP_MS,
   GSDC_IDLE_TIMEOUT_MS,
-  type GsdcOutage,
+
 } from '../src/corch/gsdc-ingest.ts'
 import { buildCorchPrompt } from '../src/corch/prompt.ts'
 
@@ -75,7 +75,7 @@ function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<st
     auth: [] as string[],
     upserts: [] as any[],
     cancels: [] as any[],
-    outages: [] as GsdcOutage[],
+    outages: [] as Array<{ userIds: string[]; signature: string }>,
     enqueued: [] as string[],
     signals: [] as AbortSignal[],
   }
@@ -132,11 +132,12 @@ function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<st
       },
     },
     notifyOutage: async (o) => {
+      ;(log as any).isLive = o.isLive
       if ((opts.notifyThrows ?? 0) > 0) {
         opts.notifyThrows!--
         throw new Error("undelivered")
       }
-      log.outages.push(o)
+      log.outages.push({ userIds: o.userIds, signature: o.signature })
     },
     onEnqueued: async (u) => {
       log.enqueued.push(u)
@@ -793,5 +794,17 @@ describe('review hardening (QC round 7)', () => {
     await flush()
     expect(h.log.outages).toEqual([])
     h.ingest.stop()
+  })
+})
+
+describe('review hardening (QC round 8)', () => {
+  test('the notifier is handed a liveness guard that turns false after stop()', async () => {
+    const h = harness({ projects: [project('pa', 'u1', 'github://acme/app')], streams: [() => json({}, 503)] })
+    h.ingest.start()
+    await flush()
+    const isLive = (h.log as any).isLive as () => boolean
+    expect(isLive()).toBe(true)
+    h.ingest.stop()
+    expect(isLive()).toBe(false)
   })
 })

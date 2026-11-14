@@ -13,6 +13,7 @@ async function notifyOutage(o: GsdcOutage): Promise<void> {
   // The detail carries the error signature only: never console text, never the token.
   let delivered = 0
   for (const userId of o.userIds) {
+    if (!o.isLive()) return // stopped or superseded: no further recipients
     const r = await fanOutNotify({
       userId,
       sessionId: '',
