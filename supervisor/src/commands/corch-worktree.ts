@@ -230,18 +230,23 @@ export async function runCorchPrLookup(args: string[]): Promise<CommandResult> {
   const env = childEnv()
   delete env.GH_REPO // inherited overrides must never redirect the lookup; host and repository are passed explicitly
   delete env.GH_HOST
+  // The head filter is applied SERVER-SIDE (`head=<owner>:<branch>` matches only a branch of the base repository's own
+  // owner), so a page cut can never hide the same-repo PR behind newer fork PRs; the head repo is still re-checked below.
   const r = await execImpl(
-    ['gh', 'pr', 'list', '--repo', `github.com/${m[1]}/${m[2]}`, '--head', branch!, '--state', 'open', '--json', 'url,headRefName,isCrossRepository', '--limit', '100'],
+    ['gh', 'api', '--hostname', 'github.com', '-X', 'GET', `repos/${m[1]}/${m[2]}/pulls`, '-f', `head=${m[1]}:${branch}`, '-f', 'state=open', '-f', 'per_page=100'],
     { cwd: path, env },
   )
   if (r.code !== 0) return { exit_code: 1, error: 'gh_pr_list_failed' }
-  let rows: Array<{ url?: unknown; headRefName?: unknown; isCrossRepository?: unknown }>
+  let rows: Array<{ html_url?: unknown; head?: { ref?: unknown; repo?: { full_name?: unknown } | null } | null }>
   try {
     rows = JSON.parse(r.out)
   } catch {
     return { exit_code: 1, error: 'gh_output_unparseable' }
   }
   if (!Array.isArray(rows)) return { exit_code: 1, error: 'gh_output_unparseable' }
-  const hit = rows.find((x) => x.headRefName === branch && x.isCrossRepository === false && typeof x.url === 'string')
-  return { exit_code: 0, snippet: JSON.stringify({ pr_url: hit ? (hit.url as string) : null }) }
+  const want = `${m[1]}/${m[2]}`.toLowerCase()
+  const hit = rows.find(
+    (x) => x.head?.ref === branch && typeof x.head?.repo?.full_name === 'string' && x.head.repo.full_name.toLowerCase() === want && typeof x.html_url === 'string',
+  )
+  return { exit_code: 0, snippet: JSON.stringify({ pr_url: hit ? (hit.html_url as string) : null }) }
 }

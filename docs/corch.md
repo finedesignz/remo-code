@@ -427,9 +427,10 @@ rather than "let through"; the human PTY paths are untouched. No hub source, sch
   branch (never guessed), then `git worktree add <root>/corch/<name>-<work_item_id> -b corch/<work_item_id> origin/<default>`.
   Idempotent (an existing worktree on that branch is reused; a kept branch is re-attached). Identifiers are validated and the
   paths pass `assertTargetWithinRoots`, so traversal is refused before git runs. Reply: path, branch, default branch.
-- `worktree_remove`: on done and cancelled only (blocked keeps the worktree for inspection). Idempotent.
-- `pr_lookup [path, branch]`: `gh pr list --head corch/<id> --state open` with the worker credential; an open SAME-repo PR
-  (never a fork) returns its url. Replies carry only paths, branch names, PR urls or an error code, never gh/git output.
+- `worktree_remove`: on done and cancelled only (blocked keeps the worktree for inspection). Idempotent. The hub targets only the supervisor recorded on the run (`corch_runs.supervisor_id`, persisted BEFORE `worktree_ensure`; every host recorded by any run of the item is cleaned, and launch is pinned to the recorded host); a failed removal is logged, best effort, with no automatic retry; a run with no recorded host is never guessed from the account's current binding.
+- `pr_lookup [path, branch]`: `gh api repos/<o>/<r>/pulls` with `head=<o>:corch/<id>`, `state=open`, `--hostname github.com` and the worker
+  credential (the head filter is server-side, so newer fork PRs cannot hide the match past a page cut); an open SAME-repo PR
+  (head repo re-checked, never a fork) returns its url. Replies carry only paths, branch names, PR urls or an error code, never gh/git output.
 
 **Hub (`workspace.ts`).** `resolve` runs: pick and record the quota account and slot supervisor, take the memlog claim,
 `worktree_ensure`, then find or create the `sessions` row for the path (hostname = the slot supervisor). A refusal

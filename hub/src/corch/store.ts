@@ -198,6 +198,8 @@ export interface CorchStore {
   runContext(runId: string): Promise<RunContext | null>
   /** CORCH-09: the most recent run of a work item that HAS a worktree (else the most recent run) with its repo_ident, for worktree removal and the memlog release. */
   latestRunForItem(userId: string, itemId: string): Promise<(CorchRun & { repo_ident: string }) | null>
+  /** CORCH-09: every host a run of this item recorded before creating a worktree (removal must reach each of them). */
+  workspaceHostsForItem(userId: string, itemId: string): Promise<string[]>
   /** CORCH-09: items waiting on their PR (pr_open): their memlog claim is heartbeated until the item is done/blocked. */
   prOpenItems?(limit: number, afterId?: string | null): Promise<Array<{ id: string; user_id: string; repo_ident: string }>>
   /** Live (not ended) runs for the user, excluding one run (the request's own). */
@@ -206,6 +208,8 @@ export interface CorchStore {
   projectTokensToday(projectId: string, tz: string): Promise<number>
   /** Record the hosting supervisor once the governed launch succeeded (run stays `launching`). */
   markRunLaunched(runId: string, supervisorId: string): Promise<boolean>
+  /** CORCH-09: record the host before a worktree is created on it (no heartbeat change). */
+  recordRunSupervisor(runId: string, supervisorId: string): Promise<boolean>
   /** The turn was actually sent: status running, heartbeat now (no-op once the run ended). */
   markRunRunning(runId: string): Promise<boolean>
   /** Earliest not_before in the future over queued items of enabled projects, or null. */
@@ -601,6 +605,13 @@ export const corchStore: CorchStore = {
     return r.length > 0
   },
 
+  async recordRunSupervisor(runId, supervisorId) {
+    const r = await sql`
+      UPDATE corch_runs SET supervisor_id = ${supervisorId}
+      WHERE id = ${runId} AND ended_at IS NULL RETURNING id`
+    return r.length > 0
+  },
+
   async markRunRunning(runId) {
     const r = await sql`
       UPDATE corch_runs SET status = 'running', heartbeat_at = now()
@@ -645,6 +656,13 @@ export const corchStore: CorchStore = {
       ORDER BY (r.worktree_path IS NULL) ASC, r.started_at DESC, r.id DESC
       LIMIT 1`
     return rows[0] ?? null
+  },
+
+  async workspaceHostsForItem(userId, itemId) {
+    const rows = await sql<{ supervisor_id: string }[]>`
+      SELECT DISTINCT supervisor_id FROM corch_runs
+      WHERE work_item_id = ${itemId} AND user_id = ${userId} AND supervisor_id IS NOT NULL`
+    return rows.map((r) => r.supervisor_id)
   },
 
   async prOpenItems(limit, afterId = null) {

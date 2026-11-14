@@ -623,9 +623,12 @@ export function createCorchDispatcher(deps: CorchDeps) {
         resolveTarget: supervisorFor
           ? async () => {
               try {
-                const accountId = (await deps.store.runContext(run.id))?.run.account_slot ?? null
+                const recorded = (await deps.store.runContext(run.id))?.run
+                const accountId = recorded?.account_slot ?? null
                 const supervisorId = accountId ? await supervisorFor(userId, accountId) : null
                 if (!accountId || !supervisorId) return { ok: false as const, reason: UNBOUND }
+                // CORCH-09: the worktree host was recorded before worktree_ensure; launching anywhere else would strand it.
+                if (recorded?.supervisor_id && recorded.supervisor_id !== supervisorId) return { ok: false as const, reason: UNBOUND }
                 // QC2 G3: re-read the target's CURRENT advertised account (null = not connected) and require it to be
                 // the run's recorded account, so a reconnect advertising another account is never launched on.
                 const current = await deps.quota.supervisorAccountSlot?.(userId, supervisorId)
