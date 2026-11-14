@@ -89,17 +89,23 @@ export const quotaStore = {
   /**
    * Record the chosen account on the run: ONE conditional UPDATE that only sets account_slot when it is NULL,
    * the run is live and owned by the user, and the account's other live runs are below `capacity`.
+   * F4: serialized per (user_id, account_id) by a transaction-scoped advisory lock taken before the count, so two
+   * claims for different runs cannot both observe an empty account (READ COMMITTED write skew). The count + UPDATE
+   * statement runs after the lock is held and therefore sees every earlier committed claim.
    * false = 0 rows updated.
    */
   async claimAccountSlot(runId: string, userId: string, accountId: string, capacity: number): Promise<boolean> {
-    const rows = await sql<{ id: string }[]>`
-      UPDATE corch_runs SET account_slot = ${accountId}
-      WHERE id = ${runId} AND user_id = ${userId} AND account_slot IS NULL AND ended_at IS NULL
-        AND (SELECT count(*) FROM corch_runs o
-             WHERE o.user_id = ${userId} AND o.account_slot = ${accountId} AND o.ended_at IS NULL AND o.id <> ${runId})
-            < ${capacity}::int
-      RETURNING id`
-    return rows.length > 0
+    return sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(hashtext(${userId}::text || ':' || ${accountId}::text))`
+      const rows = await tx<{ id: string }[]>`
+        UPDATE corch_runs SET account_slot = ${accountId}
+        WHERE id = ${runId} AND user_id = ${userId} AND account_slot IS NULL AND ended_at IS NULL
+          AND (SELECT count(*) FROM corch_runs o
+               WHERE o.user_id = ${userId} AND o.account_slot = ${accountId} AND o.ended_at IS NULL AND o.id <> ${runId})
+              < ${capacity}::int
+        RETURNING id`
+      return rows.length > 0
+    })
   },
 
   /**

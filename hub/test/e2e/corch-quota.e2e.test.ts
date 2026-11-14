@@ -237,6 +237,41 @@ maybe('CORCH-02 e2e - quota ingest on real Postgres', () => {
     expect(await quotaStore.claimAccountSlot(runs[1]!.runId, u.userId, 'n1', 2)).toBe(false) // already set
   })
 
+  test('F4: claimAccountSlot waits on the per-(user, account) advisory lock (serialized, not a racy count)', async () => {
+    const u = await newUser()
+    await post(snapshot([acct('lk', { five_h_pct: null, seven_d_pct: 10 })]), u.publish)
+    const { runs } = await fixture(u.userId, 1)
+    const { quotaStore } = await provider([])
+    let release!: () => void
+    const held = new Promise<void>((r) => (release = r))
+    let locked!: () => void
+    const lockTaken = new Promise<void>((r) => (locked = r))
+    const holder = h.sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(hashtext(${u.userId}::text || ':' || ${'lk'}::text))`
+      locked()
+      await held
+    })
+    await lockTaken
+    let settled = false
+    const claim = quotaStore.claimAccountSlot(runs[0]!.runId, u.userId, 'lk', 1).then((v) => ((settled = true), v))
+    await new Promise((r) => setTimeout(r, 300))
+    expect(settled).toBe(false) // blocked behind the lock
+    release()
+    await holder
+    expect(await claim).toBe(true)
+  })
+
+  test('F4: concurrent claims by different runs on a null-5h account: exactly one wins (capacity 1)', async () => {
+    const u = await newUser()
+    await post(snapshot([acct('race', { five_h_pct: null, seven_d_pct: 10 })]), u.publish)
+    const { runs } = await fixture(u.userId, 5)
+    const { quotaStore } = await provider([])
+    const results = await Promise.all(runs.map((r) => quotaStore.claimAccountSlot(r.runId, u.userId, 'race', 1)))
+    expect(results.filter(Boolean).length).toBe(1)
+    const held = await h.sql`SELECT count(*)::int AS n FROM corch_runs WHERE user_id = ${u.userId} AND account_slot = 'race'`
+    expect(held[0]!.n).toBe(1)
+  })
+
   test('a quota refusal through endRunAndRequeue {at}: queued, wait_reason quota:<reason>, attempts unchanged, not_before = instant', async () => {
     const u = await newUser()
     const { corchStore, runs } = await fixture(u.userId, 1)
