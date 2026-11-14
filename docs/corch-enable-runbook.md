@@ -85,10 +85,12 @@ events and rows.
 ## Item 5 - AAF provisioning key and hub AAF env
 
 - Create an AAF key with `projects:write`. Set hub `REMO_CORCH_AAF_URL`, `REMO_CORCH_AAF_TOKEN` and
-  `REMO_CORCH_AAF_INSTALLATION_ID`. Then, for projects enrolled BEFORE this step, run the one-shot backfill
-  `bun hub/scripts/corch-provision-existing.ts` (idempotent). New enrollments provision on enrollment.
-- Enroll ONLY the throwaway repo now (`POST /api/corch/projects`, cookie auth). With `REMO_CORCH_ENABLED` OFF the
-  route only stores the row, so enrollment is safe before item 9 and lets the provisioning check below run.
+  `REMO_CORCH_AAF_INSTALLATION_ID`.
+- Enroll ONLY the throwaway repo (`POST /api/corch/projects`, cookie auth). With `REMO_CORCH_ENABLED` OFF the route
+  stores the row and skips provisioning, so enrollment is safe before item 9 but leaves the project
+  `aaf_unprovisioned`.
+- Then run the one-shot backfill `bun hub/scripts/corch-provision-existing.ts` (idempotent, independent of the
+  flag). Once the flag is ON, new enrollments provision on enrollment.
 - Verify: `corch_projects.aaf_provision_status = 'provisioned'` for the throwaway project; only provisioned
   projects are dispatchable (fail closed).
 - Rollback: unset the three variables; unprovisioned projects stay queued and dispatch nothing.
@@ -117,7 +119,7 @@ events and rows.
 - One Coolify application per account slot from `Dockerfile.slot` (details: [corch-linux-slots.md](corch-linux-slots.md)).
   Runtime env per slot: `REMO_ACCOUNT_SLOT`, `REMO_HUB_URL`, `REMO_API_KEY` (this slot's own `purpose='host'` key via
   `POST /api/api-keys {host:true}`), `CLAUDE_CODE_OAUTH_TOKEN` (exactly one account, subscription OAuth, never an API
-  key), `GH_TOKEN` (item 7). **Do NOT set `REMO_ALLOW_DANGEROUS`** (see A8 below): slots run under the per-slot
+  key), `GH_TOKEN` (item 7). **Do NOT set `REMO_ALLOW_DANGEROUS` (to any value)** (see A8 below): slots run under the per-slot
   permission allowlist, never `--dangerously-skip-permissions`.
 - Verify: `GET /api/supervisors` lists the host `online: true` with `account_slot` equal to `REMO_ACCOUNT_SLOT`;
   `docker exec <c> id -u` is not 0; `docker history --no-trunc <image>` shows no token.
@@ -179,7 +181,7 @@ Static evidence (code, no live access), gathered in CORCH-12:
   `Bash(sudo:*)`. An operator-edited file is never overwritten.
 - The hub launches machine sessions with `skipPermissions: false` (`hub/src/dispatch/governed-launch.ts`, HEAL
   policy), and the supervisor honors `dangerously_skip_permissions` only when `allow_dangerous_skip_permissions` is
-  true in its config, which `tools/cloud-session/write-config.ts` sets only from `REMO_ALLOW_DANGEROUS=1` (not set
+  true in its config, which `tools/cloud-session/write-config.ts` sets only from `REMO_ALLOW_DANGEROUS` set to `1` (not set
   by the slot image).
 - Therefore a slot runs under the allowlist with no silent bypass.
 
