@@ -53,6 +53,8 @@ export interface AafEventDeps {
   notifyFailed: (userId: string, workItemId: string) => Promise<boolean>
   /** One dispatch evaluation for the owner (a no-op while the CORCH flag is OFF). */
   evaluate: (userId: string) => Promise<void>
+  /** CORCH-11: push the owner's queue over WS after a transition (optional; never throws). */
+  publishQueue?: (userId: string) => void
 }
 
 const REAL_DEPS: AafEventDeps = {
@@ -83,6 +85,7 @@ const REAL_DEPS: AafEventDeps = {
   evaluate: async (userId) => (await import('./dispatcher.ts')).evaluateUserNow(userId),
   cancelRunSends: async (runIds) => (await import('./dispatcher.ts')).cancelRunSendsNow(runIds),
   releaseItem: async (a) => (await import('./dispatcher.ts')).releaseWorkItemNow(a),
+  publishQueue: (userId) => void import('./queue-view.ts').then((m) => m.publishCorchQueue(userId)).catch(() => {}),
 }
 
 export function createAafEventRoutes(deps: AafEventDeps = REAL_DEPS): Hono {
@@ -142,6 +145,7 @@ export function createAafEventRoutes(deps: AafEventDeps = REAL_DEPS): Hono {
 
       // CORCH-09: the item is terminal (done: PR merged; blocked: PR closed or failed). Remove the worktree (never on
       // blocked) and release the memlog claim. Best effort and AFTER the cancel above; a failure never changes the answer.
+      if (result.kind === 'transitioned') deps.publishQueue?.(result.userId)
       if (result.kind === 'transitioned') {
         await Promise.resolve(deps.releaseItem?.({ userId: result.userId, itemId: result.workItemId, status: result.to }))
           .catch((err) => console.warn(`[corch] aaf release failed item=${result.workItemId}: ${err?.name ?? 'error'}`))

@@ -88,6 +88,8 @@ import { dispatchToSession } from "../telegram/dispatch.ts";
 import { captureApprovalReply } from "../scheduler/post-run/propose-notify.ts";
 import { runDoctor, bufferReplay, hasBufferedReplay } from "../telegram/doctor.ts";
 import { runStatus } from "../telegram/status.ts";
+import { renderQueueSummary } from "../corch/queue-telegram.ts";
+import { buildQueueSnapshot, realQueueViewDeps } from "../corch/queue-view.ts";
 
 export const telegramWebhookRoutes = new Hono();
 
@@ -1128,6 +1130,16 @@ telegramWebhookRoutes.post("/webhook/:secret", async (c) => {
         case "status": {
           const r = await runStatus({ user, chatId });
           return c.json({ ok: true, outcome: r.outcome });
+        }
+        case "queue": {
+          // CORCH-11: read-only; the same read model as GET /api/corch/queue.
+          try {
+            await safeSend(chatId, renderQueueSummary(await buildQueueSnapshot(await realQueueViewDeps(), user.id)));
+          } catch (err: any) {
+            console.warn("[telegram-webhook] /queue failed:", err?.message);
+            await safeSend(chatId, "Queue unavailable right now.");
+          }
+          return c.json({ ok: true, outcome: "cmd_queue" });
         }
         case "stop": {
           const r = await handleStopCommand(user, chatId);

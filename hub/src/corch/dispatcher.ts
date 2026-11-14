@@ -134,6 +134,8 @@ export interface CorchDeps {
   timers: CorchTimers
   /** Injectable clock for the quota-death backoff (default: the system clock). */
   now?: () => Date
+  /** CORCH-11: push the owner's queue over WS after a transition (optional; must never throw into the dispatcher). */
+  publishQueue?: (userId: string) => void
 }
 
 /** Hooks the dispatcher wires into the pipeline for one run (filled by the launch path). */
@@ -710,6 +712,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
   /** Stalled once: the owner is told only when this call changed the row. */
   async function stallRun(run: LiveRun): Promise<void> {
     if (!(await deps.store.markStalled(run.id))) return
+    deps.publishQueue?.(run.user_id)
     await notifyOwner('stalled', liveRunCtx(run), run.item_attempts, 'no_fresh_inventory')
   }
 
@@ -774,6 +777,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
         }
       }
     } finally {
+      deps.publishQueue?.(userId) // CORCH-11: claims, launches and run ends all pass through here
       await armNotBeforeTimer() // an aborted evaluation must still leave the earliest wakeup armed
     }
     return { kind: 'done', claimed }
@@ -974,6 +978,7 @@ export async function realCorchDeps(): Promise<CorchDeps> {
       isOnline: (supervisorId) => registry.isSupervisorOnline(supervisorId),
     },
     timers: REAL_TIMERS,
+    publishQueue: (userId) => void import('./queue-view.ts').then((m) => m.publishCorchQueue(userId)).catch(() => {}),
   }
 }
 
