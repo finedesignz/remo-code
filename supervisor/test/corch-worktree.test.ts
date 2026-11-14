@@ -162,6 +162,7 @@ describe('QC2 hardening', () => {
   test('pr_lookup pins the repository (--repo) and ignores an inherited GH_REPO', async () => {
     const prev = process.env.GH_REPO
     process.env.GH_REPO = 'evil/other'
+    process.env.GH_HOST = 'ghe.example.com'
     let env: NodeJS.ProcessEnv | undefined
     let cmd: string[] = []
     __setCorchWorktreeForTest({ exec: async (c, o) => ((cmd = c), (env = o.env), { code: 0, out: '[]' }) })
@@ -171,9 +172,12 @@ describe('QC2 hardening', () => {
       __setCorchWorktreeForTest({ exec: null })
       if (prev === undefined) delete process.env.GH_REPO
       else process.env.GH_REPO = prev
+      delete process.env.GH_HOST
     }
-    expect(cmd.join(' ')).toContain('--repo acme/widget')
+    expect(cmd.join(' ')).toContain('--repo github.com/acme/widget')
     expect(env!.GH_REPO).toBeUndefined()
+    expect(env!.GH_HOST).toBeUndefined()
+    expect(cmd).toContain('100') // fork PRs sharing the branch name cannot hide the same-repo PR
     expect((await runCorchPrLookup([join(root, 'corch', 'widget-item-1'), 'corch/item-1', 'path:///x'])).error).toBe('invalid_args')
   })
 })
@@ -212,7 +216,7 @@ describe('corch.pr_lookup (fake gh)', () => {
     expect(JSON.parse(r.snippet!)).toEqual({ pr_url: 'https://github.com/acme/widget/pull/7' })
     expect(seen.cmd!.slice(0, 3)).toEqual(['gh', 'pr', 'list'])
     expect(seen.cmd).toContain('--head')
-    expect(seen.cmd!.join(' ')).toContain('--repo acme/widget')
+    expect(seen.cmd!.join(' ')).toContain('--repo github.com/acme/widget')
     expect(seen.cmd).toContain('open')
   })
 

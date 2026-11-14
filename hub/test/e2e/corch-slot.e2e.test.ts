@@ -318,6 +318,9 @@ maybe('CORCH-09 e2e - slot worktree, memlog claim and PR lookup on real Postgres
     expect((await itemRow(a.item.id)).status).toBe('blocked')
     expect(w.events.some((e) => e.startsWith('memlog.release'))).toBe(false)
     expect(w.launches.length).toBe(0)
+    // QC3: a later cancellation must not bypass the fence either (no claim release, no worktree removal)
+    await d.releaseItem(userId, a.item.id, 'cancelled')
+    expect(w.events.some((e) => e.startsWith('memlog.release') || e.includes('worktree_remove'))).toBe(false)
   })
 
   test('blocked item releases the claim but keeps the worktree', async () => {

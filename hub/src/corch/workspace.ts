@@ -182,9 +182,14 @@ export function createWorkspace(deps: WorkspaceDeps): CorchWorkspace {
       }
       if (!run) return
       const ident = parseRepoIdent(run.repo_ident)
-      if ((a.status === 'done' || a.status === 'cancelled') && run.supervisor_id && run.worktree_path) {
+      // The supervisor id is only persisted after a successful launch, so a run whose launch was refused after the worktree
+      // was created still resolves its host through the account it was bound to. Removal is idempotent on the supervisor
+      // (`removed: false` when nothing exists), so no worktree_path is required to attempt it.
+      const supId =
+        run.supervisor_id ?? (run.account_slot && deps.quota.supervisorFor ? await deps.quota.supervisorFor(a.userId, run.account_slot).catch(() => null) : null)
+      if ((a.status === 'done' || a.status === 'cancelled') && supId) {
         try {
-          const r = await send(a.userId, run.supervisor_id, 'corch.worktree_remove', [run.repo_ident, a.itemId])
+          const r = await send(a.userId, supId, 'corch.worktree_remove', [run.repo_ident, a.itemId])
           if ('refused' in r || r.exit_code !== 0) log(`worktree remove not done item=${a.itemId}: ${'refused' in r ? r.refused : (r.error ?? 'error')}`)
         } catch (err) {
           log(`worktree remove threw item=${a.itemId}: ${(err as Error)?.message ?? err}`)
