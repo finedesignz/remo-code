@@ -37,6 +37,8 @@ export interface RouteDeps {
   queue(userId: string): Promise<QueueSnapshot>
   /** CORCH-11: push the user's queue over WS after a mutation. Never throws; never awaited in the response path. */
   publish(userId: string): void
+  /** CORCH-11: a cancelled item is terminal: remove its kept worktree and release its memlog claim (a no-op with the flag OFF). */
+  releaseCancelled?(a: { userId: string; itemId: string }): Promise<void>
 }
 
 const REAL_ROUTE_DEPS: RouteDeps = {
@@ -47,6 +49,7 @@ const REAL_ROUTE_DEPS: RouteDeps = {
   provision: async (project) => (corchEnabled() ? provisionProject(corchStore, project) : project),
   queue: async (userId) => buildQueueSnapshot(await realQueueViewDeps(), userId),
   publish: (userId) => void publishCorchQueue(userId),
+  releaseCancelled: async (a) => (await import('./dispatcher.ts')).releaseWorkItemNow({ ...a, status: 'cancelled' }),
 }
 
 /** Fire-and-forget evaluate trigger. Never awaited in the response path; never touches the DB when OFF. */
@@ -125,7 +128,7 @@ export function createCorchRoutes(deps: RouteDeps = REAL_ROUTE_DEPS): Hono<Env> 
     // CORCH-08: enrolling calls AAF provision. It never throws and never blocks enrollment: any failure (or unset
     // env) leaves the project aaf_unprovisioned (not dispatchable).
     const project = await deps.provision(r.project).catch(() => r.project)
-    if (r.created) deps.publish(userId)
+    deps.publish(userId) // created, or an existing project whose provisioning just succeeded on retry
     return c.json({ project, created: r.created }, r.created ? 201 : 200)
   })
 
@@ -250,6 +253,10 @@ export function createCorchRoutes(deps: RouteDeps = REAL_ROUTE_DEPS): Hono<Env> 
     if (r.kind === 'not_found') return c.json({ error: 'item_not_found' }, 404)
     if (r.kind === 'not_queued') return c.json({ error: 'not_cancellable', status: r.status }, 409)
     deps.publish(userId)
+    // Same terminal cleanup the gsd-console cancel path performs (worktree removal, claim release). Never blocks the answer.
+    void Promise.resolve(deps.releaseCancelled?.({ userId, itemId: id })).catch((err) =>
+      console.warn(`[corch] cancel release failed item=${id}: ${err?.message ?? err}`),
+    )
     return c.json({ item: r.item })
   })
 

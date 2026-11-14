@@ -80,7 +80,7 @@ export function useCorchQueue(token: string, subscribe: Subscribe, connectionId:
   // A fetched snapshot never replaces a newer one.
   const load = useCallback(() => {
     hubFetch<CorchQueue>(token, '/api/corch/queue')
-      .then((q) => setQueue((cur) => (cur && cur.generated_at > q.generated_at ? cur : q)))
+      .then((q) => setQueue((cur) => (cur && cur.generated_at >= q.generated_at ? cur : q)))
       .catch((e: any) => setError(e?.message || 'Failed to load queue'))
   }, [token])
 
