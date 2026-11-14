@@ -69,7 +69,7 @@ function project(id: string, userId: string, ident: string, priority = 5) {
 
 type Make = () => Response | Promise<Response>
 
-function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<string, Make>; applyThrows?: boolean; applyGate?: Promise<void>; enqueuedGate?: Promise<void>; listThrows?: number; listGate?: Promise<void>; notifyThrows?: number; reach?: (u: string[]) => string[]; ticketThrows?: boolean } = {}) {
+function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<string, Make>; applyThrows?: boolean; applyGate?: Promise<void>; enqueuedGate?: Promise<void>; listThrows?: number; listGate?: Promise<void>; notifyThrows?: number; reach?: (u: string[]) => string[]; ticketThrows?: boolean; ticketFails?: number } = {}) {
   const log = {
     fetches: [] as string[],
     auth: [] as string[],
@@ -141,9 +141,14 @@ function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<st
       log.outages.push({ userIds: o.userIds, signature: o.signature })
       return (opts.reach ? opts.reach(o.userIds) : o.userIds)
     },
-    reportTicket: (sig) => {
+    reportTicket: async (sig) => {
       log.tickets.push(sig)
       if (opts.ticketThrows) throw new Error('ticket down')
+      if ((opts.ticketFails ?? 0) > 0) {
+        opts.ticketFails!--
+        return false
+      }
+      return true
     },
     onEnqueued: async (u) => {
       log.enqueued.push(u)
@@ -848,11 +853,59 @@ describe('review hardening (QC round 9)', () => {
     await flush()
     h.reconnects().at(-1)!.fn()
     await flush()
-    expect(h.log.tickets).toEqual(['http_5xx'])
+    expect(h.log.tickets).toEqual(['http_5xx', 'http_5xx']) // a throwing ticket is retried, never affects ingestion
     h.reconnects().at(-1)!.fn()
     await flush()
-    expect(h.log.tickets).toEqual(['http_5xx', 'http_401'])
+    expect(h.log.tickets).toEqual(['http_5xx', 'http_5xx', 'http_401'])
     expect(h.log.upserts).toEqual([])
+    h.ingest.stop()
+  })
+})
+
+describe('review hardening (QC round 10)', () => {
+  test('a failed ticket is retried on the next failure; once delivered, no more tickets for that signature this outage', async () => {
+    const h = harness({
+      projects: [project('pa', 'u1', 'github://acme/app')],
+      streams: [() => json({}, 503), () => json({}, 503), () => json({}, 503)],
+      ticketFails: 1,
+    })
+    h.ingest.start()
+    await flush()
+    h.reconnects().at(-1)!.fn()
+    await flush()
+    h.reconnects().at(-1)!.fn()
+    await flush()
+    expect(h.log.tickets).toEqual(['http_5xx', 'http_5xx'])
+    h.ingest.stop()
+  })
+
+  test('a second outage with the same signature is ticketed again', async () => {
+    const h = harness({
+      projects: [project('pa', 'u1', 'github://acme/app')],
+      streams: [() => json({}, 503), () => sseResponse([frame('snapshot', { projects: [] })], { hold: false }), () => json({}, 503)],
+    })
+    h.ingest.start()
+    await flush()
+    h.reconnects().at(-1)!.fn()
+    await flush()
+    h.reconnects().at(-1)!.fn()
+    await flush()
+    expect(h.log.tickets.filter((t) => t === 'http_5xx').length).toBe(2)
+    h.ingest.stop()
+  })
+
+  test('partial config: an undelivered notice is retried on a backoff timer until delivered, then no more timers', async () => {
+    delete process.env.REMO_CORCH_GSDC_TOKEN
+    const h = harness({ projects: [project('a', 'u1', 'github://acme/app')], notifyThrows: 1 })
+    h.ingest.start()
+    await flush()
+    expect(h.log.outages).toEqual([])
+    expect(h.reconnects().length).toBe(1)
+    h.reconnects().at(-1)!.fn()
+    await flush()
+    expect(h.log.outages).toEqual([{ userIds: ['u1'], signature: 'token_unset' }])
+    expect(h.timers.length).toBe(1) // only the first retry timer: nothing re-armed after delivery
+    expect(h.log.fetches).toEqual([])
     h.ingest.stop()
   })
 })

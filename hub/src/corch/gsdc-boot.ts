@@ -29,18 +29,23 @@ async function notifyOutage(o: GsdcOutage): Promise<string[]> {
   return reached
 }
 
-/** One 7d ticket per signature (deduped per outage by the ingest). Never throws; sends nothing when AAF is unconfigured. */
-export function reportTicket(signature: string): void {
-  void import('../agentautofix/reporter.ts')
-    .then(({ reportSelfErrorToAgentautofix }) =>
-      reportSelfErrorToAgentautofix({
-        fingerprint: `corch-gsdc:${signature}`,
-        errorType: 'CorchGsdcSourceFailure',
-        errorValue: `gsd-console ingest failure signature: ${signature}`,
-        source: 'corch-gsdc',
-      }),
-    )
-    .catch(() => {})
+/**
+ * One 7d ticket per signature (deduped per outage by the ingest). True only on a positive delivery, so the ingest
+ * retries a failed one. Immediate (non-aggregated, no hourly throttle) so a second outage with the same signature
+ * is still ticketed. Never throws; sends nothing and returns false when AgentAutofix is unconfigured.
+ */
+export async function reportTicket(signature: string): Promise<boolean> {
+  try {
+    const { reportTriageFindingToAgentautofix } = await import('../agentautofix/reporter.ts')
+    return await reportTriageFindingToAgentautofix({
+      fingerprint: `corch-gsdc:${signature}`,
+      errorType: 'CorchGsdcSourceFailure',
+      errorValue: `gsd-console ingest failure signature: ${signature}`,
+      source: 'corch-gsdc',
+    })
+  } catch {
+    return false
+  }
 }
 
 let current: ReturnType<typeof createGsdcIngest> | null = null

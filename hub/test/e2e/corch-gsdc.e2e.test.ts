@@ -122,7 +122,7 @@ maybe('CORCH-04 e2e - gsd-console ingest on real Postgres', () => {
           return new Response(JSON.stringify(board(cols)), { status: 200 })
         },
         timers: { setTimeout: (fn) => (timers.push(fn), fn), clearTimeout: () => {} },
-        notifyOutage: async (o) => void outages.push(o.signature),
+        notifyOutage: async (o) => (outages.push(o.signature), o.userIds),
         onEnqueued: async () => {},
       })
       ingest.start()

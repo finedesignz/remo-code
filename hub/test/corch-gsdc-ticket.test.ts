@@ -11,8 +11,7 @@ describe('CORCH-04 ticket adapter', () => {
       return new Response('{}')
     }) as any
     try {
-      expect(() => reportTicket('http_5xx')).not.toThrow()
-      await new Promise((r) => setTimeout(r, 50))
+      expect(await reportTicket('http_5xx')).toBe(false)
       expect(calls).toBe(0)
     } finally {
       globalThis.fetch = real
