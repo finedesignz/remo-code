@@ -8,6 +8,7 @@
  */
 import type { ReactNode } from 'react'
 import { Tooltip } from './ui/Tooltip'
+import { useWebSocketContext } from '../hooks/useWebSocket'
 import { useCorchQueue, type CorchQueue, type CorchQueueActions, type CorchQueueItem } from '../hooks/useCorchQueue'
 
 const shortRepo = (r: string) => r.replace(/^github:\/\//, '')
@@ -167,12 +168,8 @@ export function CorchQueueView({ queue, error, actions }: { queue: CorchQueue | 
   )
 }
 
-interface Props {
-  token: string
-  subscribe: (handler: (msg: any) => void) => () => void
-}
-
-export function CorchQueuePanel({ token, subscribe }: Props) {
-  const { queue, error, actions } = useCorchQueue(token, subscribe)
+export function CorchQueuePanel({ token }: { token: string }) {
+  const { subscribe, connectionId } = useWebSocketContext()
+  const { queue, error, actions } = useCorchQueue(token, subscribe, connectionId)
   return <CorchQueueView queue={queue} error={error} actions={actions} />
 }

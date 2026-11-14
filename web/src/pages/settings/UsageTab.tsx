@@ -76,7 +76,7 @@ export function UsageTab({ token, profile, onUpdateProfile, subscribe }: Props) 
       <CostCards summary={summary} error={error} />
       <LimitsCard summary={summary} />
       <ProgrammaticCreditCard summary={summary} />
-      <CorchQueuePanel token={token} subscribe={subscribe} />
+      <CorchQueuePanel token={token} />
       <ControlsCard
         token={token}
         profile={profile}

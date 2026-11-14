@@ -93,12 +93,13 @@ describe('no client polling', () => {
       expect(src).not.toMatch(/setInterval|setTimeout|requestAnimationFrame/)
     }
   })
-  test('the hook reads once on mount and once per authenticated reconnect (auth_ok), otherwise only the WS event', () => {
+  test('the hook reads once on mount and again only when connectionId bumps (authenticated reconnect), otherwise only the WS event', () => {
     const src = readFileSync(join(import.meta.dir, '../src/hooks/useCorchQueue.ts'), 'utf8')
-    expect((src.match(/'\/api\/corch\/queue'/g) ?? []).length).toBe(1) // one load(), called from two event sites
-    expect((src.match(/load\(\)/g) ?? []).length).toBe(2)
-    expect(src).toContain("'auth_ok'")
+    expect((src.match(/'\/api\/corch\/queue'/g) ?? []).length).toBe(1)
+    expect(src).toMatch(/\[load, connectionId\]/)
     expect(src).toContain("'corch_queue'")
     expect(src).toContain('subscribe(')
+    const panel = readFileSync(join(import.meta.dir, '../src/components/CorchQueuePanel.tsx'), 'utf8')
+    expect(panel).toContain('connectionId')
   })
 })
