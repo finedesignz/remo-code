@@ -748,6 +748,55 @@ describe('QC round 1 - Claude MED 1: a throw in launch never leaves a live run',
   })
 })
 
+describe('QC round 2 - R2-1: reclaim is serialized with the send', () => {
+  const mkBase = (log: string[]) => ({
+    getChannel: async () => ({ ws: { send: (d: string) => void log.push(`send:${d}`) } }),
+    insertMessage: async () => (log.push('insert'), { id: 'm1', created_at: 'now' }),
+    broadcastToSubscribers: () => {},
+  })
+
+  test('guardSendDeps: cancel while the channel lookup is in flight stops before the insert and the socket write', async () => {
+    const log: string[] = []
+    let live = true
+    const base = mkBase(log)
+    const slow = { ...base, getChannel: async (s: string) => (await Promise.resolve(), (live = false), base.getChannel()) }
+    const { sendUserMessage } = await import('../src/heal/sinks/shared.ts')
+    const { guardSendDeps } = await import('../src/corch/dispatcher.ts')
+    const guard = { assertLive: () => { if (!live) throw new Error('corch_run_not_live') } }
+    await expect(sendUserMessage({ userId: 'u1', sessionId: 's1', token: TOKEN, prompt: 'p' } as any, { storedContent: 'p' }, guardSendDeps(guard, slow as any))).rejects.toThrow('corch_run_not_live')
+    expect(log).toEqual([])
+  })
+
+  test('guardSendDeps: cancel while the insert is in flight stops the socket write', async () => {
+    const log: string[] = []
+    let live = true
+    const base = mkBase(log)
+    const slow = { ...base, insertMessage: async () => (await Promise.resolve(), (live = false), base.insertMessage()) }
+    const { sendUserMessage } = await import('../src/heal/sinks/shared.ts')
+    const { guardSendDeps } = await import('../src/corch/dispatcher.ts')
+    const guard = { assertLive: () => { if (!live) throw new Error('corch_run_not_live') } }
+    await expect(sendUserMessage({ userId: 'u1', sessionId: 's1', token: TOKEN, prompt: 'p' } as any, { storedContent: 'p' }, guardSendDeps(guard, slow as any))).rejects.toThrow('corch_run_not_live')
+    expect(log).toEqual(['insert']) // the row was already written; nothing reached the socket
+  })
+
+  test('reclaimRun cancels the run send path synchronously; the token is gone once the run ended', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, deps } = mkWorld({ dispatchOutcome: { kind: 'parked_offline' } })
+    const sent: string[] = []
+    deps.pipeline.send = async (_r: any, guard: any) => (guard.assertLive(), void sent.push('x'))
+    const d = createCorchDispatcher(deps)
+    await d.evaluateUser('u1')
+    const { req: r0, pdeps } = w.dispatched[0]!
+    await pdeps.send(r0) // live: reaches the seam
+    expect(sent.length).toBe(1)
+    const p = d.reclaimRun(liveRun({ id: 'run-1' }) as any, 'session_absent', true)
+    await expect(pdeps.send(r0)).rejects.toThrow('corch_run_not_live') // flipped before reclaim's first await
+    await p
+    await expect(pdeps.send(r0)).rejects.toThrow('corch_run_not_live')
+    expect(sent.length).toBe(1)
+  })
+})
+
 describe('QC round 1 - Claude MED 2: workspace/orphan failures are bounded', () => {
   test('workspace.resolve throwing consumes an attempt; the third blocks with ONE notification', async () => {
     process.env.REMO_CORCH_ENABLED = '1'

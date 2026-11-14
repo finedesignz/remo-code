@@ -10,6 +10,7 @@
 // end-of-run transition is idempotent and side effects run only when it changed a row (LD-9, LD-10).
 
 import type { AutospawnDeps } from '../heal/autospawn-deps.ts'
+import type { SendDeps } from '../heal/sinks/shared.ts'
 import type { DispatchOutcome, DispatchRequest, PipelineDeps, RunStore } from '../dispatch/pipeline.ts'
 import { governedLaunch } from '../dispatch/governed-launch.ts'
 import { automationKillSwitchGate, automationLifetimeCounterGate } from '../dispatch/automation-controls.ts'
@@ -50,12 +51,28 @@ export const DEFAULT_PR_LOOKUP: PrLookup = {
 /** The pipeline seams CORCH needs from the real hub (injected so tests fake them). */
 export interface PipelineSeams {
   isOnline: PipelineDeps['isOnline']
-  send: PipelineDeps['send']
+  /**
+   * The guard is the run's cancellation token. A send that awaits (channel lookup, message insert) MUST call
+   * `guard.assertLive()` synchronously immediately before each externally visible step (the row insert and the
+   * socket write); the real seam does it in `corchSend`.
+   */
+  send: (req: DispatchRequest, guard: SendGuard) => Promise<void>
   graceKey?: PipelineDeps['graceKey']
   finalizeTimeoutMs?: number
   /** Disarm the pipeline hook and free the dispatch slot of a run closed elsewhere (reclaim). */
   releaseByToken(token: string, reason: string): Promise<void>
 }
+
+/**
+ * Per-run in-memory cancellation token (hub is a single process). It flips to cancelled SYNCHRONOUSLY, before
+ * the first await of any path that ends the run (reclaim, refusal, failure, finalize), so a send already past
+ * its liveness checks cannot reach the socket afterwards. Throws `corch_run_not_live` once cancelled.
+ */
+export interface SendGuard {
+  assertLive(): void
+}
+
+const ALWAYS_LIVE: SendGuard = { assertLive: () => {} }
 
 /** What this hub process positively knows about one supervisor's (or one user's) live sessions. */
 export interface InventorySnapshot {
@@ -106,6 +123,8 @@ export interface CorchDeps {
 
 /** Hooks the dispatcher wires into the pipeline for one run (filled by the launch path). */
 export interface PipelineHooks {
+  /** The run's cancellation token (default: never cancelled, for callers that build a list without a run). */
+  guard?: SendGuard
   store: RunStore | null
   replay: PipelineDeps['replay']
   onParkExpire: NonNullable<PipelineDeps['onParkExpire']>
@@ -122,6 +141,7 @@ const NO_HOOKS: PipelineHooks = {
  * Order is binding: kill switch first, lifetime counter last.
  */
 export function buildCorchPipelineDeps(deps: CorchDeps, hooks: PipelineHooks = NO_HOOKS): PipelineDeps {
+  const guard = hooks.guard ?? ALWAYS_LIVE
   return {
     gates: [
       automationKillSwitchGate,
@@ -135,7 +155,10 @@ export function buildCorchPipelineDeps(deps: CorchDeps, hooks: PipelineHooks = N
     ],
     store: hooks.store,
     isOnline: (req) => deps.pipeline.isOnline(req),
-    send: (req) => deps.pipeline.send(req),
+    send: async (req) => {
+      guard.assertLive()
+      await deps.pipeline.send(req, guard)
+    },
     graceKey: deps.pipeline.graceKey,
     finalizeTimeoutMs: deps.pipeline.finalizeTimeoutMs,
     replay: hooks.replay,
@@ -232,6 +255,16 @@ export function createCorchDispatcher(deps: CorchDeps) {
   /** Items this process is currently launching (never reclaimed as orphans). */
   const inFlight = new Set<string>()
   let timer: unknown = null
+  /**
+   * Run ids that may still send. Added when a run's pipeline is built, removed SYNCHRONOUSLY by every path
+   * that ends the run, so it never holds more than the runs this process currently owns.
+   */
+  const sendable = new Set<string>()
+  const guardFor = (runId: string): SendGuard => ({
+    assertLive: () => {
+      if (!sendable.has(runId)) throw new Error('corch_run_not_live')
+    },
+  })
 
   async function notifyOwner(
     kind: CorchNotification['kind'],
@@ -268,6 +301,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
 
   /** No-attempt refusal (LD-7): the run ends, the item goes back to queued. */
   async function refuseRun(runId: string, userId: string, reason: string): Promise<EndResult> {
+    sendable.delete(runId) // before the first await
     const s = refusalSchedule(reason)
     const tz = s.notBefore === 'midnight' ? await deps.launch.tzForUser(userId) : 'UTC'
     const input: EndRequeueInput = {
@@ -288,6 +322,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
 
   /** Attempt-consuming failure (LD-8): bounded backoff, blocked at max_attempts, one notification. */
   async function endFailure(c: RunCtx, endReason: string, release: boolean): Promise<void> {
+    sendable.delete(c.runId) // before the first await
     const r = await deps.store.endRunAndRequeue(c.runId, {
       endReason,
       consumeAttempt: true,
@@ -308,6 +343,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
 
   /** Run end signal from the shared pipeline (the agent's next assistant_message). */
   async function handleRunEnd(c: RunCtx): Promise<void> {
+    sendable.delete(c.runId) // before the first await
     let pr: Awaited<ReturnType<PrLookup['lookup']>>
     try {
       pr = await deps.prLookup.lookup({ userId: c.userId, repoIdent: c.repoIdent, branch: c.branch, workItemId: c.itemId })
@@ -399,7 +435,9 @@ export function createCorchDispatcher(deps: CorchDeps) {
       inline: true,
       lifetime,
     }
+    sendable.add(run.id)
     const pdeps: PipelineDeps = buildCorchPipelineDeps(deps, {
+      guard: guardFor(run.id),
       store: runStoreFor(c),
       // A parked turn can be minutes stale: it re-enters dispatch() and is fully re-gated.
       // The run may have ended while parked (reclaim, park expiry, finish): a dead run never re-sends.
@@ -474,6 +512,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
    * own markFailed cannot end the run a second way.
    */
   async function reclaimRun(run: LiveRun, endReason: string, consumeAttempt: boolean): Promise<EndResult> {
+    sendable.delete(run.id) // cancel the send path BEFORE the first await (codex R2-1)
     const r = await deps.store.endRunAndRequeue(run.id, {
       endReason,
       consumeAttempt,
@@ -605,13 +644,46 @@ export type CorchDispatcher = ReturnType<typeof createCorchDispatcher>
 
 // ── Real dependencies + singleton (LD-2: dynamic imports only) ───────────────
 
+/**
+ * The send deps with the run's cancellation token checked synchronously immediately before each externally
+ * visible step: before the message row is persisted, and before the socket write (no await between
+ * `assertLive()` and `ws.send`). A reclaim that ends the run while the channel lookup or the insert is in
+ * flight therefore stops the turn. A row inserted before a later cancel stays (it is history, not a send).
+ */
+export function guardSendDeps(guard: SendGuard, base: SendDeps): SendDeps {
+  return {
+    getChannel: async (sessionId) => {
+      const channel = await base.getChannel(sessionId)
+      if (!channel) return channel
+      return {
+        ws: {
+          send: (data: string) => {
+            guard.assertLive()
+            channel.ws.send(data)
+          },
+        },
+      }
+    },
+    insertMessage: async (sessionId, role, content) => {
+      guard.assertLive()
+      return base.insertMessage(sessionId, role, content)
+    },
+    broadcastToSubscribers: base.broadcastToSubscribers,
+  }
+}
+
+/** The corch send seam: the shared sender (heal sink) behind the run's cancellation token. */
+export async function corchSend(req: DispatchRequest, guard: SendGuard, base?: SendDeps): Promise<void> {
+  const { sendUserMessage, REAL_SEND_DEPS } = await import('../heal/sinks/shared.ts')
+  await sendUserMessage(req, { storedContent: req.prompt }, guardSendDeps(guard, base ?? REAL_SEND_DEPS))
+}
+
 export async function realCorchDeps(): Promise<CorchDeps> {
   const { corchStore } = await import('./store.ts')
   const { REAL_AUTOSPAWN } = await import('../heal/autospawn-deps.ts')
   const { AUTOSPAWN_LAUNCH_COMMAND } = await import('../db/orchestrator-rows-dal.ts')
   const { dispatch } = await import('../dispatch/pipeline.ts')
   const { getChannel } = await import('../ws/registry.ts')
-  const { sendUserMessage } = await import('../heal/sinks/shared.ts')
   const { releaseClosedRunByToken } = await import('../dispatch/pipeline.ts')
   const registry = await import('../ws/supervisor-registry.ts')
   const { DEAD_SESSION_INVENTORY_MAX_AGE_MS } = await import('../ws/dead-session-reaper.ts')
@@ -633,7 +705,7 @@ export async function realCorchDeps(): Promise<CorchDeps> {
     quota: DEFAULT_QUOTA_PROVIDER,
     pipeline: {
       isOnline: (req) => getChannel(req.sessionId) != null,
-      send: (req) => sendUserMessage(req, { storedContent: req.prompt }),
+      send: (req, guard) => corchSend(req, guard),
       releaseByToken: async (token, reason) => {
         await releaseClosedRunByToken(token, reason)
       },
