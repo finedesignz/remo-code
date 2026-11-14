@@ -19,6 +19,7 @@ default, and the three provider seams all fail closed (see "Fail-closed defaults
 | `REMO_CORCH_ENABLED` | OFF (`1\|true\|yes\|on` enables) | Read at call time. OFF is a true no-op: the routes only store and list rows; no dispatcher evaluation, no reconciler interval, no `not_before` timer, no launch, no send. |
 | `REMO_CORCH_LEASE_MS` | 120000 | How long a live run may go without positive liveness knowledge before it is reclaimed or marked stalled. Non-positive or garbage means the default. |
 | `REMO_CORCH_RECONCILE_INTERVAL_MS` | 60000 | The reconciler's single interval. Non-positive or garbage means the default. |
+| `REMO_CORCH_QUOTA_CEILING_PCT` | 55 | CORCH-02. An account is eligible only while `max(5h, 7d)` utilization is below this percent. Validated at boot only when `REMO_CORCH_ENABLED` is on: a value that is non-numeric, `<= 0` or `> 100` refuses boot (`assertCorchConfig`), it never becomes the default. With CORCH off, `GET /api/quota/snapshot` answers `500 quota_ceiling_invalid` instead. |
 
 **Boot mutual exclusion:** the hub refuses to boot when `REMO_CORCH_ENABLED` and `REMO_ORCHESTRATOR_ENABLED` are
 both truthy (`assertCorchConfig()` in `hub/src/index.ts`, directly after `assertTokenCapConfig()`). The other three
@@ -34,6 +35,15 @@ combinations boot.
 - `corch_runs`: one row per attempt. Partial unique indexes allow at most one LIVE run (`ended_at IS NULL`) per
   work item and per project.
 - `users.corch_max_concurrent_runs` (default 1, CHECK > 0): the per-user concurrency cap.
+- `corch_quota_accounts` (CORCH-02): the latest CUG usage reading per account slot, primary key
+  `(user_id, account_id)`. Columns: `slot`, `five_h_pct`, `seven_d_pct` (NUMERIC, NULL = unknown), `resets_5h`,
+  `resets_7d`, `fetched_at`, `source`, `enabled`, `cug_blocked`, `received_at` (hub clock, set on every POST) and
+  the hub-owned `blocked_until` / `blocked_at` (quota death). **No email or label column exists, ever.** Upsert
+  rules: every CUG field and `received_at` are overwritten per POST, except that a reading whose `fetched_at` is OLDER
+  than the stored one is ignored entirely (replay / out-of-order); a quota-death block (`blocked_until` / `blocked_at`)
+  is cleared by the next `source = 'live'` reading whose `fetched_at` is later than `blocked_at`, because CUG is the
+  single quota source and the death text is only run output. Rows for accounts absent from later POSTs are kept and age
+  out through the staleness rules (fail closed). `user_id` always comes from the verified key.
 
 ## Routes
 
@@ -50,6 +60,25 @@ and a project that is enrolled, enabled and `accept_external`; otherwise 403 bef
 
 Request bodies are zod-validated with unknown keys stripped, so a caller can never set `counter_key`, `status`,
 `branch` or `attempts`.
+
+Quota routes (CORCH-02, mounted BEFORE the auth catch-all, route-local Bearer api-key auth, cookies never
+authenticate, rate limit 120/min per key prefix, `/api/quota/` is CSRF-allowlisted and skips the license gate):
+
+- `POST /api/quota/snapshot` needs the **EXPLICIT-only `quota:publish` scope**. Body is a CUG usage-snapshot v1,
+  strict at both levels (`.strict()`): `{schema: 1, publisher: "cug", generated_at, poll_interval_secs, accounts[0..32]}`
+  with each account `{account_id, slot, five_h_pct, seven_d_pct, resets_5h, resets_7d, fetched_at, source, enabled,
+  blocked, current}`. `email`, `label`, `user_id` and any unknown key return `400 {error: "invalid_snapshot"}` with
+  no value echoed and no row written; so does an account `fetched_at` (or the top-level `generated_at`) more than 120 s
+  ahead of server time (a future-dated reading would pin the stored row ahead of every genuine later reading); the body
+  is never logged. Over 64 KiB returns `413` before parsing.
+  `200 {ok: true, accepted: n}`. Each successful POST triggers exactly one dispatcher evaluation when
+  `REMO_CORCH_ENABLED` is on and none when it is off; a 4xx triggers none.
+- `GET /api/quota/snapshot` needs the **EXPLICIT-only `quota:read` scope** and returns the key owner's accounts with
+  the eligibility verdict: `{ceiling_pct, accounts: [{account_id, slot, eligible, reason, not_before, five_h_pct,
+  seven_d_pct, resets_5h, resets_7d, fetched_at, source, received_at, blocked_until}]}`.
+- `401` for a missing, malformed or unknown key (a failed lookup also fails closed to 401), `403
+  {error: "insufficient_scope", required}` for a NULL/legacy key or the other quota scope. Neither scope implies the
+  other, and a quota key is refused by `/api/ext/*`, `/api/cloud-hook/*`, `/ws/agent` and every cookie route.
 
 ## One evaluation (LD-6)
 
@@ -154,11 +183,85 @@ one GSD phase, push the branch and open a pull request, and the single sentence 
 never push to the default branch, never deploy." Title, body, source and source_ref pass ONLY through
 `fenceUntrusted`. Launch goes through `governedLaunch` HEAL policy, which forces `skipPermissions: false`.
 
+## Quota eligibility (CORCH-02)
+
+The hub uses ONLY the CUG snapshot (never the oauth-poll `hub/src/usage/**` store or the threshold gate; a test
+parses the imports of `hub/src/corch/**` and `hub/src/api/quota.ts` to prove it). One pure function,
+`evaluateAccounts` in `hub/src/corch/quota-eligibility.ts`, feeds both `GET /api/quota/snapshot` and the dispatcher's
+provider. The first failing rule wins, in this order:
+
+| # | Rule | Reason | `not_before` |
+|---|---|---|---|
+| 1 | no rows at all | `quota:no_snapshot` (reported by the caller) | none |
+| 2 | `now - received_at > 600 s` | `quota:snapshot_stale` | none |
+| 3 | `fetched_at` null, older than 900 s, or more than 60 s in the future | `quota:account_stale` | none |
+| 4 | `source != live` | `quota:source_not_live` | none |
+| 5 | CUG `blocked` | `quota:cug_blocked` | none |
+| 6 | `enabled = false` | `quota:cug_disabled` | none |
+| 7 | `blocked_until > now`, or `blocked_at` set with `blocked_until` NULL | `quota:blocked` | `blocked_until`, else none |
+| 8 | `seven_d_pct` null | `quota:seven_d_unknown` | none |
+| 9 | `max(5h, 7d) >= REMO_CORCH_QUOTA_CEILING_PCT` | `quota:over_ceiling` | the later reset of the window(s) at or over the ceiling; none if any is null or past |
+| 10 | `five_h_pct` null and the account already has a live CORCH run | `quota:five_h_unknown_busy` | none |
+
+Unknown is never zero: a null `five_h_pct` is eligible only while 7d is known and under the ceiling, and only with
+no other live run on that account (CUG treats unknown as eligible; the hub does not).
+
+**Selection.** With `REMO_CORCH_ENABLED` on, `createQuotaProvider` replaces the CORCH-01 default provider. Per
+dispatch it takes the eligible accounts that have an online supervisor advertising that `account_slot` (new optional
+`supervisor.hello` field, same charset as `account_id`) and a free slot (capacity = the largest hello
+`max_concurrent` for that account, default 1, capped at 1 when `five_h_pct` is null; busy = live `corch_runs` on the
+account). It picks the lowest `max(5h ?? 7d, 7d)`, tie-break `account_id` ascending, and records it on
+`corch_runs.account_slot` with one conditional `UPDATE` (refusal `quota:slot_taken` if the account filled meanwhile).
+A run that already holds an account is never moved. A hello without `account_slot` is never a target. No candidate:
+the shared reason when every account has the same one, `quota:no_slot_supervisor` when accounts are eligible but none
+has an online slot supervisor with a free slot, else `quota:no_eligible_account`. The claim is serialized per
+`(user_id, account_id)` by a transaction advisory lock. The selection carries `supervisor_id` (the lowest-id online
+supervisor advertising the account) and the corch launch targets exactly that supervisor (`governedLaunch`
+`resolveTarget` -> `launchSessionForUser` `targetSupervisorId`, corch only); with no supervisor for the run's account
+the item is refused `quota:supervisor_unbound` (no attempt). At launch resolution the target supervisor's CURRENT
+advertised account is re-read from the registry and must equal the run's recorded `account_slot` (and the supervisor
+must be connected), else the same refusal. `GET /api/quota/snapshot` evaluates eligibility with the
+same live per-account busy counts as dispatch.
+
+**Wait.** A `quota:` refusal requeues the item with `wait_reason = quota:<reason>`, no attempt consumed, and
+`not_before` = `min(earliest time any account can become eligible, now + 600s)` when EVERY ineligible account carries
+one, else NULL (only an event can change it: a snapshot POST, a supervisor hello or close, a run end). The item is
+never held to a far-future reset: the account state alone governs eligibility, so a healthy snapshot arriving before
+the reset releases the item within one 600 s backoff window. The existing single `not_before` scheduler consumes it;
+no new timer or poll was added.
+
+**Quota death (R2.5).** A run whose end text (`onFinalize` content or `markFailed` error) is, as a whole, the CLI
+usage-limit signal (`hub/src/corch/quota-death.ts`: the legacy `Claude AI usage limit reached|<epoch>` or the
+current `You've hit your session|weekly|Opus|Sonnet limit ...`, at most 500 chars) marks its account
+`blocked_at = now()` and `blocked_until = min(candidate reset, now + cap)`, where the candidate is the signal's reset
+when in the future, else that window's reset from the reading, else the earliest future reset, and the cap is 7 days
+for the weekly window and 5 hours otherwise (a far-future or past epoch therefore clamps; text can never block an
+account indefinitely). A later death keeps the later `blocked_until`. When the block was recorded the item only backs
+off 600 s (`not_before = now + 600s`): the account block alone governs quota (dispatch refuses a blocked account and a
+clearing live snapshot triggers an evaluation), so a healthy reading releases the item after the backoff. If the
+account cannot be identified or the block was not recorded (`markDeath` threw, or returned no `blocked_until`), the
+item is held 5 hours (`not_before = now + 5h`), never redispatched at once. The item is requeued with `end_reason quota_death`, `wait_reason quota:death`, no
+attempt, and the PR lookup is skipped. A long assistant message that merely mentions a limit is not a death. Known
+limit: the supervisor relays a whole turn's text, so a run that wrote prose and then hit the limit does not match
+the whole-text anchor and follows the CORCH-01 `no_pr` path (fail-safe direction). Details and evidence:
+`.planning/phases/CORCH-02-quota-ingest/CORCH-02-RESEARCH.md`.
+
+**Future-dated stored readings (QC3 H2).** Ingest rejects a `fetched_at` or `generated_at` more than 120 s ahead of
+server time. A row already stored with such a timestamp (written before that bound) is treated as invalid by the
+upsert: any genuine reading overwrites it, so it cannot reject later readings or pin a block.
+
+**Accepted residuals (CORCH-02).**
+- Supervisor rebinding between `resolveTarget` and the send: the binding is re-read at launch resolution, not again
+  across the reservation and ledger awaits. Each supervisor container uses one fixed account token, so a reconnect
+  preserves its account binding; this is a documented operational constraint, not an enforced code invariant.
+- Publisher-declared source trust: `source: live` and `fetched_at > blocked_at` are publisher-supplied and clear a
+  death block. Only a holder of a `quota:publish` key can do this, and only for that key owner's own user.
+
 ## Fail-closed defaults (LD-11)
 
 | Seam | Phase-01 default | Replaced by |
 |---|---|---|
-| `QuotaProvider.snapshotFor` | `quota_no_snapshot` | CORCH-02 |
+| `QuotaProvider.snapshotFor` | `quota_no_snapshot` (still the default object; unchanged for flag OFF and tests) | CORCH-02 `createQuotaProvider` when the flag is ON: every rule above fails closed (`quota:*`) |
 | `Workspace.resolve` | `workspace_unavailable` | CORCH-09 (supervisor worktrees) |
 | `PrLookup.lookup` | `unavailable` (`pr_lookup_unavailable`, attempt consumed) | CORCH-09 |
 
@@ -177,6 +280,9 @@ as the repo check; CORCH never reads or writes that table.
 `corch-boot-assert`, `corch-flag-off`, `corch-gates` (gates, keys, refusal schedule, dispatcher and reconciler with
 fakes), `corch-prompt`, `corch-routes`, `corch-no-polling-guard`, and the real-Postgres
 `e2e/corch-dispatcher.e2e.test.ts` (selection order, race at cap 1, uniqueness, backoff then blocked with one
-notification, one case per refusal, restart without double launch, `pr_open` success path). Guard additions:
+notification, one case per refusal, restart without double launch, `pr_open` success path). CORCH-02 adds
+`corch-quota-ingest` (auth, strict body, 413, no-log probe, per-user read), `corch-quota-eligibility` (the ordered
+table and the CUG-only import guard), `corch-quota-selection`, `corch-quota-wait`, `corch-quota-death`, and the
+real-Postgres `e2e/corch-quota.e2e.test.ts`. Guard additions:
 `token-cap-coverage`, `kill-switch-coverage`, `counter-key-assignment-guard`, `launch-callers-guard`,
 `launch-machine-guard`, `session-start-senders-guard`, `reserve-caller-guard`, `mount-order`, `api-keys-scopes`.

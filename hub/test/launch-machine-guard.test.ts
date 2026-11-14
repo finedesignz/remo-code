@@ -28,6 +28,7 @@ const s = {
   sends: [] as any[],
   supervisorsListed: 0,
   orchestratorArgs: [] as any[],
+  extraSupervisor: false,
 }
 
 const realControls = await import(`../src/dispatch/automation-controls.ts?real=${Date.now()}`)
@@ -56,7 +57,7 @@ mock.module('../src/db/supervisor-dal.ts', () => ({
   ...realSupervisorDal,
   listSupervisorsForUser: async () => {
     s.supervisorsListed++
-    return [{ id: 'sup-1', hostname: 'devbox' }]
+    return s.extraSupervisor ? [{ id: 'sup-1', hostname: 'devbox' }, { id: 'sup-2', hostname: 'otherbox' }] : [{ id: 'sup-1', hostname: 'devbox' }]
   },
   endRun: async (...a: any[]) => { s.ended.push(a) },
 }))
@@ -101,7 +102,30 @@ beforeEach(() => {
   s.sends = []
   s.supervisorsListed = 0
   s.orchestratorArgs = []
+  s.extraSupervisor = false
   s.sessionRow = { id: 'sess-1', project_dir: '/repos/a', hostname: 'devbox', is_orchestrator: false }
+})
+
+describe('CORCH-02 QC F5: explicit targetSupervisorId', () => {
+  test('a target overrides the hostname pick: the session.start goes to exactly that supervisor', async () => {
+    s.extraSupervisor = true
+    const res = await launchSessionForUser({ userId: 'u1', sessionId: 'sess-1', machine: true, targetSupervisorId: 'sup-2' })
+    expect(res).toMatchObject({ ok: true, supervisorId: 'sup-2' })
+    expect(s.sends.map((x) => x.id)).toEqual(['sup-2'])
+  })
+
+  test('a target that is not one of the user supervisors is refused, nothing is sent', async () => {
+    s.extraSupervisor = true
+    const res = await launchSessionForUser({ userId: 'u1', sessionId: 'sess-1', machine: true, targetSupervisorId: 'sup-other-user' })
+    expect(res).toEqual({ ok: false, reason: 'no_online_supervisor' })
+    expect(s.sends).toHaveLength(0)
+  })
+
+  test('no target: unchanged hostname pick (sup-1), even with two supervisors online', async () => {
+    s.extraSupervisor = true
+    const res = await launchSessionForUser({ userId: 'u1', sessionId: 'sess-1', machine: true })
+    expect(res).toMatchObject({ ok: true, supervisorId: 'sup-1' })
+  })
 })
 
 describe('launchSessionForUser machine option', () => {

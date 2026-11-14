@@ -14,6 +14,9 @@ export const SupervisorHello = z.object({
   restrict_to_git: z.boolean().optional(),
   max_concurrent: z.number().int().positive().optional(),
   audit_log_enabled: z.boolean().optional(),
+  // CORCH-02 (R2.7): the quota account this supervisor runs under (one supervisor container per account slot).
+  // Additive and optional; a hello without it is never a CORCH quota target.
+  account_slot: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).optional(),
 })
 
 export const SupervisorState = z.object({

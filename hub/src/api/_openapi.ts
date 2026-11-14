@@ -1469,6 +1469,97 @@ openapi.openapi(taskTemplatesRoute, (c) => {
   });
 }
 
+// ── /api/quota — CUG usage-snapshot ingest + eligibility read (milestone CORCH-02) ──────────
+// Spec-only registration; `./quota.ts` serves traffic. Auth is route-local: Bearer api key with the EXPLICIT
+// `quota:publish` (POST) / `quota:read` (GET) scope; cookies never authenticate. See docs/corch.md.
+{
+  const Err = z.object({ error: z.string() });
+  const json = (schema: any) => ({ content: { "application/json": { schema } } });
+  const reg = openapi.openAPIRegistry;
+  const base = { tags: ["corch"], security: [{ apiKeyAuth: [] as string[] }] };
+  const ScopeErr = z.object({ error: z.string(), required: z.string() });
+  const pct = z.number().min(0).max(1000).nullable();
+  const when = z.string().datetime({ offset: true }).nullable();
+  const Account = z
+    .object({
+      account_id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+      slot: z.union([z.string().max(64), z.number().int()]).nullable(),
+      five_h_pct: pct,
+      seven_d_pct: pct,
+      resets_5h: when,
+      resets_7d: when,
+      fetched_at: when,
+      source: z.string().min(1).max(32),
+      enabled: z.boolean(),
+      blocked: z.boolean(),
+      current: z.boolean(),
+    })
+    .strict()
+    .openapi("QuotaSnapshotAccount");
+  reg.registerPath({
+    method: "post", path: "/api/quota/snapshot", summary: "Publish a CUG usage-snapshot v1 (EXPLICIT quota:publish scope)", ...base,
+    description:
+      "Upserts one row per `(key owner, account_id)` into `corch_quota_accounts`. The body is strict at both levels: `email`, `label` and any unknown key are a 400 and write nothing. Body cap 64 KiB (413), at most 32 accounts. The user is always the key owner. A successful POST triggers one dispatcher evaluation when REMO_CORCH_ENABLED is on (none when off).",
+    request: {
+      body: json(
+        z
+          .object({
+            schema: z.literal(1),
+            publisher: z.literal("cug"),
+            generated_at: z.string().datetime({ offset: true }),
+            poll_interval_secs: z.number().int().min(1).max(86400),
+            accounts: z.array(Account).max(32),
+          })
+          .strict(),
+      ),
+    },
+    responses: {
+      200: { description: "Stored", ...json(z.object({ ok: z.literal(true), accepted: z.number().int() })) },
+      400: { description: "invalid_snapshot (no value echoed)", ...json(Err) },
+      401: { description: "Missing/unknown api key", ...json(Err) },
+      403: { description: "Key lacks the explicit quota:publish scope", ...json(ScopeErr) },
+      413: { description: "Body over 64 KiB", ...json(Err) },
+      429: { description: "Rate limited", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "get", path: "/api/quota/snapshot", summary: "Per-account quota eligibility for the key owner (EXPLICIT quota:read scope)", ...base,
+    description:
+      "Returns the owner's stored readings with the fail-closed eligibility verdict (`eligible`, `reason` = `quota:<reason>`, `not_before`) computed by the same rules the dispatcher uses. No email or label field exists.",
+    responses: {
+      200: {
+        description: "Accounts",
+        ...json(
+          z.object({
+            ceiling_pct: z.number(),
+            accounts: z.array(
+              z.object({
+                account_id: z.string(),
+                slot: z.string().nullable(),
+                eligible: z.boolean(),
+                reason: z.string().nullable(),
+                not_before: z.string().nullable(),
+                five_h_pct: z.number().nullable(),
+                seven_d_pct: z.number().nullable(),
+                resets_5h: z.string().nullable(),
+                resets_7d: z.string().nullable(),
+                fetched_at: z.string().nullable(),
+                source: z.string(),
+                received_at: z.string(),
+                blocked_until: z.string().nullable(),
+              }),
+            ),
+          }),
+        ),
+      },
+      401: { description: "Missing/unknown api key", ...json(Err) },
+      403: { description: "Key lacks the explicit quota:read scope", ...json(ScopeErr) },
+      500: { description: "quota_ceiling_invalid", ...json(Err) },
+      429: { description: "Rate limited", ...json(Err) },
+    },
+  });
+}
+
 // ── /api/chat — Bearer-key chat surface (scope chat:session) ────────────────
 // Spec-only registration; `./chat.ts` serves traffic. See docs/auth.md "Chat via API key".
 {

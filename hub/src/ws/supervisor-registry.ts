@@ -69,6 +69,10 @@ interface SupervisorEntry {
   circuitBreakers: CircuitBreakerEntry[]
   /** fix/headless-autoupdate — most recent status-server health (null = not reported). */
   statusServer: StatusServerHealth | null
+  /** CORCH-02: the quota account this supervisor advertised in its hello (absent => null). */
+  accountSlot?: string | null
+  /** CORCH-02: hello max_concurrent (default 1). */
+  maxConcurrent?: number
   pendingReqs: Map<string, { resolve: (v: any) => void; reject: (e: any) => void; timer: ReturnType<typeof setTimeout> }>
 }
 
@@ -209,6 +213,8 @@ export function registerSupervisor(args: {
   apiKeyId: string
   roots: string[]
   hostname?: string
+  accountSlot?: string | null
+  maxConcurrent?: number
 }): SupervisorEntry {
   // Replace any existing
   const existing = supervisorsByApiKey.get(args.apiKeyId)
@@ -238,6 +244,8 @@ export function registerSupervisor(args: {
     sessionInventoryAt: null,
     circuitBreakers: [],
     statusServer: null,
+    accountSlot: args.accountSlot ?? null,
+    maxConcurrent: args.maxConcurrent ?? 1,
     pendingReqs: new Map(),
   }
   const isReplace = supervisors.has(args.supervisorId)
@@ -286,6 +294,17 @@ export function isSupervisorOnline(supervisorId: string) {
 export function listOnlineSupervisorIdsForUser(userId: string): string[] {
   const out: string[] = []
   for (const [id, e] of supervisors) if (e.userId === userId) out.push(id)
+  return out
+}
+
+/** CORCH-02 (LD-Q12): online supervisors of the user that advertised an account_slot (others are never a quota target). */
+export function listOnlineSlotSupervisorsForUser(
+  userId: string,
+): Array<{ supervisorId: string; accountSlot: string; maxConcurrent: number }> {
+  const out: Array<{ supervisorId: string; accountSlot: string; maxConcurrent: number }> = []
+  for (const [id, e] of supervisors) {
+    if (e.userId === userId && e.accountSlot) out.push({ supervisorId: id, accountSlot: e.accountSlot, maxConcurrent: e.maxConcurrent ?? 1 })
+  }
   return out
 }
 
