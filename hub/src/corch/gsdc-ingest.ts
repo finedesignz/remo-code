@@ -144,13 +144,16 @@ export function createGsdcIngest(deps: GsdcDeps) {
     timer = null
   }
 
-  async function reportFailure(signature: string): Promise<void> {
+  async function reportFailure(signature: string, gen: number): Promise<void> {
     failures++
     outage = true
     if (notified) return
     try {
       const users = [...new Set((await deps.store.listEnabledProjects()).map((p) => p.user_id))]
+      // A stopped or superseded connection must neither send a stale notification nor flip shared state.
+      if (stopped || gen !== generation) return
       await deps.notifyOutage({ userIds: users, signature })
+      if (stopped || gen !== generation) return
       notified = true // only after delivery: a failed recipient lookup is retried on the next failure of this outage
     } catch (err: any) {
       console.error(`[corch.gsdc] outage notification failed: ${err?.message ?? err}`)
@@ -238,7 +241,7 @@ export function createGsdcIngest(deps: GsdcDeps) {
     if (cfg.state === 'off') return // flag OFF or source unconfigured: no connection, no timer
     if (cfg.state === 'partial') {
       // A misconfiguration cannot heal without a restart: notify once, do not retry.
-      await reportFailure(cfg.signature)
+      await reportFailure(cfg.signature, gen)
       return
     }
     const ac = new AbortController()
@@ -318,7 +321,7 @@ export function createGsdcIngest(deps: GsdcDeps) {
       if (stopped || gen !== generation) return
       const signature = err instanceof GsdcFailure ? err.signature : 'unreachable'
       console.error(`[corch.gsdc] source failure: ${signature}`)
-      await reportFailure(signature)
+      await reportFailure(signature, gen)
       if (stopped || gen !== generation) return
       arm(backoffMs(failures), gen)
     } finally {

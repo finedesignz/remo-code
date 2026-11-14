@@ -69,7 +69,7 @@ function project(id: string, userId: string, ident: string, priority = 5) {
 
 type Make = () => Response | Promise<Response>
 
-function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<string, Make>; applyThrows?: boolean; applyGate?: Promise<void>; enqueuedGate?: Promise<void>; listThrows?: number } = {}) {
+function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<string, Make>; applyThrows?: boolean; applyGate?: Promise<void>; enqueuedGate?: Promise<void>; listThrows?: number; listGate?: Promise<void>; notifyThrows?: number } = {}) {
   const log = {
     fetches: [] as string[],
     auth: [] as string[],
@@ -85,6 +85,7 @@ function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<st
   const ingest = createGsdcIngest({
     store: {
       listEnabledProjects: async () => {
+        if (opts.listGate) await opts.listGate
         if ((opts.listThrows ?? 0) > 0) {
           opts.listThrows!--
           throw new Error("db blip")
@@ -130,7 +131,13 @@ function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<st
         ;(h as { cleared: boolean }).cleared = true
       },
     },
-    notifyOutage: async (o) => void log.outages.push(o),
+    notifyOutage: async (o) => {
+      if ((opts.notifyThrows ?? 0) > 0) {
+        opts.notifyThrows!--
+        throw new Error("undelivered")
+      }
+      log.outages.push(o)
+    },
     onEnqueued: async (u) => {
       log.enqueued.push(u)
       if (opts.enqueuedGate) await opts.enqueuedGate
@@ -746,6 +753,45 @@ describe('review hardening (QC round 6)', () => {
     h.reconnects().at(-1)!.fn()
     await flush()
     expect(h.log.outages.length).toBe(1) // delivered once, then silent for the rest of the outage
+    h.ingest.stop()
+  })
+})
+
+describe('review hardening (QC round 7)', () => {
+  test('an undelivered outage notification (adapter throws) is retried on the next failure, then sent once', async () => {
+    const h = harness({
+      projects: [project('pa', 'u1', 'github://acme/app')],
+      streams: [() => json({}, 503), () => json({}, 503), () => json({}, 503)],
+      notifyThrows: 1,
+    })
+    h.ingest.start()
+    await flush()
+    expect(h.log.outages).toEqual([])
+    h.reconnects().at(-1)!.fn()
+    await flush()
+    expect(h.log.outages.length).toBe(1)
+    h.reconnects().at(-1)!.fn()
+    await flush()
+    expect(h.log.outages.length).toBe(1)
+    h.ingest.stop()
+  })
+
+  test('a stale connection finishing its notification lookup after stop()/start() sends nothing and does not flip shared state', async () => {
+    let release!: () => void
+    const listGate = new Promise<void>((r) => (release = r))
+    const h = harness({
+      projects: [project('pa', 'u1', 'github://acme/app')],
+      streams: [() => json({}, 503), () => sseResponse([frame('snapshot', { projects: [] })], { hold: true })],
+      listGate,
+    })
+    h.ingest.start() // old generation: fails, its notification lookup is held
+    await flush()
+    h.ingest.stop()
+    h.ingest.start() // new generation: applies a snapshot (no lookup needed)
+    await flush()
+    release()
+    await flush()
+    expect(h.log.outages).toEqual([])
     h.ingest.stop()
   })
 })
