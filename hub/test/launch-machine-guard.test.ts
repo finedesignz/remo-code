@@ -4,7 +4,11 @@
  * The primitive is shared with the HUMAN Telegram /doctor relaunch and /commands, which must
  * keep working during a halt. So the kill-switch predicate is consulted ONLY when the caller
  * passes `machine: true`. Controls module, DB, registry and the orchestrator primitive are
- * leaf-mocked; mock.module is process-global, so this file runs in its own bun process.
+ * leaf-mocked; mock.module is process-global first-write-wins, so every mock spreads the
+ * cache-busted REAL module and overrides only what this file drives. Otherwise a partial
+ * factory leaks into later files in the same bun process (e.g. a dal.ts mock lacking
+ * getUserClaudeThresholds breaks orchestrator-macro-path-guard.test.ts) — memory:
+ * bun-mock-pollution.
  */
 import { describe, test, expect, beforeEach, mock } from 'bun:test'
 
@@ -24,7 +28,16 @@ const s = {
   orchestratorArgs: [] as any[],
 }
 
+const realControls = await import(`../src/dispatch/automation-controls.ts?real=${Date.now()}`)
+const realSupervisorDal = await import(`../src/db/supervisor-dal.ts?real=${Date.now()}`)
+const realPostgres = await import(`../src/db/postgres.ts?real=${Date.now()}`)
+const realSupervisorRegistry = await import(`../src/ws/supervisor-registry.ts?real=${Date.now()}`)
+const realBudget = await import(`../src/sessions/budget.ts?real=${Date.now()}`)
+const realDal = await import(`../src/db/dal.ts?real=${Date.now()}`)
+const realAutoLaunch = await import(`../src/orchestrator/auto-launch.ts?real=${Date.now()}`)
+
 mock.module('../src/dispatch/automation-controls.ts', () => ({
+  ...realControls,
   isAutomationHalted: async (a: { userId: string; sessionId?: string }) => {
     s.haltCalls.push(a)
     return s.halted ? { halted: true, scope: s.halted.scope } : { halted: false }
@@ -38,6 +51,7 @@ mock.module('../src/dispatch/automation-controls.ts', () => ({
   },
 }))
 mock.module('../src/db/supervisor-dal.ts', () => ({
+  ...realSupervisorDal,
   listSupervisorsForUser: async () => {
     s.supervisorsListed++
     return [{ id: 'sup-1', hostname: 'devbox' }]
@@ -45,23 +59,28 @@ mock.module('../src/db/supervisor-dal.ts', () => ({
   endRun: async (...a: any[]) => { s.ended.push(a) },
 }))
 mock.module('../src/db/postgres.ts', () => ({
+  ...realPostgres,
   sql: async () => {
     s.sqlCalls++
     return s.sessionRow ? [s.sessionRow] : []
   },
 }))
 mock.module('../src/ws/supervisor-registry.ts', () => ({
+  ...realSupervisorRegistry,
   isSupervisorOnline: () => true,
   sendToSupervisor: (id: string, msg: any) => s.sends.push({ id, msg }),
   updateSupervisorState: async () => {},
 }))
 mock.module('../src/sessions/budget.ts', () => ({
+  ...realBudget,
   reserveSessionSlot: async () => ({ ok: true, run: { id: 'run-1' } }),
 }))
 mock.module('../src/db/dal.ts', () => ({
+  ...realDal,
   getSessionSkipPermissions: async () => false,
 }))
 mock.module('../src/orchestrator/auto-launch.ts', () => ({
+  ...realAutoLaunch,
   launchOrchestrator: async (a: any) => {
     s.orchestratorArgs.push(a)
     return { ok: true, sessionId: 'sess-o', runId: 'run-o', supervisorId: 'sup-1', cwd: '/repos', reused: false }
