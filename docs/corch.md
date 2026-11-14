@@ -128,6 +128,10 @@ finds the run ended. A busy session (`markSkipped('session_busy')`) is a `droppe
 A reclaim that lands AFTER `markDispatched` succeeded is also stopped: every run-ending path drops the run from an in-memory
 sendable set before its first await, and the corch send seam (`corchSend` / `guardSendDeps`) asserts it immediately before the
 message insert and immediately before `ws.send` (no await between), so no ws send or message row follows the reclaim.
+`corchSend` resolves the DAL module before the insert guard, so no await sits between the guard and the row write. The
+shared `dispatch()` also checks hook ownership (the exact hook object it armed) before cleaning up after a refused or failed
+send: when a reclaim already released the hook and promoted a waiter, the old send's failure touches neither the successor's
+hook nor the queue slot.
 
 No fresh inventory is "unknown", never "gone": past the lease the run becomes `stalled` once, with one owner
 notification. A listed session refreshes the heartbeat (and a stalled run returns to `running`). A hub restart
