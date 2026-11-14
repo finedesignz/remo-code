@@ -393,6 +393,27 @@ maybe('CORCH-08 e2e - AAF event receiver, closure transitions and provision gate
     expect(cancelled).toEqual([c!.run.id])
   })
 
+  test('cancelRunSends releases the pipeline slot (hook + queue) like reclaimRun does', async () => {
+    const keysMod = await import('../../src/corch/keys.ts')
+    const released: Array<[string, string]> = []
+    const deps: any = {
+      store: storeMod.corchStore, workspace: dispMod.DEFAULT_WORKSPACE, launch: {}, launchCommand: 'x', quota: {},
+      pipeline: { isOnline: async () => true, send: async () => {}, releaseByToken: async (t: string, r: string) => void released.push([t, r]) },
+      dispatch: async () => ({ kind: 'failed' }), prLookup: dispMod.DEFAULT_PR_LOOKUP, notify: async () => {},
+      inventory: { forSupervisor: () => ({ fresh: false, sessionIds: new Set() }), forUser: () => ({ fresh: false, sessionIds: new Set() }), isOnline: () => false },
+      timers: { setTimeout: () => ({}), clearTimeout: () => {} },
+    }
+    const d = dispMod.createCorchDispatcher(deps)
+    await d.cancelRunSends(['run-a', 'run-b'])
+    expect(released).toEqual([
+      [keysMod.buildCorchRunToken('run-a'), 'aaf_closure'],
+      [keysMod.buildCorchRunToken('run-b'), 'aaf_closure'],
+    ])
+    // A throwing release never fails the others.
+    deps.pipeline.releaseByToken = async () => { throw new Error('boom') }
+    await d.cancelRunSends(['run-c'])
+  })
+
   test('no deadlock: closure racing claimNext and a run end, repeated, always completes and the item ends closed', async () => {
     const u = await mkUser()
     const proj = await mkProject(u, 'github://acme/deadlock')
