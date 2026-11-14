@@ -5,7 +5,7 @@ import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import { mkdtempSync, rmSync, existsSync, writeFileSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { runCorchWorktreeEnsure, runCorchWorktreeRemove, runCorchPrLookup, __setCorchWorktreeForTest, type ExecFn } from '../src/commands/corch-worktree'
+import { runCorchWorktreeEnsure, runCorchWorktreeRemove, runCorchPrLookup, __setCorchWorktreeForTest, ENSURE_BUDGET_MS, type ExecFn } from '../src/commands/corch-worktree'
 
 let base: string
 let root: string
@@ -131,6 +131,53 @@ describe('QC hardening', () => {
   })
 })
 
+describe('QC2 hardening', () => {
+  test('ensure runs under ONE shared deadline: every git command carries a shrinking timeout within the budget', async () => {
+    const seen: number[] = []
+    // A fake exec that answers like a healthy repo so ensure walks every step.
+    __setCorchWorktreeForTest({
+      exec: async (cmd, opts) => {
+        seen.push(opts.timeoutMs ?? -1)
+        await new Promise((r) => setTimeout(r, 5))
+        const a = cmd.join(' ')
+        if (a.includes('rev-parse --show-toplevel')) return { code: 0, out: join(root, 'acme', 'budget') }
+        if (a.includes('remote get-url')) return { code: 0, out: origin }
+        if (a.includes('ls-remote')) return { code: 0, out: 'ref: refs/heads/trunk\tHEAD\n' }
+        if (a.includes('worktree list')) return { code: 0, out: '' }
+        if (a.includes('rev-parse --verify')) return { code: 1, out: '' }
+        return { code: 0, out: '' }
+      },
+    })
+    try {
+      const r = await runCorchWorktreeEnsure(['github://acme/budget', 'item-1'])
+      expect(r.exit_code).toBe(0)
+    } finally {
+      __setCorchWorktreeForTest({ exec: null })
+    }
+    expect(seen.length).toBeGreaterThanOrEqual(5)
+    expect(seen.every((t) => t > 0 && t <= ENSURE_BUDGET_MS)).toBe(true)
+    expect(seen[seen.length - 1]!).toBeLessThan(seen[0]!)
+  })
+
+  test('pr_lookup pins the repository (--repo) and ignores an inherited GH_REPO', async () => {
+    const prev = process.env.GH_REPO
+    process.env.GH_REPO = 'evil/other'
+    let env: NodeJS.ProcessEnv | undefined
+    let cmd: string[] = []
+    __setCorchWorktreeForTest({ exec: async (c, o) => ((cmd = c), (env = o.env), { code: 0, out: '[]' }) })
+    try {
+      await runCorchPrLookup([join(root, 'corch', 'widget-item-1'), 'corch/item-1', 'github://acme/widget'])
+    } finally {
+      __setCorchWorktreeForTest({ exec: null })
+      if (prev === undefined) delete process.env.GH_REPO
+      else process.env.GH_REPO = prev
+    }
+    expect(cmd.join(' ')).toContain('--repo acme/widget')
+    expect(env!.GH_REPO).toBeUndefined()
+    expect((await runCorchPrLookup([join(root, 'corch', 'widget-item-1'), 'corch/item-1', 'path:///x'])).error).toBe('invalid_args')
+  })
+})
+
 describe('corch.worktree_remove', () => {
   test('removes the worktree and is idempotent', async () => {
     const wt = join(root, 'corch', 'widget-item-1')
@@ -160,19 +207,20 @@ describe('corch.pr_lookup (fake gh)', () => {
   test('open same-repo PR => pr_url', async () => {
     const seen: { cmd?: string[] } = {}
     __setCorchWorktreeForTest({ exec: fakeGh(0, JSON.stringify([{ url: 'https://github.com/acme/widget/pull/7', headRefName: 'corch/item-1', isCrossRepository: false }]), seen) })
-    const r = await runCorchPrLookup([wt(), 'corch/item-1'])
+    const r = await runCorchPrLookup([wt(), 'corch/item-1', 'github://acme/widget'])
     expect(r.exit_code).toBe(0)
     expect(JSON.parse(r.snippet!)).toEqual({ pr_url: 'https://github.com/acme/widget/pull/7' })
     expect(seen.cmd!.slice(0, 3)).toEqual(['gh', 'pr', 'list'])
     expect(seen.cmd).toContain('--head')
+    expect(seen.cmd!.join(' ')).toContain('--repo acme/widget')
     expect(seen.cmd).toContain('open')
   })
 
   test('no PR, or only a cross-repo (fork) PR => pr_url null', async () => {
     __setCorchWorktreeForTest({ exec: fakeGh(0, '[]') })
-    expect(JSON.parse((await runCorchPrLookup([wt(), 'corch/item-1'])).snippet!)).toEqual({ pr_url: null })
+    expect(JSON.parse((await runCorchPrLookup([wt(), 'corch/item-1', 'github://acme/widget'])).snippet!)).toEqual({ pr_url: null })
     __setCorchWorktreeForTest({ exec: fakeGh(0, JSON.stringify([{ url: 'https://github.com/evil/widget/pull/1', headRefName: 'corch/item-1', isCrossRepository: true }])) })
-    expect(JSON.parse((await runCorchPrLookup([wt(), 'corch/item-1'])).snippet!)).toEqual({ pr_url: null })
+    expect(JSON.parse((await runCorchPrLookup([wt(), 'corch/item-1', 'github://acme/widget'])).snippet!)).toEqual({ pr_url: null })
   })
 
   test('gh failure => error code, never output; reply carries no credential', async () => {
@@ -180,7 +228,7 @@ describe('corch.pr_lookup (fake gh)', () => {
     process.env.GH_TOKEN = 'ghp_SENTINEL_LOOKUP'
     try {
       __setCorchWorktreeForTest({ exec: fakeGh(1, 'HTTP 401 ghp_SENTINEL_LOOKUP') })
-      const r = await runCorchPrLookup([wt(), 'corch/item-1'])
+      const r = await runCorchPrLookup([wt(), 'corch/item-1', 'github://acme/widget'])
       expect(r).toEqual({ exit_code: 1, error: 'gh_pr_list_failed' })
       expect(JSON.stringify(r)).not.toContain('ghp_SENTINEL_LOOKUP')
     } finally {
@@ -191,8 +239,8 @@ describe('corch.pr_lookup (fake gh)', () => {
 
   test('refuses a path outside the roots and a non-corch branch', async () => {
     __setCorchWorktreeForTest({ exec: fakeGh(0, '[]') })
-    expect((await runCorchPrLookup([base, 'corch/item-1'])).error).toBe('path_outside_roots')
-    expect((await runCorchPrLookup([wt(), 'main'])).error).toBe('invalid_args')
-    expect((await runCorchPrLookup([wt(), 'corch/../x'])).error).toBe('invalid_args')
+    expect((await runCorchPrLookup([base, 'corch/item-1', 'github://acme/widget'])).error).toBe('path_outside_roots')
+    expect((await runCorchPrLookup([wt(), 'main', 'github://acme/widget'])).error).toBe('invalid_args')
+    expect((await runCorchPrLookup([wt(), 'corch/../x', 'github://acme/widget'])).error).toBe('invalid_args')
   })
 })

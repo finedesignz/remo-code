@@ -29,13 +29,15 @@ export interface ExecResult {
   code: number
   out: string
 }
-export type ExecFn = (cmd: string[], opts: { cwd?: string; env: NodeJS.ProcessEnv }) => Promise<ExecResult>
+export type ExecFn = (cmd: string[], opts: { cwd?: string; env: NodeJS.ProcessEnv; timeoutMs?: number }) => Promise<ExecResult>
 
 /**
  * Per-command ceiling. It is BELOW the hub's RPC timeout (workspace.ts, 600s) so a stuck git/gh is killed here and
  * the hub always gets a real reply: the hub never has to give up on a command that is still mutating a worktree.
  */
 export const EXEC_TIMEOUT_MS = 240_000
+/** Whole-operation budget of one `worktree_ensure` (clone + fetch + list + add together); below the hub's 600s RPC timeout. */
+export const ENSURE_BUDGET_MS = 480_000
 
 const REAL_EXEC: ExecFn = async (cmd, opts) => {
   const p = Bun.spawn(cmd, { cwd: opts.cwd, env: opts.env, stdout: 'pipe', stderr: 'pipe' })
@@ -43,7 +45,7 @@ const REAL_EXEC: ExecFn = async (cmd, opts) => {
   const timer = setTimeout(() => {
     timedOut = true
     try { p.kill() } catch {}
-  }, EXEC_TIMEOUT_MS)
+  }, Math.min(opts.timeoutMs ?? EXEC_TIMEOUT_MS, EXEC_TIMEOUT_MS))
   try {
     const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()])
     const code = await p.exited
@@ -81,8 +83,19 @@ function authArgs(env: NodeJS.ProcessEnv): string[] {
   return ['-c', 'credential.helper=', '-c', `credential.https://github.com.helper=${helper}`]
 }
 
-const git = (cwd: string | undefined, args: string[], env: NodeJS.ProcessEnv) =>
-  execImpl(['git', ...authArgs(env), ...args], { cwd, env })
+type GitFn = (cwd: string | undefined, args: string[], env: NodeJS.ProcessEnv) => Promise<ExecResult>
+
+const git: GitFn = (cwd, args, env) => execImpl(['git', ...authArgs(env), ...args], { cwd, env })
+
+/** A git runner that shares ONE deadline across every command of an operation (each is also capped individually). */
+function budgetedGit(totalMs: number): GitFn {
+  const deadline = Date.now() + totalMs
+  return async (cwd, args, env) => {
+    const left = deadline - Date.now()
+    if (left <= 0) return { code: 124, out: 'budget exhausted' }
+    return execImpl(['git', ...authArgs(env), ...args], { cwd, env, timeoutMs: left })
+  }
+}
 
 interface Layout {
   root: string
@@ -123,8 +136,8 @@ async function sandboxCheck(path: string, existing: boolean): Promise<string | n
 }
 
 /** The remote default branch (never guessed): `git ls-remote --symref origin HEAD`. */
-async function defaultBranch(cwd: string, env: NodeJS.ProcessEnv): Promise<string | null> {
-  const r = await git(cwd, ['ls-remote', '--symref', 'origin', 'HEAD'], env)
+async function defaultBranch(cwd: string, env: NodeJS.ProcessEnv, g: GitFn): Promise<string | null> {
+  const r = await g(cwd, ['ls-remote', '--symref', 'origin', 'HEAD'], env)
   if (r.code !== 0) return null
   const m = /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(r.out)
   return m ? m[1]! : null
@@ -133,10 +146,10 @@ async function defaultBranch(cwd: string, env: NodeJS.ProcessEnv): Promise<strin
 const normUrl = (u: string): string => u.trim().replace(/\\/g, '/').replace(/\.git$/i, '').replace(/\/+$/, '').toLowerCase()
 
 /** True when the canonical clone's root is the canonical path and its `origin` is exactly the expected remote. */
-async function originMatches(lay: Layout, env: NodeJS.ProcessEnv): Promise<boolean> {
-  const top = await git(lay.canonical, ['rev-parse', '--show-toplevel'], env)
+async function originMatches(lay: Layout, env: NodeJS.ProcessEnv, g: GitFn): Promise<boolean> {
+  const top = await g(lay.canonical, ['rev-parse', '--show-toplevel'], env)
   if (top.code !== 0 || normUrl(top.out) !== normUrl(lay.canonical)) return false
-  const o = await git(lay.canonical, ['remote', 'get-url', 'origin'], env)
+  const o = await g(lay.canonical, ['remote', 'get-url', 'origin'], env)
   return o.code === 0 && normUrl(o.out) === normUrl(cloneUrlImpl(lay.owner, lay.name))
 }
 
@@ -144,6 +157,7 @@ export async function runCorchWorktreeEnsure(args: string[]): Promise<CommandRes
   const lay = layoutFor(args[0], args[1])
   if (typeof lay === 'string') return { exit_code: 1, error: lay }
   const env = childEnv()
+  const g = budgetedGit(ENSURE_BUDGET_MS)
 
   for (const p of [lay.canonical, lay.worktree]) {
     const bad = await sandboxCheck(p, false)
@@ -151,23 +165,23 @@ export async function runCorchWorktreeEnsure(args: string[]): Promise<CommandRes
   }
 
   // 1. Canonical clone (https with the worker credential) when absent.
-  const hasClone = (await git(lay.canonical, ['rev-parse', '--git-dir'], env).catch(() => ({ code: 1, out: '' }))).code === 0
+  const hasClone = (await g(lay.canonical, ['rev-parse', '--git-dir'], env).catch(() => ({ code: 1, out: '' }))).code === 0
   if (!hasClone) {
     mkdirSync(join(lay.root, lay.owner), { recursive: true })
-    const c = await git(undefined, ['clone', cloneUrlImpl(lay.owner, lay.name), lay.canonical], env)
+    const c = await g(undefined, ['clone', cloneUrlImpl(lay.owner, lay.name), lay.canonical], env)
     if (c.code !== 0) return { exit_code: 1, error: 'git_clone_failed' }
   }
 
   // A reused clone must be THE requested repository: bind its origin before any authenticated operation.
-  if (!(await originMatches(lay, env))) return { exit_code: 1, error: 'clone_origin_mismatch' }
+  if (!(await originMatches(lay, env, g))) return { exit_code: 1, error: 'clone_origin_mismatch' }
 
-  const fetched = await git(lay.canonical, ['fetch', 'origin', '--quiet'], env)
+  const fetched = await g(lay.canonical, ['fetch', 'origin', '--quiet'], env)
   if (fetched.code !== 0) return { exit_code: 1, error: 'git_fetch_failed' }
-  const def = await defaultBranch(lay.canonical, env)
+  const def = await defaultBranch(lay.canonical, env, g)
   if (!def) return { exit_code: 1, error: 'default_branch_unresolved' }
 
   // 2. Reuse an existing worktree of exactly this path on exactly this branch.
-  const list = await git(lay.canonical, ['worktree', 'list', '--porcelain'], env)
+  const list = await g(lay.canonical, ['worktree', 'list', '--porcelain'], env)
   if (list.code !== 0) return { exit_code: 1, error: 'git_worktree_list_failed' }
   const block = list.out.split(/\r?\n\r?\n/).find((b) => b.split(/\r?\n/).some((l) => l === `worktree ${lay.worktree.replace(/\\/g, '/')}` || l === `worktree ${lay.worktree}`))
   if (block) {
@@ -177,10 +191,10 @@ export async function runCorchWorktreeEnsure(args: string[]): Promise<CommandRes
 
   // 3. Create it. A leftover local branch (worktree removed, branch kept) is attached instead of recreated.
   mkdirSync(join(lay.root, 'corch'), { recursive: true })
-  const branchExists = (await git(lay.canonical, ['rev-parse', '--verify', '--quiet', `refs/heads/${lay.branch}`], env)).code === 0
+  const branchExists = (await g(lay.canonical, ['rev-parse', '--verify', '--quiet', `refs/heads/${lay.branch}`], env)).code === 0
   const add = branchExists
-    ? await git(lay.canonical, ['worktree', 'add', lay.worktree, lay.branch], env)
-    : await git(lay.canonical, ['worktree', 'add', lay.worktree, '-b', lay.branch, `origin/${def}`], env)
+    ? await g(lay.canonical, ['worktree', 'add', lay.worktree, lay.branch], env)
+    : await g(lay.canonical, ['worktree', 'add', lay.worktree, '-b', lay.branch, `origin/${def}`], env)
   if (add.code !== 0) return { exit_code: 1, error: 'git_worktree_add_failed' }
   return { exit_code: 0, snippet: JSON.stringify({ path: lay.worktree, branch: lay.branch, default_branch: def, reused: false }) }
 }
@@ -208,13 +222,15 @@ export async function runCorchWorktreeRemove(args: string[]): Promise<CommandRes
 }
 
 export async function runCorchPrLookup(args: string[]): Promise<CommandResult> {
-  const [path, branch] = args
-  if (!path || !BRANCH_RE.test(branch ?? '')) return { exit_code: 1, error: 'invalid_args' }
+  const [path, branch, repoIdent] = args
+  const m = REPO_IDENT_RE.exec(repoIdent ?? '')
+  if (!path || !BRANCH_RE.test(branch ?? '') || !m) return { exit_code: 1, error: 'invalid_args' }
   const bad = await sandboxCheck(path, true)
   if (bad) return { exit_code: 1, error: bad }
   const env = childEnv()
+  delete env.GH_REPO // an inherited override must never redirect the lookup; the repository is passed explicitly
   const r = await execImpl(
-    ['gh', 'pr', 'list', '--head', branch!, '--state', 'open', '--json', 'url,headRefName,isCrossRepository', '--limit', '5'],
+    ['gh', 'pr', 'list', '--repo', `${m[1]}/${m[2]}`, '--head', branch!, '--state', 'open', '--json', 'url,headRefName,isCrossRepository', '--limit', '5'],
     { cwd: path, env },
   )
   if (r.code !== 0) return { exit_code: 1, error: 'gh_pr_list_failed' }

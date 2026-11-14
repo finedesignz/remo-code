@@ -215,7 +215,7 @@ export function createPrLookup(deps: Pick<WorkspaceDeps, 'store' | 'runCommand' 
       if (!run || !run.supervisor_id || !run.worktree_path) return { kind: 'unavailable' }
       const h = await deps.halt(a.userId)
       if (!h.ok) return { kind: 'unavailable' }
-      const r = await deps.runCommand(run.supervisor_id, a.userId, 'corch.pr_lookup', [run.worktree_path, a.branch])
+      const r = await deps.runCommand(run.supervisor_id, a.userId, 'corch.pr_lookup', [run.worktree_path, a.branch, a.repoIdent])
       const out = parseSnippet<{ pr_url?: string | null }>(r)
       if (!out) return { kind: 'unavailable' }
       return typeof out.pr_url === 'string' && out.pr_url.length > 0 ? { kind: 'open', url: out.pr_url } : { kind: 'none' }

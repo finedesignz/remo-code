@@ -196,10 +196,10 @@ export interface CorchStore {
   endRunMarkPrOpen(runId: string, prUrl: string): Promise<EndResult>
   isEnrolledEnabled(userId: string, repoIdent: string): Promise<boolean>
   runContext(runId: string): Promise<RunContext | null>
-  /** CORCH-09: the most recent run of a work item (ended or not) with its repo_ident, for worktree removal and the memlog release. */
+  /** CORCH-09: the most recent run of a work item that HAS a worktree (else the most recent run) with its repo_ident, for worktree removal and the memlog release. */
   latestRunForItem(userId: string, itemId: string): Promise<(CorchRun & { repo_ident: string }) | null>
   /** CORCH-09: items waiting on their PR (pr_open): their memlog claim is heartbeated until the item is done/blocked. */
-  prOpenItems?(limit: number): Promise<Array<{ id: string; user_id: string; repo_ident: string }>>
+  prOpenItems?(limit: number, afterId?: string | null): Promise<Array<{ id: string; user_id: string; repo_ident: string }>>
   /** Live (not ended) runs for the user, excluding one run (the request's own). */
   liveRunsForUser(userId: string, excludeRunId: string): Promise<number>
   /** Today's four-bucket token total for the project's CORCH sessions, in the user's tz-day. */
@@ -642,17 +642,17 @@ export const corchStore: CorchStore = {
       FROM corch_runs r
       JOIN corch_projects p ON p.id = r.project_id
       WHERE r.work_item_id = ${itemId} AND r.user_id = ${userId}
-      ORDER BY r.started_at DESC, r.id DESC
+      ORDER BY (r.worktree_path IS NULL) ASC, r.started_at DESC, r.id DESC
       LIMIT 1`
     return rows[0] ?? null
   },
 
-  async prOpenItems(limit) {
+  async prOpenItems(limit, afterId = null) {
     return sql<{ id: string; user_id: string; repo_ident: string }[]>`
       SELECT i.id, i.user_id, p.repo_ident
       FROM corch_work_items i JOIN corch_projects p ON p.id = i.project_id
-      WHERE i.status = 'pr_open'
-      ORDER BY i.updated_at ASC LIMIT ${limit}`
+      WHERE i.status = 'pr_open' AND (${afterId}::uuid IS NULL OR i.id > ${afterId}::uuid)
+      ORDER BY i.id ASC LIMIT ${limit}`
   },
 
   async liveRunsForSupervisor(supervisorId) {

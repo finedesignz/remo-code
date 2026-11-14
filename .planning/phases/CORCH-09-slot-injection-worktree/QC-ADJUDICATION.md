@@ -16,3 +16,14 @@ explicitly, API key scrubbed, git push env kept, output redacted); without the s
 no `account_slot`), so a desktop MSI is never a CORCH target and CORCH never routes to it. A desktop operator who sets the token
 in their own environment is using their own account, outside CORCH. Tests: `supervisor/test/corch-slot.test.ts` ("no slot").
 Risk accepted: none new; behavior without the slot is byte-for-byte the previous behavior.
+
+## R2 finding 1 (HIGH, token redaction incomplete): partially fixed, remainder adjudicated as an accepted limit
+
+Fixed: redaction now covers the slot token AND the git credentials the slot keeps in env (`GH_TOKEN`, `GITHUB_TOKEN`), in string
+values and object keys. Not fixed, by design: a secret split across SEPARATE events (e.g. two `text_delta` chunks) or re-encoded by the
+child (base64, hex) is not caught. Closing that would require holding back every streamed delta (a latency/semantics change to all
+streaming) and still could not stop re-encoding. The redaction is a backstop, not the boundary: the boundaries are (a) the hub holds no
+token and has no code path that reads one (guard test), (b) the token exists only in the supervisor and its own `claude` child, (c) that child is
+the slot's own authenticated worker, so any agent able to print its env already holds the credential the slot was given. A
+prompt-injected worker exfiltrating its own subscription token via a self-chosen encoding is the same residual risk as any agent holding a
+credential; the rotation-free mitigation is least privilege (deploy credentials scrubbed, API key scrubbed, one token per slot).

@@ -440,12 +440,11 @@ failure, quota death or reclaim after a worktree was attached; the worktree is k
 is blocked (worktree kept), (c) when it is done (AAF merged) or cancelled (gsd-console cancelled a queued item), which also removes
 the worktree, and (d) on any throw inside `resolve` after the claim (an RPC timeout excepted: the command may still be mutating the
 worktree, so the claim is left to lapse and re-taken by the same session). While an item is `pr_open` the claim is KEPT and the
-reconciler heartbeats it, together with the claims of live runs, until AAF closes the item. The supervisor kills any git/gh
-command after 240s, below the hub's 600s RPC timeout, so the hub always receives a real reply. The supervisor never advertises the
+reconciler heartbeats it (paged, 200 items per pass with a cursor), together with the claims of live runs, until AAF closes the item. Claim ownership is fenced per item (an in-process owner map under a per-item lock), so a stale run's cleanup never releases a newer run's claim. One `worktree_ensure` runs under a single 480s budget (each git command also capped at 240s), below the hub's 600s RPC timeout, so the hub always receives a real reply; a timeout leaves the claim to lapse and is never released. The supervisor never advertises the
 `corch.*` commands, so a scheduled task cannot invoke them; clone identity is bound (`origin` must equal the expected remote,
 `clone_origin_mismatch` otherwise), the git credential helper is scoped to `https://github.com`, a worktree on any branch other than
-`corch/<id>` is never force-removed (`worktree_wrong_branch`), and with the slot set every runner event is scrubbed of the exact
-token value before it reaches the hub.
+`corch/<id>` is never force-removed (`worktree_wrong_branch`), and with the slot set every runner event (string values and keys) is scrubbed of the exact
+token and git credential values before it reaches the hub (best-effort: a value split across events or re-encoded is not caught; the control is that no hub state holds the token). `pr_lookup` pins `--repo` and ignores an inherited `GH_REPO`.
 
 **Memlog claim (R3.8): BLOCKED-ON-MCP.** memlog is a gateway-only MCP Factory server; the hub holds no gateway credential
 and has no MCP client, so no verified hub->memlog transport exists (7e request filed to `mcp-servers`). The `MemlogClient`

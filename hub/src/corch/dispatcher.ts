@@ -270,6 +270,25 @@ function errMsg(err: unknown): string {
 export function createCorchDispatcher(deps: CorchDeps) {
   /** Items this process is currently launching (never reclaimed as orphans). */
   const inFlight = new Set<string>()
+  /**
+   * CORCH-09 claim fencing (hub is a single process). The memlog session is `corch:<item>` for EVERY attempt, so an
+   * old run's cleanup must never release a newer run's claim. `claimOwner` records which run holds the item's claim; every
+   * resolve and every release for an item runs under `withItemLock`, so a cleanup that lost the race sees the newer owner.
+   */
+  const claimOwner = new Map<string, string>()
+  /** Items whose worktree command timed out: it may still be running, so the claim is left to lapse (never released). */
+  const unconfirmed = new Set<string>()
+  const itemLocks = new Map<string, Promise<unknown>>()
+  function withItemLock<T>(itemId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = itemLocks.get(itemId) ?? Promise.resolve()
+    const run = prev.then(fn, fn)
+    const tail = run.then(() => undefined, () => undefined)
+    itemLocks.set(itemId, tail)
+    void tail.then(() => {
+      if (itemLocks.get(itemId) === tail) itemLocks.delete(itemId)
+    })
+    return run
+  }
   let timer: unknown = null
   /**
    * Run ids that may still send. Added when a run's pipeline is built, removed SYNCHRONOUSLY by every path
@@ -373,27 +392,45 @@ export function createCorchDispatcher(deps: CorchDeps) {
 
   /** CORCH-09: item terminal -> the Workspace's removal/claim release. Best effort, never throws (LD-10). */
   async function releaseItem(userId: string, itemId: string, status: 'done' | 'blocked' | 'cancelled' | 'requeued'): Promise<void> {
-    try {
-      await deps.workspace.release?.({ userId, itemId, status })
-    } catch (err) {
-      log(`workspace release failed item=${itemId}: ${errMsg(err)}`)
-    }
+    await withItemLock(itemId, async () => {
+      // A worktree command that timed out may still be mutating the worktree: never release (or remove) under it.
+      if (unconfirmed.has(itemId) && status !== 'done' && status !== 'cancelled') return
+      claimOwner.delete(itemId)
+      try {
+        await deps.workspace.release?.({ userId, itemId, status })
+      } catch (err) {
+        log(`workspace release failed item=${itemId}: ${errMsg(err)}`)
+      }
+    })
   }
 
   /**
-   * A run ended and its item went back to the queue: a memlog claim exists only if the run got as far as having a
-   * worktree attached, and nothing heartbeats a claim without a live run, so it is released now (the next attempt
-   * re-claims). Not called for pr_open (the claim is kept and heartbeated until done/blocked).
+   * A run ended and its item went back to the queue: release the claim this RUN holds (the next attempt re-claims).
+   * A newer run that already took the claim is never touched (fenced by `claimOwner` under the item lock). Not called for
+   * pr_open (the claim is kept and heartbeated until done/blocked).
    */
   async function releaseIfClaimed(runId: string, userId: string, itemId: string): Promise<void> {
-    try {
-      const rc = await deps.store.runContext(runId)
-      if (!rc?.run.worktree_path) return
-    } catch (err) {
-      log(`run context failed run=${runId}: ${errMsg(err)}`)
-      return
-    }
-    await releaseItem(userId, itemId, 'requeued')
+    await withItemLock(itemId, async () => {
+      const owner = claimOwner.get(itemId)
+      if (owner !== undefined && owner !== runId) return // a newer run holds the claim now
+      if (owner === undefined) {
+        // No in-memory record (hub restarted since): fall back to the run having a worktree attached.
+        try {
+          const rc = await deps.store.runContext(runId)
+          if (!rc?.run.worktree_path) return
+        } catch (err) {
+          log(`run context failed run=${runId}: ${errMsg(err)}`)
+          return
+        }
+      }
+      if (unconfirmed.has(itemId)) return
+      claimOwner.delete(itemId)
+      try {
+        await deps.workspace.release?.({ userId, itemId, status: 'requeued' })
+      } catch (err) {
+        log(`workspace release failed item=${itemId}: ${errMsg(err)}`)
+      }
+    })
   }
 
   /** A run ended: free slot may start another item. Not re-entered from inside the claiming loop. */
@@ -692,7 +729,20 @@ export function createCorchDispatcher(deps: CorchDeps) {
         try {
           let ws: WorkspaceResult
           try {
-            ws = await deps.workspace.resolve({ userId, item: c.item, project: c.project, runId: c.run.id })
+            ws = await withItemLock(c.item.id, async () => {
+              try {
+                const r = await deps.workspace.resolve({ userId, item: c.item, project: c.project, runId: c.run.id })
+                // The claim is ours from here (even if attachSession or the launch fails): record the owner BEFORE the lock opens.
+                if (r.ok) {
+                  claimOwner.set(c.item.id, c.run.id)
+                  unconfirmed.delete(c.item.id)
+                }
+                return r
+              } catch (err) {
+                if (/supervisor_timeout/.test(errMsg(err))) unconfirmed.add(c.item.id)
+                throw err
+              }
+            })
           } catch (err) {
             // A throwing Workspace is a failure with an attempt (bounded backoff, blocked + one notification):
             // ending the run as an orphan would requeue it with no attempt and retry forever (QC MED 2).
@@ -787,7 +837,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
     }
   }
 
-  return { deps, evaluateUser, evaluateAll, armNotBeforeTimer, inFlight, reclaimRun, stallRun, onSupervisorClosed, cancelRunSends, releaseItem }
+  return { deps, evaluateUser, evaluateAll, armNotBeforeTimer, inFlight, reclaimRun, stallRun, onSupervisorClosed, cancelRunSends, releaseItem, releaseIfClaimed }
 }
 
 export type CorchDispatcher = ReturnType<typeof createCorchDispatcher>

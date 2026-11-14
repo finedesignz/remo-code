@@ -72,7 +72,7 @@ maybe('CORCH-09 e2e - slot worktree, memlog claim and PR lookup on real Postgres
   const itemRow = async (id: string) => (await h.sql`SELECT * FROM corch_work_items WHERE id = ${id}`)[0]!
   const runRows = async (itemId: string) => h.sql`SELECT * FROM corch_runs WHERE work_item_id = ${itemId} ORDER BY started_at ASC`
 
-  function world(o: { claim?: import('../../src/corch/memlog.ts').MemlogClaimResult; memlog?: import('../../src/corch/memlog.ts').MemlogClient; prUrl?: string | null | 'fail' } = {}) {
+  function world(o: { claim?: import('../../src/corch/memlog.ts').MemlogClaimResult; memlog?: import('../../src/corch/memlog.ts').MemlogClient; prUrl?: string | null | 'fail'; attachFails?: boolean; ensureError?: string } = {}) {
     const w = {
       events: [] as string[],
       frames: [] as Array<{ command: string; args: string[]; supervisorId: string }>,
@@ -104,6 +104,7 @@ maybe('CORCH-09 e2e - slot worktree, memlog claim and PR lookup on real Postgres
       runCommand: async (supervisorId, _u, command, args) => {
         w.events.push(`frame ${command}`)
         w.frames.push({ command, args, supervisorId })
+        if (command === 'corch.worktree_ensure' && o.ensureError) return { exit_code: 1, error: o.ensureError }
         if (command === 'corch.worktree_ensure') {
           const name = args[0]!.split('/').pop()!
           return { exit_code: 0, snippet: JSON.stringify({ path: `${ROOT}/corch/${name}-${args[1]}`, branch: `corch/${args[1]}` }) }
@@ -121,6 +122,8 @@ maybe('CORCH-09 e2e - slot worktree, memlog claim and PR lookup on real Postgres
       supervisor: () => ({ hostname: 'slot-host', root: ROOT }),
       ensureSession: async ({ userId, worktreePath, hostname }) => {
         w.sessions.push({ hostname, path: worktreePath })
+        const existing = await h.sql<{ id: string }[]>`SELECT id FROM sessions WHERE user_id = ${userId} AND project_dir = ${worktreePath} AND deleted_at IS NULL LIMIT 1`
+        if (existing[0]) return existing[0].id
         const r = await h.sql<{ id: string }[]>`
           INSERT INTO sessions (user_id, name, project_dir, token_hash, hostname)
           VALUES (${userId}, 'corch-slot-e2e', ${worktreePath}, ${'th-' + randomUUID()}, ${hostname}) RETURNING id`
@@ -130,7 +133,7 @@ maybe('CORCH-09 e2e - slot worktree, memlog claim and PR lookup on real Postgres
     }
     const workspace = wsMod.createWorkspace(wsDeps)
     const deps: any = {
-      store: storeMod.corchStore,
+      store: o.attachFails ? { ...storeMod.corchStore, attachSession: async () => { throw new Error('attach exploded') } } : storeMod.corchStore,
       workspace,
       launch: {
         ...autoMod.REAL_AUTOSPAWN,
@@ -185,7 +188,7 @@ maybe('CORCH-09 e2e - slot worktree, memlog claim and PR lookup on real Postgres
 
     // turn end -> the REAL PrLookup asks the run's own slot supervisor
     await w.dispatches[0]!.pdeps.store.onFinalize(`corch-run:${run!.id}`, 'done')
-    expect(w.frames.at(-1)).toEqual({ command: 'corch.pr_lookup', args: [`${ROOT}/corch/app-${itemId}`, `corch/${itemId}`], supervisorId: 'slot-sup-1' })
+    expect(w.frames.at(-1)).toEqual({ command: 'corch.pr_lookup', args: [`${ROOT}/corch/app-${itemId}`, `corch/${itemId}`, 'github://acme/app'], supervisorId: 'slot-sup-1' })
     const after = await itemRow(itemId)
     expect(after.status).toBe('pr_open')
     expect(after.pr_url).toBe('https://github.com/acme/app/pull/12')
@@ -275,6 +278,46 @@ maybe('CORCH-09 e2e - slot worktree, memlog claim and PR lookup on real Postgres
     const { w, d } = world()
     await d.releaseItem(userId, a.item.id, 'cancelled')
     expect(w.events.length).toBe(0) // no run existed for it: nothing to remove or release
+  })
+
+  test('QC2: an attachSession failure after a successful claim still releases the claim', async () => {
+    const userId = await mkUser()
+    const projectId = await mkProject(userId, 'github://acme/attach')
+    const a = await enq(userId, projectId, 'attach-1')
+    const { w, d } = world({ attachFails: true })
+    await d.evaluateUser(userId)
+    expect(w.launches.length).toBe(0)
+    expect(w.events.filter((e) => e === `memlog.release corch:${a.item.id} DONE`).length).toBe(1)
+  })
+
+  test('QC2: a stale run cleanup never releases a NEWER run\'s claim (fenced per item)', async () => {
+    const userId = await mkUser()
+    const projectId = await mkProject(userId, 'github://acme/fence')
+    const a = await enq(userId, projectId, 'fence-1')
+    const { w, d } = world({ prUrl: null })
+    await d.evaluateUser(userId)
+    const [run1] = await runRows(a.item.id)
+    await w.dispatches[0]!.pdeps.store.onFinalize(`corch-run:${run1!.id}`, 'done') // no PR -> requeued, claim released once
+    await h.sql`UPDATE corch_work_items SET not_before = NULL WHERE id = ${a.item.id}`
+    await d.evaluateUser(userId) // run 2 re-claims
+    const claims = () => w.events.filter((e) => e.startsWith('memlog.claim')).length
+    const releases = () => w.events.filter((e) => e.startsWith('memlog.release')).length
+    expect(claims()).toBe(2)
+    expect(releases()).toBe(1)
+    await d.releaseIfClaimed(run1!.id, userId, a.item.id) // the OLD run's late cleanup
+    expect(releases()).toBe(1) // the newer claim was not released
+  })
+
+  test('QC2: a worktree RPC timeout never releases the claim, even when the item is then blocked', async () => {
+    const userId = await mkUser()
+    const projectId = await mkProject(userId, 'github://acme/timeout')
+    const a = await enq(userId, projectId, 'to-1')
+    await h.sql`UPDATE corch_work_items SET max_attempts = 1 WHERE id = ${a.item.id}`
+    const { w, d } = world({ ensureError: 'supervisor_timeout' })
+    await d.evaluateUser(userId)
+    expect((await itemRow(a.item.id)).status).toBe('blocked')
+    expect(w.events.some((e) => e.startsWith('memlog.release'))).toBe(false)
+    expect(w.launches.length).toBe(0)
   })
 
   test('blocked item releases the claim but keeps the worktree', async () => {
