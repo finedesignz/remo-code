@@ -350,7 +350,10 @@ export function createCorchDispatcher(deps: CorchDeps) {
       markDispatched: async () => {
         if (!(await deps.store.markRunRunning(c.runId))) throw new Error('corch_run_not_live')
       },
-      markSkipped: async (_token, reason) => endRefusal(c, reason, true),
+      // The real pipeline reports a busy session as markSkipped('session_busy') BEFORE it returns
+      // dropped_busy. It is a dispatch failure (attempt + backoff, LD-8), not a no-deadline refusal.
+      markSkipped: async (_token, reason) =>
+        reason === 'session_busy' ? endFailure(c, 'dropped_busy', true) : endRefusal(c, reason, true),
       markFailed: async () => endFailure(c, 'dispatch_failed', false),
       onFinalize: async () => handleRunEnd(c),
     }
