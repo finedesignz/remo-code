@@ -173,3 +173,31 @@ Docs: `docs/corch.md` updated (G1 backoff vs hold, G2 120 s future bound, G3 lau
 ### Final checks (fresh DBs on 127.0.0.1:55432, CI-equivalent env, each file in its own bun process)
 
 All corch unit files (boot-assert 15, flag-off 5, gates 58, no-polling-guard 2, prompt 3, quota-binding 10, quota-death 18, quota-eligibility 37, quota-ingest 32, quota-selection 24, quota-wait 14, routes 13), guards (kill-switch-coverage 10, token-cap-coverage 7, counter-key-assignment-guard 9, launch-callers-guard 12, launch-machine-guard 11, api-keys-scopes 37, mount-order 29) and e2e (corch-quota 18, corch-dispatcher 28) pass with 0 fail. `check-baseline` (CI env, fresh DB) OK: pass=4054 skip=0 fail=0. Typecheck (`bunx tsc --noEmit -p hub/tsconfig.json`) 253 errors (limit 253; none in touched files). `schema-lint` OK (5 allowed, none new). `docs:openapi` regenerated with no diff to `docs/openapi.json` (route shape unchanged), so `docs:sync` produced no change.
+
+## QC round 3 fixes
+
+Source: `QC-CODEX-R3.md` (CONTENT BLOCK, 2 MED + 2 LOW) and `VERIFICATION.md`. Tests first (red), then fix, one commit per item.
+
+| Item | Finding | Commit | Test |
+|---|---|---|---|
+| H1 | MED #1: a quota refusal at dispatch copied `earliestEligibleAt` into the item's `not_before`, restoring the long hold after the death backoff. Now `not_before = min(earliestEligibleAt, now + 600s)` (NULL when `earliestEligibleAt` is NULL); account state alone governs eligibility. | `baf9252` | `corch-quota-wait` (far reset capped at now+600s with injected clock, near reset kept); `corch-quota.e2e` death -> still over ceiling -> backoff expires -> quota refusal -> healthy reading before reset -> item claimable after at most 600s, not at the reset |
+| H2 | MED #2: a row already poisoned with a far-future `fetched_at` kept rejecting genuine readings. The upsert treats a stored `fetched_at` more than 120 s ahead of server time as invalid and overwrites it. | `aa1d004` | `corch-quota.e2e`: a 2099 row inserted directly, a normal live reading POSTed -> applied, block cleared |
+| H3 | Verifier note: `skip_max` did not match the real DB-less skip count. Measured `bun run check-baseline` with no DB env: pass=3802 skip=345 fail=0 total=4147; `skip_max` 336 -> 345, corch-02 skip note updated. Passes DB-less and with the CI env. | `7f98e48` | `bun run check-baseline` both configurations |
+| H4 | Doc: accepted residuals recorded (below) and in `docs/corch.md`. | this commit | n/a |
+
+Also fixed: the F2 commit hash typo in `VERIFICATION.md` (`2a3e396`, not `2a38e0b`).
+
+### Accepted residuals
+
+- Supervisor rebinding between `resolveTarget` and the send (QC R3 #3, LOW): the binding is re-read at launch resolution but not across the later reservation and ledger awaits. One fixed account token per supervisor container (F4) preserves the binding across ordinary reconnects. Documented operational constraint, not an enforced invariant.
+- Publisher-declared source trust (QC R3 #4, LOW): `source: live` and `fetched_at > blocked_at` are publisher-supplied clear provenance. Requires an explicit `quota:publish` key and affects only the key owner's own user.
+
+### Deviations
+
+- Scope fence: QC F5 edited `launch.ts` and `governed-launch.ts` (outside the original CORCH-02 file scope). The change is additive and opt-in (`targetSupervisorId` / `resolveTarget` apply to the corch launch only; other callers are unchanged).
+- H1/H2 e2e tests live in the existing `corch-quota.e2e.test.ts`; the H2 test was committed with the H2 fix so each commit is green.
+- Commit trailer: the harness attribution (Claude Sonnet 5.5) was used.
+
+### Final checks (fresh DB on 127.0.0.1:55432, CI-equivalent env, each file in its own bun process)
+
+All corch unit files (boot-assert 15, flag-off 5, gates 58, no-polling-guard 2, prompt 3, quota-binding 10, quota-death 18, quota-eligibility 37, quota-ingest 32, quota-selection 24, quota-wait 15, routes 13), guards (kill-switch-coverage 10, token-cap-coverage 7, counter-key-assignment-guard 9, launch-callers-guard 12, launch-machine-guard 11, api-keys-scopes 37, mount-order 29) and e2e (corch-quota 20, corch-dispatcher 28) pass with 0 fail. `check-baseline` OK in both configurations: CI env fresh DB pass=4057 skip=0 fail=0; DB-less (no DB env) pass=3802 skip=345 fail=0 total=4147. Typecheck 253 errors (limit 253). `schema-lint` OK.

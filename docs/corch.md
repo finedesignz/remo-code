@@ -224,9 +224,11 @@ must be connected), else the same refusal. `GET /api/quota/snapshot` evaluates e
 same live per-account busy counts as dispatch.
 
 **Wait.** A `quota:` refusal requeues the item with `wait_reason = quota:<reason>`, no attempt consumed, and
-`not_before` = the earliest time any account can become eligible when EVERY ineligible account carries one, else NULL
-(only an event can change it: a snapshot POST, a supervisor hello or close, a run end). The existing single
-`not_before` scheduler consumes it; no new timer or poll was added.
+`not_before` = `min(earliest time any account can become eligible, now + 600s)` when EVERY ineligible account carries
+one, else NULL (only an event can change it: a snapshot POST, a supervisor hello or close, a run end). The item is
+never held to a far-future reset: the account state alone governs eligibility, so a healthy snapshot arriving before
+the reset releases the item within one 600 s backoff window. The existing single `not_before` scheduler consumes it;
+no new timer or poll was added.
 
 **Quota death (R2.5).** A run whose end text (`onFinalize` content or `markFailed` error) is, as a whole, the CLI
 usage-limit signal (`hub/src/corch/quota-death.ts`: the legacy `Claude AI usage limit reached|<epoch>` or the
@@ -243,6 +245,17 @@ attempt, and the PR lookup is skipped. A long assistant message that merely ment
 limit: the supervisor relays a whole turn's text, so a run that wrote prose and then hit the limit does not match
 the whole-text anchor and follows the CORCH-01 `no_pr` path (fail-safe direction). Details and evidence:
 `.planning/phases/CORCH-02-quota-ingest/CORCH-02-RESEARCH.md`.
+
+**Future-dated stored readings (QC3 H2).** Ingest rejects a `fetched_at` or `generated_at` more than 120 s ahead of
+server time. A row already stored with such a timestamp (written before that bound) is treated as invalid by the
+upsert: any genuine reading overwrites it, so it cannot reject later readings or pin a block.
+
+**Accepted residuals (CORCH-02).**
+- Supervisor rebinding between `resolveTarget` and the send: the binding is re-read at launch resolution, not again
+  across the reservation and ledger awaits. Each supervisor container uses one fixed account token, so a reconnect
+  preserves its account binding; this is a documented operational constraint, not an enforced code invariant.
+- Publisher-declared source trust: `source: live` and `fetched_at > blocked_at` are publisher-supplied and clear a
+  death block. Only a holder of a `quota:publish` key can do this, and only for that key owner's own user.
 
 ## Fail-closed defaults (LD-11)
 
