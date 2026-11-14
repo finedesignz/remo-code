@@ -25,6 +25,9 @@ COPY --from=deps /opt/remo/supervisor/node_modules supervisor/node_modules
 COPY supervisor/package.json supervisor/
 COPY supervisor/src supervisor/src
 COPY tools/cloud-session/write-config.ts tools/cloud-session/write-config.ts
+# Cross-directory static imports of the supervisor source (version.ts, git-introspect.ts): JSON/TS only, no Tauri binary.
+COPY supervisor/tauri/src-tauri/tauri.conf.json supervisor/tauri/src-tauri/tauri.conf.json
+COPY hub/src/lib/repo-key.ts hub/src/lib/repo-key.ts
 COPY tools/slot-image/entrypoint.sh /usr/local/bin/remo-slot-entrypoint
 
 # Non-secret defaults only. Volumes: /data/claude (this slot's Claude login/config), /data/work (checkouts).

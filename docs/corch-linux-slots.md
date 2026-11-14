@@ -23,7 +23,7 @@ refuses to start (exit 64) if any required one is missing and never prints a val
 | `REMO_HUB_URL` | yes | Hub origin, for example `https://app.remo-code.com` |
 | `REMO_API_KEY` | yes | This slot's own `purpose='host'` key (`POST /api/api-keys {host:true}`), written to a 0600 `supervisor.json` at start |
 | `CLAUDE_CODE_OAUTH_TOKEN` | yes | Exactly one account's subscription OAuth token; handed only to the spawned `claude` child. No API key is supported |
-| `REMO_GIT_TOKEN` | optional | Git credential for HTTPS clones/pushes, wired through an in-memory credential helper (nothing written to disk) |
+| `REMO_GIT_TOKEN` | optional | Git credential, wired through an in-memory credential helper scoped to `https://$REMO_GIT_HOST` (default `github.com`) only; nothing written to disk |
 
 Non-secret defaults baked in: `REMO_ROOTS=/data/work`, `REMO_SLOT_CLAUDE_CONFIG_DIR=/data/claude`,
 `REMO_CODE_CONFIG_DIR=/home/node/.config/remo-code`, `REMO_MAX_CONCURRENT=1`.
