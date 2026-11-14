@@ -62,6 +62,8 @@ describe('classifyQuotaDeath (LD-Q10, CORCH-R2.5)', () => {
   })
 })
 
+const NOW = new Date('2026-11-13T10:00:00Z') // the injected dispatcher clock
+
 interface WorldOpts {
   accountSlot: string | null
   markDeath?: (a: any) => Promise<Date | null>
@@ -125,8 +127,9 @@ function world(opts: WorldOpts) {
     },
     notify: async () => {},
     timers: { setTimeout: () => ({}), clearTimeout: () => {} },
+    now: () => NOW,
   }
-  return { ends, markDeathCalls, prCalls, dispatched, deps }
+  return { ends, markDeathCalls, prCalls, dispatched, deps, clock: NOW }
 }
 
 describe('CORCH-R2.5 SC5: handleRunEnd on a death sample', () => {
@@ -138,8 +141,26 @@ describe('CORCH-R2.5 SC5: handleRunEnd on a death sample', () => {
     expect(w.ends.length).toBe(0) // dispatched, still running
     await w.dispatched[0].pdeps.store.onFinalize('corch-run:run-1', SESSION)
     expect(w.markDeathCalls).toEqual([{ userId: 'u1', accountId: 'acct_a', resetAt: null, window: '5h' }])
-    expect(w.ends[0]).toEqual({ endReason: 'quota_death', consumeAttempt: false, waitReason: 'quota:death', notBefore: { at: until.toISOString() } })
+    // QC2 G1: the block was recorded, so the account block alone governs quota; the item only backs off 600s.
+    expect(w.ends[0]).toEqual({ endReason: 'quota_death', consumeAttempt: false, waitReason: 'quota:death', notBefore: { at: new Date(w.clock.getTime() + 600_000).toISOString() } })
     expect(w.prCalls.length).toBe(0)
+  })
+
+  test('QC2 G1: once the block is recorded the item is NOT held to the death deadline (a clearing snapshot can release it after 600s)', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const farDeadline = new Date(NOW.getTime() + 7 * 86_400_000)
+    const w = world({ accountSlot: 'acct_a', markDeath: async () => farDeadline })
+    await createCorchDispatcher(w.deps).evaluateUser('u1')
+    await w.dispatched[0].pdeps.store.onFinalize('corch-run:run-1', WEEKLY)
+    expect(Date.parse(w.ends[0].notBefore.at)).toBe(w.clock.getTime() + 600_000)
+  })
+
+  test('QC2 G1: markDeath resolving to undefined (block not recorded) => fail-closed now+5h hold', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const w = world({ accountSlot: 'acct_a', markDeath: async () => undefined as any })
+    await createCorchDispatcher(w.deps).evaluateUser('u1')
+    await w.dispatched[0].pdeps.store.onFinalize('corch-run:run-1', SESSION)
+    expect(Date.parse(w.ends[0].notBefore.at)).toBe(w.clock.getTime() + 5 * 3600_000)
   })
 
   test('the legacy epoch is passed through as resetAt', async () => {
@@ -179,15 +200,16 @@ describe('CORCH-R2.5 SC5: handleRunEnd on a death sample', () => {
     expect(w.prCalls.length).toBe(0)
   })
 
-  test('markDeath returning null (only a newer reading can clear it) => notBefore null', async () => {
+  test('QC2 G1: markDeath returning null (block not recorded) => fail-closed now+5h hold, never an immediate requeue', async () => {
     process.env.REMO_CORCH_ENABLED = '1'
     const w = world({ accountSlot: 'acct_a', markDeath: async () => null })
     await createCorchDispatcher(w.deps).evaluateUser('u1')
     await w.dispatched[0].pdeps.store.onFinalize('corch-run:run-1', SESSION)
-    expect(w.ends[0]).toMatchObject({ endReason: 'quota_death', notBefore: null })
+    expect(w.ends[0]).toMatchObject({ endReason: 'quota_death', consumeAttempt: false })
+    expect(Date.parse(w.ends[0].notBefore.at)).toBe(NOW.getTime() + 5 * 3600_000)
   })
 
-  const fiveHoursOut = (at: string) => Math.abs(Date.parse(at) - (Date.now() + 5 * 3600_000)) < 60_000
+  const fiveHoursOut = (at: string) => Date.parse(at) === NOW.getTime() + 5 * 3600_000
 
   test('F3: a throwing markDeath requeues without an attempt but NOT immediately: not_before = now+5h (fail closed)', async () => {
     process.env.REMO_CORCH_ENABLED = '1'

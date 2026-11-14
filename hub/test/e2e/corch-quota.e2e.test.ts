@@ -354,11 +354,22 @@ maybe('CORCH-02 e2e - quota ingest on real Postgres', () => {
     expect(it.status).toBe('queued')
     expect(it.wait_reason).toBe('quota:death')
     expect(it.attempts).toBe(0)
-    expect(it.not_before.getTime()).toBe(acctRow.blocked_until.getTime())
+    // QC2 G1: the account block (not the item deadline) governs quota; the item only backs off ~600s.
+    expect(Math.abs(it.not_before.getTime() - (Date.now() + 600_000))).toBeLessThan(60_000)
+    expect(it.not_before.getTime()).toBeLessThan(acctRow.blocked_until.getTime())
     expect((await h.sql`SELECT end_reason FROM corch_runs WHERE id = ${runId}`)[0]!.end_reason).toBe('quota_death')
     // the account now reads as blocked through GET
     const g = (await (await get(u.read)).json()) as any
     expect(g.accounts[0]).toMatchObject({ eligible: false, reason: 'quota:blocked' })
+
+    // QC2 G1: death -> clearing live snapshot -> the item is reclaimable once its 600s backoff has passed.
+    await new Promise((r) => setTimeout(r, 20))
+    await post(snapshot([acct('dead1', { five_h_pct: 5, seven_d_pct: 10, fetched_at: new Date(Date.now() + 5_000).toISOString() })]), u.publish)
+    expect(((await (await get(u.read)).json()) as any).accounts[0]).toMatchObject({ eligible: true, reason: null })
+    expect(await corchStore.claimNext(u.userId, [])).toBeNull() // still inside the 600s backoff
+    await h.sql`UPDATE corch_work_items SET not_before = now() - interval '1 second' WHERE id = ${item.item.id}` // the backoff passes
+    const reclaimed = await corchStore.claimNext(u.userId, [])
+    expect(reclaimed?.item.id).toBe(item.item.id)
   })
 
   const blockRow = async (userId: string, id: string) =>

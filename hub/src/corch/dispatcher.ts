@@ -75,6 +75,8 @@ export interface SendGuard {
 
 /** F3: hold applied when a quota death could not be recorded on its account (the 5h window cap). */
 const QUOTA_DEATH_FALLBACK_HOLD_MS = 5 * 3600_000
+/** QC2 G1: item backoff after a quota death whose account block was recorded (the block alone governs quota). */
+const QUOTA_DEATH_BACKOFF_MS = 600_000
 
 const ALWAYS_LIVE: SendGuard = { assertLive: () => {} }
 
@@ -123,6 +125,8 @@ export interface CorchDeps {
   notify: (n: CorchNotification) => Promise<void>
   inventory: CorchInventory
   timers: CorchTimers
+  /** Injectable clock for the quota-death backoff (default: the system clock). */
+  now?: () => Date
 }
 
 /** Hooks the dispatcher wires into the pipeline for one run (filled by the launch path). */
@@ -373,21 +377,26 @@ export function createCorchDispatcher(deps: CorchDeps) {
       blockFailed = true
       log(`run context failed run=${c.runId}: ${errMsg(err)}`)
     }
-    let blockedUntil: Date | null = null
+    const now = (deps.now ?? (() => new Date()))().getTime()
+    let notBeforeAt: number | null = null
     if (accountId && deps.quota.markDeath) {
       try {
-        blockedUntil = await deps.quota.markDeath({ userId: c.userId, accountId, resetAt: death.resetAt, window: death.window })
+        const blockedUntil = await deps.quota.markDeath({ userId: c.userId, accountId, resetAt: death.resetAt, window: death.window })
+        // QC2 G1: a recorded block governs quota on its own (dispatch refuses a blocked account; a clearing snapshot
+        // triggers evaluation), so the item only backs off briefly. A null/undefined result means no block was recorded.
+        if (blockedUntil) notBeforeAt = now + QUOTA_DEATH_BACKOFF_MS
+        else blockFailed = true
       } catch (err) {
         blockFailed = true
         log(`markDeath failed run=${c.runId}: ${errMsg(err)}`)
       }
     }
-    if (blockFailed && !blockedUntil) blockedUntil = new Date(Date.now() + QUOTA_DEATH_FALLBACK_HOLD_MS)
+    if (blockFailed && notBeforeAt === null) notBeforeAt = now + QUOTA_DEATH_FALLBACK_HOLD_MS
     const r = await deps.store.endRunAndRequeue(c.runId, {
       endReason: 'quota_death',
       consumeAttempt: false,
       waitReason: 'quota:death',
-      notBefore: blockedUntil ? { at: blockedUntil.toISOString() } : null,
+      notBefore: notBeforeAt === null ? null : { at: new Date(notBeforeAt).toISOString() },
     })
     if (!r.changed) return
     await afterRunEnd(c)
