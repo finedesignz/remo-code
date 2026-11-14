@@ -10,8 +10,9 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
-import { corchStore, type CorchStore, type CorchWorkItem } from './store.ts'
+import { corchStore, type CorchProject, type CorchStore, type CorchWorkItem } from './store.ts'
 import { corchEnabled } from './flag.ts'
+import { provisionProject } from './aaf-provision.ts'
 
 type Env = { Variables: { userId: string } }
 
@@ -29,11 +30,16 @@ function canonicalIdent(raw: string): { ok: true; ident: string } | { ok: false;
 export interface RouteDeps {
   store: CorchStore
   evaluate(userId: string): Promise<void>
+  /** CORCH-08: provision the repo at AAF and persist the result. Never throws; failure leaves aaf_unprovisioned. */
+  provision(project: CorchProject): Promise<CorchProject>
 }
 
 const REAL_ROUTE_DEPS: RouteDeps = {
   store: corchStore,
   evaluate: async (userId) => (await import('./dispatcher.ts')).evaluateUserNow(userId),
+  // Flag OFF is a true no-op: no AAF call and no write. Projects enrolled while OFF are backfilled with
+  // hub/scripts/corch-provision-existing.ts at cutover.
+  provision: async (project) => (corchEnabled() ? provisionProject(corchStore, project) : project),
 }
 
 /** Fire-and-forget evaluate trigger. Never awaited in the response path; never touches the DB when OFF. */
@@ -100,7 +106,10 @@ export function createCorchRoutes(deps: RouteDeps = REAL_ROUTE_DEPS): Hono<Env> 
       enabled: body.enabled,
       acceptExternal: body.accept_external,
     })
-    return c.json({ project: r.project, created: r.created }, r.created ? 201 : 200)
+    // CORCH-08: enrolling calls AAF provision. It never throws and never blocks enrollment: any failure (or unset
+    // env) leaves the project aaf_unprovisioned (not dispatchable).
+    const project = await deps.provision(r.project).catch(() => r.project)
+    return c.json({ project, created: r.created }, r.created ? 201 : 200)
   })
 
   corchRoutes.get('/projects', async (c) => {
@@ -125,8 +134,13 @@ export function createCorchRoutes(deps: RouteDeps = REAL_ROUTE_DEPS): Hono<Env> 
       acceptExternal: body.accept_external,
     })
     if (!r) return c.json({ error: 'project_not_found' }, 404)
-    if (!r.previousEnabled && r.project.enabled) triggerEvaluate(deps, userId)
-    return c.json({ project: r.project })
+    // CORCH-08: re-enabling retries provisioning (an already provisioned project is left alone).
+    let project = r.project
+    if (!r.previousEnabled && r.project.enabled) {
+      project = await deps.provision(r.project).catch(() => r.project)
+      triggerEvaluate(deps, userId)
+    }
+    return c.json({ project })
   })
 
   corchRoutes.post('/work-items', async (c) => {

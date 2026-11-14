@@ -21,7 +21,7 @@ maybe('CORCH-01 e2e - fail-closed dispatcher on real Postgres', () => {
     storeMod = await import('../../src/corch/store.ts')
     dispMod = await import('../../src/corch/dispatcher.ts')
     const p = await h.sql<{ id: string }[]>`
-      INSERT INTO corch_projects (user_id, repo_ident) VALUES (${h.userId}, ${REPO}) RETURNING id`
+      INSERT INTO corch_projects (user_id, repo_ident, aaf_provision_status) VALUES (${h.userId}, ${REPO}, 'provisioned') RETURNING id`
     projectId = p[0]!.id
   }, 60_000)
 
@@ -200,8 +200,8 @@ maybe('CORCH-01 e2e - criterion 5: claims, requeue, refusals, reclaim', () => {
 
   async function mkProject(userId: string, repo: string, o: { priority?: number; budget?: number } = {}): Promise<string> {
     const r = await h.sql<{ id: string }[]>`
-      INSERT INTO corch_projects (user_id, repo_ident, priority, daily_token_budget)
-      VALUES (${userId}, ${repo}, ${o.priority ?? 0}, ${o.budget ?? 2_000_000}) RETURNING id`
+      INSERT INTO corch_projects (user_id, repo_ident, priority, daily_token_budget, aaf_provision_status)
+      VALUES (${userId}, ${repo}, ${o.priority ?? 0}, ${o.budget ?? 2_000_000}, 'provisioned') RETURNING id`
     return r[0]!.id
   }
 

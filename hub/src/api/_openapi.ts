@@ -1558,6 +1558,32 @@ openapi.openapi(taskTemplatesRoute, (c) => {
       429: { description: "Rate limited", ...json(Err) },
     },
   });
+  reg.registerPath({
+    method: "post", path: "/api/corch-events/aaf", summary: "AgentAutofix PR-outcome event (timestamped HMAC; no cookie or api key)", ...base,
+    description:
+      "CORCH-08 receiver for events signed by AgentAutofix (`X-ZeroExposure-Timestamp`, `X-ZeroExposure-Signature: sha256=HMAC-SHA256(secret, ts + \".\" + rawBody)`, optional `X-ZeroExposure-Event-Id`). Raw body is read before any parse; the signature is compared in constant time; a timestamp more than 5 minutes off is rejected; every credential failure is the same 401. `pr.merged` marks the item done, `pr.closed` (unmerged) blocks it, `pr.failed` blocks it and sends one owner notification. An unknown or terminal item and a replayed `event_id` are 200 with no change. 503 until REMO_CORCH_AAF_EVENT_SECRET is set.",
+    request: {
+      body: json(
+        z.object({
+          event_id: z.string(),
+          event: z.enum(["pr.merged", "pr.closed", "pr.failed"]),
+          repo: z.string(),
+          pr_number: z.number().int().optional(),
+          head_ref: z.string(),
+          merged_sha: z.string().optional(),
+          occurred_at: z.string().optional(),
+        }),
+      ),
+    },
+    responses: {
+      200: { description: "Handled", ...json(z.object({ ok: z.literal(true), status: z.enum(["applied", "duplicate", "ignored"]) })) },
+      400: { description: "bad_request (no value echoed)", ...json(Err) },
+      401: { description: "unauthorized (uniform: bad or missing signature, stale timestamp)", ...json(Err) },
+      413: { description: "Body over 16 KiB", ...json(Err) },
+      429: { description: "Rate limited", ...json(Err) },
+      503: { description: "not_configured (secret unset; nothing recorded) or notification_pending (a pr.failed owner notification was not delivered; the transition is applied, retry the same event_id)", ...json(Err) },
+    },
+  });
 }
 
 // ── /api/chat — Bearer-key chat surface (scope chat:session) ────────────────
