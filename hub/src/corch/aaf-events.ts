@@ -40,7 +40,11 @@ const EventBody = z.object({
 
 export interface AafEventDeps {
   secret: () => string | null
-  store: { applyAafEvent(e: AafEventInput): Promise<AafEventResult> }
+  store: {
+    applyAafEvent(e: AafEventInput): Promise<AafEventResult>
+    claimAafNotify(eventId: string): Promise<{ userId: string; workItemId: string } | null>
+    finishAafNotify(eventId: string, delivered: boolean): Promise<void>
+  }
   /** One owner notification for a failed PR. Resolves true on a durable delivery. Never throws into the route. */
   notifyFailed: (userId: string, workItemId: string) => Promise<boolean>
   /** One dispatch evaluation for the owner (a no-op while the CORCH flag is OFF). */
@@ -114,21 +118,37 @@ export function createAafEventRoutes(deps: AafEventDeps = REAL_DEPS): Hono {
         return c.json({ error: 'internal_error' }, 500)
       }
 
-      if (result.kind === 'duplicate') return c.json({ ok: true, status: 'duplicate' })
       if (result.kind === 'unchanged') return c.json({ ok: true, status: 'ignored' })
 
-      if (result.notify) {
-        try {
-          const delivered = await deps.notifyFailed(result.userId, result.workItemId)
-          if (!delivered) console.warn(`[corch] aaf pr.failed notification undelivered item=${result.workItemId}`)
-        } catch (err: any) {
-          console.warn(`[corch] aaf pr.failed notification failed item=${result.workItemId}: ${err?.name ?? 'error'}`)
+      // pr.failed owner notification: durable intent in corch_events, claimed atomically so exactly one delivery
+      // owns it. A delivery failure releases the claim and answers 503 so the sender retries the SAME event_id;
+      // that retry is a "duplicate" which still reaches this claim and re-attempts the notification.
+      let notifyFailed = false
+      try {
+        const claim = await deps.store.claimAafNotify(parsed.event_id)
+        if (claim) {
+          let delivered = false
+          try {
+            delivered = await deps.notifyFailed(claim.userId, claim.workItemId)
+          } catch (err: any) {
+            console.warn(`[corch] aaf pr.failed notification failed item=${claim.workItemId}: ${err?.name ?? 'error'}`)
+          }
+          await deps.store.finishAafNotify(parsed.event_id, delivered)
+          if (!delivered) {
+            console.warn(`[corch] aaf pr.failed notification undelivered item=${claim.workItemId}`)
+            notifyFailed = true
+          }
         }
+      } catch (err: any) {
+        console.warn(`[corch] aaf notify claim failed: ${err?.name ?? 'error'}`)
+        notifyFailed = true
       }
-      if (corchEnabled()) {
+
+      if (result.kind === 'transitioned' && corchEnabled()) {
         void deps.evaluate(result.userId).catch((err) => console.warn(`[corch] aaf evaluate trigger failed: ${err?.name ?? 'error'}`))
       }
-      return c.json({ ok: true, status: 'applied' })
+      if (notifyFailed) return c.json({ error: 'notification_pending' }, 503)
+      return c.json({ ok: true, status: result.kind === 'duplicate' ? 'duplicate' : 'applied' })
     },
   )
 

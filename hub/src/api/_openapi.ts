@@ -1581,7 +1581,7 @@ openapi.openapi(taskTemplatesRoute, (c) => {
       401: { description: "unauthorized (uniform: bad or missing signature, stale timestamp)", ...json(Err) },
       413: { description: "Body over 16 KiB", ...json(Err) },
       429: { description: "Rate limited", ...json(Err) },
-      503: { description: "not_configured (secret unset; nothing recorded)", ...json(Err) },
+      503: { description: "not_configured (secret unset; nothing recorded) or notification_pending (a pr.failed owner notification was not delivered; the transition is applied, retry the same event_id)", ...json(Err) },
     },
   });
 }

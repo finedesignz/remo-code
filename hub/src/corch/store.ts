@@ -153,7 +153,7 @@ export interface AafEventInput {
 export type AafEventResult =
   | { kind: 'duplicate' }
   | { kind: 'unchanged'; reason: 'unknown_item' | 'terminal' | 'already_blocked' }
-  | { kind: 'transitioned'; userId: string; workItemId: string; to: 'done' | 'blocked'; notify: boolean }
+  | { kind: 'transitioned'; userId: string; workItemId: string; to: 'done' | 'blocked' }
 
 export interface ProvisionResultInput {
   status: AafProvisionStatus
@@ -176,6 +176,13 @@ export interface CorchStore {
   listUnprovisionedProjects(): Promise<CorchProject[]>
   /** CORCH-08: dedupe on event_id, resolve the item by repo + head ref, apply the closure transition, one tx. */
   applyAafEvent(e: AafEventInput): Promise<AafEventResult>
+  /**
+   * CORCH-08: atomically claim the owner notification of a pr.failed event (pending, or a 'sending' claim older
+   * than 5 minutes). Returns the recipient, or null when there is nothing to send / another delivery owns it.
+   */
+  claimAafNotify(eventId: string): Promise<{ userId: string; workItemId: string } | null>
+  /** CORCH-08: record the delivery outcome of a claimed notification (false releases it for a retry). */
+  finishAafNotify(eventId: string, delivered: boolean): Promise<void>
   claimNext(userId: string, excludeIds: string[]): Promise<Claimed | null>
   attachSession(runId: string, sessionId: string, worktreePath: string | null): Promise<boolean>
   endRunAndRequeue(runId: string, i: EndRequeueInput): Promise<EndResult>
@@ -317,22 +324,31 @@ export const corchStore: CorchStore = {
         ON CONFLICT (event_id) DO NOTHING RETURNING id`
       if (ins.length === 0) return { kind: 'duplicate' }
       const rowId = ins[0]!.id
-      const record = (outcome: string, userId: string | null, itemId: string | null) =>
-        tx`UPDATE corch_events SET outcome = ${outcome}, user_id = ${userId}, work_item_id = ${itemId} WHERE id = ${rowId}`
+      const record = (outcome: string, userId: string | null, itemId: string | null, notify = false) =>
+        tx`UPDATE corch_events SET outcome = ${outcome}, user_id = ${userId}, work_item_id = ${itemId},
+             notify_state = ${notify ? 'pending' : 'none'} WHERE id = ${rowId}`
 
       const m = AAF_HEAD_REF_RE.exec(e.headRef)
-      const items = m
-        ? await tx<{ id: string; user_id: string; status: CorchWorkItem['status'] }[]>`
-            SELECT i.id, i.user_id, i.status
+      const found = m
+        ? await tx<{ id: string }[]>`
+            SELECT i.id
             FROM corch_work_items i JOIN corch_projects p ON p.id = i.project_id AND p.user_id = i.user_id
-            WHERE i.id = ${m[1]!}::uuid AND i.branch = ${e.headRef} AND p.repo_ident = ${'github://' + e.repo.toLowerCase()}
-            FOR UPDATE OF i`
+            WHERE i.id = ${m[1]!}::uuid AND i.branch = ${e.headRef} AND p.repo_ident = ${'github://' + e.repo.toLowerCase()}`
         : []
-      const item = items[0]
-      if (!item) {
+      if (found.length === 0) {
         await record('unknown_item', null, null)
         return { kind: 'unchanged', reason: 'unknown_item' }
       }
+      // Lock order matches the run-end paths (run row, then item row), so a concurrent run end cannot deadlock us.
+      await tx`SELECT id FROM corch_runs WHERE work_item_id = ${found[0]!.id} AND ended_at IS NULL FOR UPDATE`
+      const locked = await tx<{ id: string; user_id: string; status: CorchWorkItem['status'] }[]>`
+        SELECT id, user_id, status FROM corch_work_items WHERE id = ${found[0]!.id} FOR UPDATE`
+      const item = locked[0]!
+      // The item is closed out: any live run for it must stop. Ending the run row is what every dispatch gate and
+      // the parked-turn replay check, so a turn parked offline can never be sent for a merged / closed / failed item.
+      const endRuns = (reason: string) => tx`
+        UPDATE corch_runs SET status = 'ended', end_reason = ${reason}, ended_at = now()
+        WHERE work_item_id = ${item.id} AND ended_at IS NULL`
       if (item.status === 'done' || item.status === 'cancelled') {
         await record('terminal', item.user_id, item.id)
         return { kind: 'unchanged', reason: 'terminal' }
@@ -341,8 +357,9 @@ export const corchStore: CorchStore = {
         await tx`
           UPDATE corch_work_items SET status = 'done', wait_reason = NULL, not_before = NULL, updated_at = now()
           WHERE id = ${item.id}`
+        await endRuns('aaf_pr_merged')
         await record('done', item.user_id, item.id)
-        return { kind: 'transitioned', userId: item.user_id, workItemId: item.id, to: 'done', notify: false }
+        return { kind: 'transitioned', userId: item.user_id, workItemId: item.id, to: 'done' }
       }
       if (item.status === 'blocked') {
         await record('already_blocked', item.user_id, item.id)
@@ -352,9 +369,27 @@ export const corchStore: CorchStore = {
       await tx`
         UPDATE corch_work_items SET status = 'blocked', wait_reason = ${reason}, not_before = NULL, updated_at = now()
         WHERE id = ${item.id}`
-      await record('blocked', item.user_id, item.id)
-      return { kind: 'transitioned', userId: item.user_id, workItemId: item.id, to: 'blocked', notify: e.event === 'pr.failed' }
+      await endRuns(e.event === 'pr.failed' ? 'aaf_pr_failed' : 'aaf_pr_closed')
+      await record('blocked', item.user_id, item.id, e.event === 'pr.failed')
+      return { kind: 'transitioned', userId: item.user_id, workItemId: item.id, to: 'blocked' }
     })
+  },
+
+  async claimAafNotify(eventId) {
+    const rows = await sql<{ user_id: string; work_item_id: string }[]>`
+      UPDATE corch_events SET notify_state = 'sending', notify_claimed_at = now()
+      WHERE event_id = ${eventId}
+        AND user_id IS NOT NULL AND work_item_id IS NOT NULL
+        AND (notify_state = 'pending'
+             OR (notify_state = 'sending' AND notify_claimed_at < now() - interval '5 minutes'))
+      RETURNING user_id, work_item_id`
+    return rows[0] ? { userId: rows[0].user_id, workItemId: rows[0].work_item_id } : null
+  },
+
+  async finishAafNotify(eventId, delivered) {
+    await sql`
+      UPDATE corch_events SET notify_state = ${delivered ? 'sent' : 'pending'}, notify_claimed_at = NULL
+      WHERE event_id = ${eventId} AND notify_state = 'sending'`
   },
 
   async claimNext(userId, excludeIds) {

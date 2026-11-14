@@ -368,14 +368,22 @@ head ref `corch/<work_item_id>`. One transaction dedupes on `corch_events.event_
 |---|---|---|
 | `pr.merged` | queued, running, pr_open, blocked | `done` |
 | `pr.closed` (unmerged) | queued, running, pr_open | `blocked` (`wait_reason=pr_closed`), never auto-requeued |
-| `pr.failed` | queued, running, pr_open | `blocked` (`wait_reason=pr_failed`) + ONE notification (telegram and email, the durable channels the gsd-console outage notice uses) |
+| `pr.failed` | queued, running, pr_open | `blocked` (`wait_reason=pr_failed`) + ONE notification (telegram and email, the durable channels the gsd-console outage notice uses; see "Notification durability") |
 | any | done, cancelled, or no matching item, or already blocked (closed/failed) | no change, audited in `corch_events.outcome` |
-| replayed `event_id` | any | `200 duplicate`, no second transition, no second notification |
+| replayed `event_id` | any | `200 duplicate`, no second transition, no second notification (a still-pending notification is retried) |
 
 Responses are `200 {ok:true, status: applied | duplicate | ignored}` (unknown and terminal are both `ignored`).
-`endRunAndRequeue` and `endRunMarkPrOpen` now only touch an item that is still `running`: a run ending after a closure
+Every done/blocked transition also ENDS the item's live run in the same transaction (`end_reason` `aaf_pr_merged` /
+`aaf_pr_closed` / `aaf_pr_failed`): the run row's `ended_at` is what every dispatch gate and the parked-turn replay check, so
+a turn parked offline can never be sent for a closed item, and the concurrency slot is freed. As a second guard
+`endRunAndRequeue` and `endRunMarkPrOpen` only touch an item that is still `running`: a run ending after a closure
 event leaves the item as the event set it (`itemUntouched`, no requeue, no second blocked notification), which is why a
-closed PR stays blocked across reconciler passes. Each applied transition triggers one dispatch evaluation (a no-op while
+closed PR stays blocked across reconciler passes.
+
+**Notification durability.** The `pr.failed` notification intent is stored with the transition (`corch_events.notify_state`
+`pending`), claimed atomically (`sending`, reclaimable after 5 minutes) and marked `sent` only after a durable delivery.
+An undelivered notification releases the claim and the receiver answers `503 notification_pending` so AgentAutofix retries
+the SAME `event_id`; that retry is a duplicate for the transition (never applied twice) but re-attempts the notification. Each applied transition triggers one dispatch evaluation (a no-op while
 `REMO_CORCH_ENABLED` is OFF).
 
 Tests: `corch-aaf-events` (auth envelope, vector, skew, replay, non-leaky errors), `corch-aaf-provision` (fake AAF, env

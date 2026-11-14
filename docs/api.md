@@ -6612,7 +6612,7 @@ CORCH-08 receiver for events signed by AgentAutofix (`X-ZeroExposure-Timestamp`,
 |401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|unauthorized (uniform: bad or missing signature, stale timestamp)|Inline|
 |413|[Payload Too Large](https://tools.ietf.org/html/rfc7231#section-6.5.11)|Body over 16 KiB|Inline|
 |429|[Too Many Requests](https://tools.ietf.org/html/rfc6585#section-4)|Rate limited|Inline|
-|503|[Service Unavailable](https://tools.ietf.org/html/rfc7231#section-6.6.4)|not_configured (secret unset; nothing recorded)|Inline|
+|503|[Service Unavailable](https://tools.ietf.org/html/rfc7231#section-6.6.4)|not_configured (secret unset; nothing recorded) or notification_pending (a pr.failed owner notification was not delivered; the transition is applied, retry the same event_id)|Inline|
 
 <h3 id="agentautofix-pr-outcome-event-(timestamped-hmac;-no-cookie-or-api-key)-responseschema">Response Schema</h3>
 
