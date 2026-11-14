@@ -445,7 +445,7 @@ reconciler heartbeats it (paged, 200 items per pass with a cursor), together wit
 `corch.*` commands, so a scheduled task cannot invoke them; clone identity is bound (`origin` must equal the expected remote,
 `clone_origin_mismatch` otherwise), the git credential helper is scoped to `https://github.com`, a worktree on any branch other than
 `corch/<id>` is never force-removed (`worktree_wrong_branch`), and with the slot set every runner event (string values and keys) is scrubbed of the exact
-token and git credential values before it reaches the hub (best-effort: a value split across events or re-encoded is not caught; the control is that no hub state holds the token). `pr_lookup` pins `--repo` and ignores an inherited `GH_REPO`.
+token and git credential values before it reaches the hub (best-effort: a value split across events or re-encoded is not caught; the control is that no hub state holds the token). `pr_lookup` queries `gh api repos/<owner>/<repo>/pulls` with a server-side `head=<owner>:<branch>` filter and `--hostname github.com`, and ignores an inherited `GH_REPO`.
 
 **Memlog claim (R3.8): BLOCKED-ON-MCP.** memlog is a gateway-only MCP Factory server; the hub holds no gateway credential
 and has no MCP client, so no verified hub->memlog transport exists (7e request filed to `mcp-servers`). The `MemlogClient`
