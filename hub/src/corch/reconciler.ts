@@ -1,7 +1,8 @@
 // hub/src/corch/reconciler.ts
 //
-// CORCH-01 (CORCH-R3.3, R3.6, R3.7): the ONLY periodic loop under hub/src/corch/. Every pass reads at
-// most 100 live runs (oldest heartbeat first) and applies positive knowledge only (LD-13): a run is
+// CORCH-01 (CORCH-R3.3, R3.6, R3.7): the ONLY periodic loop under hub/src/corch/. Every pass reads one page
+// of at most 100 live runs (stable id order, a cursor carried between passes so unknown-inventory runs
+// that stay `stalled` cannot starve the rest) and applies positive knowledge only (LD-13): a run is
 // reclaimed when a FRESH inventory proves its session is gone, never because nothing is known. No
 // fresh inventory marks it stalled once, with one owner notification. A hub restart therefore never
 // reclaims, and never double-launches (the live-run unique indexes and the cap see the old run).
@@ -13,6 +14,8 @@ import type { LiveRun } from './store.ts'
 const PASS_LIMIT = 100
 
 let passRunning = false
+/** Id of the last run the previous pass read; null = start from the first run. Reset when a page is short. */
+let cursor: string | null = null
 
 /** One reconcile pass. Returns immediately while the flag is OFF or another pass is still running. */
 export async function reconcilePass(deps: CorchDeps, d: CorchDispatcher): Promise<void> {
@@ -23,7 +26,9 @@ export async function reconcilePass(deps: CorchDeps, d: CorchDispatcher): Promis
     const now = Date.now()
     const lease = corchLeaseMs()
     const alive: string[] = []
-    const runs: LiveRun[] = await deps.store.liveRunsOldestHeartbeat(PASS_LIMIT)
+    const runs: LiveRun[] = await deps.store.liveRunsPage(cursor, PASS_LIMIT)
+    // A full page continues after its last run next pass; a short page means the walk is complete.
+    cursor = runs.length >= PASS_LIMIT ? runs[runs.length - 1]!.id : null
     for (const run of runs) {
       // A launch this process is still performing is not a candidate.
       if (d.inFlight.has(run.work_item_id)) continue

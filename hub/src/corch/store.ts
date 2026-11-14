@@ -151,8 +151,12 @@ export interface CorchStore {
   earliestFutureNotBefore(): Promise<Date | null>
   /** Users that currently have a queued item whose not_before has passed (or is unset). */
   usersWithDueItems(): Promise<string[]>
-  /** Live runs, oldest heartbeat first, at most `limit` (the reconciler's per-pass read). */
-  liveRunsOldestHeartbeat(limit: number): Promise<LiveRun[]>
+  /**
+   * One page of live runs in stable id order: ids greater than `afterId` (null = from the start), at most
+   * `limit`. The reconciler walks pages with a cursor so a run it can only mark `stalled` (heartbeat
+   * unchanged) cannot monopolize every pass.
+   */
+  liveRunsPage(afterId: string | null, limit: number): Promise<LiveRun[]>
   /** Live runs hosted by one supervisor (socket-close reclaim). */
   liveRunsForSupervisor(supervisorId: string): Promise<LiveRun[]>
   /** Positive liveness: heartbeat now, and a stalled run is running again. */
@@ -399,14 +403,14 @@ export const corchStore: CorchStore = {
     return r.map((x) => x.user_id)
   },
 
-  async liveRunsOldestHeartbeat(limit) {
+  async liveRunsPage(afterId, limit) {
     return sql<LiveRun[]>`
       SELECT r.*, p.repo_ident, i.attempts AS item_attempts
       FROM corch_runs r
       JOIN corch_projects p ON p.id = r.project_id
       JOIN corch_work_items i ON i.id = r.work_item_id
-      WHERE r.ended_at IS NULL
-      ORDER BY r.heartbeat_at ASC
+      WHERE r.ended_at IS NULL AND (${afterId}::uuid IS NULL OR r.id > ${afterId}::uuid)
+      ORDER BY r.id ASC
       LIMIT ${limit}`
   },
 

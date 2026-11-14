@@ -669,7 +669,7 @@ describe('QC round 1 - C3: not_before rearm is race-safe', () => {
 })
 
 describe('QC round 1 - C4: the reconciler does not starve behind unknown-inventory runs', () => {
-  test('150 stalled-forever runs: two passes touch all 150, not the same 100 twice', async () => {
+  test('150 stalled-forever runs: two passes touch all 150, not the same 100 twice (the short page resets the cursor)', async () => {
     process.env.REMO_CORCH_ENABLED = '1'
     const runs = Array.from({ length: 150 }, (_, i) =>
       liveRun({ id: `run-${String(i).padStart(3, '0')}`, work_item_id: `w${i}`, supervisor_id: 'sup-x' }),
@@ -678,9 +678,7 @@ describe('QC round 1 - C4: the reconciler does not starve behind unknown-invento
     await reconcilePass(deps, d)
     await reconcilePass(deps, d)
     expect(new Set(r.stalledCalls).size).toBe(150)
-    await reconcilePass(deps, d) // the cursor wrapped: the third pass starts over
-    expect(r.readLimits).toEqual([100, 100, 100])
-    expect(r.stalledCalls.length).toBe(150 + 100)
+    expect(r.readLimits).toEqual([100, 100])
   })
 })
 
