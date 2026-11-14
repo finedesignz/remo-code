@@ -28,7 +28,7 @@ describe('no polling under hub/src/corch (CORCH-R3.6)', () => {
     // The timer lives behind deps.timers.setTimeout and its real impl; nothing else may schedule.
     // CORCH-04 (R1.14) deliberately adds gsdc-ingest.ts: it re-arms ONE reconnect/idle timeout per event
     // through the same injected timers seam and never owns a loop (next test pins that).
-    expect(per.map(([f]) => f)).toEqual(['dispatcher.ts', 'gsdc-ingest.ts'])
+    expect(per.map(([f]) => f).sort()).toEqual(['dispatcher.ts', 'gsdc-ingest.ts'])
   })
 
   test('gsdc-ingest.ts schedules only through the injected timers seam (no bare setTimeout, no setInterval)', () => {
