@@ -125,6 +125,9 @@ The reconciler reads one page of at most 100 live runs per pass in stable id ord
 can only mark `stalled` cannot starve the rest. An ended run never sends: the three CORCH gates refuse it
 (`corch_run_not_live`), a parked replay re-checks liveness, and `markDispatched` throws when the conditional update
 finds the run ended. A busy session (`markSkipped('session_busy')`) is a `dropped_busy` failure with an attempt.
+A reclaim that lands AFTER `markDispatched` succeeded is also stopped: every run-ending path drops the run from an in-memory
+sendable set before its first await, and the corch send seam (`corchSend` / `guardSendDeps`) asserts it immediately before the
+message insert and immediately before `ws.send` (no await between), so no ws send or message row follows the reclaim.
 
 No fresh inventory is "unknown", never "gone": past the lease the run becomes `stalled` once, with one owner
 notification. A listed session refreshes the heartbeat (and a stalled run returns to `running`). A hub restart
