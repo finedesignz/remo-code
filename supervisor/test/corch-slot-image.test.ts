@@ -47,6 +47,10 @@ describe('Dockerfile.slot', () => {
     expect(code).toMatch(/find node_modules -type f[^\n]*\*\.exe[^\n]*\*\.dll[^\n]*winpty[^\n]*conpty[^\n]*-delete/)
   })
 
+  test('installs gh (corch.pr_lookup shells out to `gh api`)', () => {
+    expect(code).toMatch(/apt-get install[^\n]*\bgh\b/)
+  })
+
   test('uses an exec-form entrypoint via the slot entrypoint script', () => {
     expect(code).toMatch(/ENTRYPOINT \["\/usr\/local\/bin\/remo-slot-entrypoint"\]/)
   })
