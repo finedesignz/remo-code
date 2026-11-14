@@ -1461,6 +1461,7 @@ openapi.openapi(taskTemplatesRoute, (c) => {
         ...json(z.object({
           paused: z.boolean(),
           max_concurrent_runs: z.number().int(),
+          counts: z.record(z.string(), z.number().int()),
           projects: z.array(z.object({ id: z.string(), repo_ident: z.string(), priority: z.number().int(), enabled: z.boolean(), aaf_provision_status: z.string() })),
           items: z.array(z.object({ id: z.string(), project_id: z.string(), repo_ident: z.string(), title: z.string(), source: z.string(), priority: z.number().int(), status: z.string(), wait_reason: z.string().nullable(), not_before: z.string().nullable(), attempts: z.number().int(), pr_url: z.string().nullable(), created_at: z.string() })),
           live_runs: z.array(z.object({ id: z.string(), work_item_id: z.string(), repo_ident: z.string(), status: z.string(), account_slot: z.string().nullable(), supervisor_id: z.string().nullable(), started_at: z.string(), heartbeat_at: z.string(), age_seconds: z.number().int() })),

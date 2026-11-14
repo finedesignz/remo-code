@@ -461,7 +461,7 @@ hub `corch-workspace` (fake memlog and slot supervisor), `corch-no-token-guard`,
 
 Everything here is additive and works with `REMO_CORCH_ENABLED` OFF (the routes only store and read; the evaluate trigger is a no-op).
 
-- **`GET /api/corch/queue`** (cookie): `paused`, `max_concurrent_runs`, `projects`, `items` (open items plus terminal ones from the last 24h, no `body`,
+- **`GET /api/corch/queue`** (cookie): `paused`, `max_concurrent_runs`, `counts` (per-status, uncapped), `projects`, `items` (open items plus terminal ones from the last 24h, no `body`,
   in dispatch order), `live_runs` (account slot, supervisor, age, heartbeat) and `quota_accounts` (eligibility from the one pure function in
   `quota-eligibility.ts`). One builder (`queue-view.ts`) feeds this route, the WS event and the Telegram summary.
 - **Live panel, no polling.** Every transition pushes the whole snapshot to the owner as a `corch_queue` event via `broadcastToUser`: after each

@@ -367,6 +367,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
   async function endRefusal(c: RunCtx, reason: string, release: boolean): Promise<void> {
     const r = await refuseRun(c.runId, c.userId, reason)
     if (!r.changed) return
+    deps.publishQueue?.(c.userId) // a replay refusal ends the run without another evaluation
     if (release) await releaseReservation(c)
     await releaseIfClaimed(c.runId, c.userId, c.itemId)
     if (!c.inline) await armNotBeforeTimer()
@@ -382,6 +383,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
       notBefore: null,
     })
     if (!r.changed) return
+    deps.publishQueue?.(c.userId)
     if (release) await releaseReservation(c)
     if (r.itemStatus === 'blocked' && !r.itemUntouched) {
       await notifyBlocked(c, r.attempts, endReason)
@@ -511,6 +513,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
     switch (outcome.kind) {
       case 'dispatched':
         await deps.store.markRunRunning(c.runId)
+        deps.publishQueue?.(c.userId)
         return
       case 'skipped':
         await endRefusal(c, outcome.reason, true)
@@ -533,6 +536,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
       // ended (reclaim) between the gates and here throws and the pipeline sends nothing.
       markDispatched: async () => {
         if (!(await deps.store.markRunRunning(c.runId))) throw new Error('corch_run_not_live')
+        deps.publishQueue?.(c.userId) // a parked or queued run starting later never passes through evaluateUser
       },
       // The real pipeline reports a busy session as markSkipped('session_busy') BEFORE it returns
       // dropped_busy. It is a dispatch failure (attempt + backoff, LD-8), not a no-deadline refusal.

@@ -13,6 +13,8 @@ export interface QueueSnapshot {
   paused: boolean
   max_concurrent_runs: number
   projects: Array<Pick<CorchProject, 'id' | 'repo_ident' | 'priority' | 'enabled' | 'aaf_provision_status'>>
+  /** Item counts per status over all items (the `items` list is capped; these are not). */
+  counts: Record<string, number>
   items: Array<Omit<QueueViewItem, 'not_before' | 'created_at'> & { not_before: string | null; created_at: string }>
   live_runs: Array<Omit<QueueViewRun, 'started_at' | 'heartbeat_at'> & { started_at: string; heartbeat_at: string; age_seconds: number }>
   quota_accounts: Array<{ account_id: string; slot: string | null; eligible: boolean; reason: string | null; not_before: string | null; five_h_pct: number | null; seven_d_pct: number | null }>
@@ -20,7 +22,7 @@ export interface QueueSnapshot {
 }
 
 export interface QueueViewDeps {
-  store: Pick<CorchStore, 'listProjects' | 'getSettings' | 'queueViewItems' | 'queueViewRuns'>
+  store: Pick<CorchStore, 'listProjects' | 'getSettings' | 'queueViewItems' | 'queueViewRuns' | 'queueViewCounts'>
   accountsFor(userId: string): Promise<QuotaAccountRow[]>
   liveRunsByAccount(userId: string): Promise<Record<string, number>>
   ceilingPct(): number
@@ -32,11 +34,12 @@ const iso = (d: Date | string | null): string | null => (d === null ? null : new
 export async function buildQueueSnapshot(deps: QueueViewDeps, userId: string): Promise<QueueSnapshot> {
   const now = deps.now()
   const ceilingPct = deps.ceilingPct()
-  const [projects, settings, items, runs, rows, busyByAccount] = await Promise.all([
+  const [projects, settings, items, runs, counts, rows, busyByAccount] = await Promise.all([
     deps.store.listProjects(userId),
     deps.store.getSettings(userId),
     deps.store.queueViewItems(userId, QUEUE_VIEW_MAX_ITEMS),
     deps.store.queueViewRuns(userId),
+    deps.store.queueViewCounts(userId),
     deps.accountsFor(userId),
     deps.liveRunsByAccount(userId),
   ])
@@ -45,6 +48,7 @@ export async function buildQueueSnapshot(deps: QueueViewDeps, userId: string): P
   return {
     paused: s.corch_paused,
     max_concurrent_runs: s.corch_max_concurrent_runs,
+    counts,
     projects: projects.map((p) => ({
       id: p.id,
       repo_ident: p.repo_ident,
@@ -114,13 +118,15 @@ export function createQueuePublisher(
       try {
         do {
           dirty.delete(userId)
-          send(userId, { type: 'corch_queue', queue: await build(userId) })
+          // A failed build is logged and dropped, but a trigger that arrived meanwhile still gets its own rebuild.
+          try {
+            send(userId, { type: 'corch_queue', queue: await build(userId) })
+          } catch (err: any) {
+            log(`[corch] queue publish failed user=${userId}: ${err?.message ?? err}`)
+          }
         } while (dirty.has(userId))
-      } catch (err: any) {
-        log(`[corch] queue publish failed user=${userId}: ${err?.message ?? err}`)
       } finally {
         running.delete(userId)
-        dirty.delete(userId)
       }
     })()
     running.set(userId, p)

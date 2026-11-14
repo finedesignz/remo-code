@@ -75,29 +75,32 @@ export function useCorchQueue(token: string, subscribe: Subscribe): {
   const [queue, setQueue] = useState<CorchQueue | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    let live = true
+  // One read for the first paint and one after each authenticated (re)connect: events missed while the socket was
+  // down are not replayed. Both are driven by events, never a timer. A fetched snapshot never replaces a newer one.
+  const load = useCallback(() => {
     hubFetch<CorchQueue>(token, '/api/corch/queue')
-      .then((q) => {
-        // A WS event that already arrived is newer than this first paint: never overwrite it.
-        if (live) setQueue((cur) => cur ?? q)
-      })
-      .catch((e: any) => live && setError(e?.message || 'Failed to load queue'))
-    return () => {
-      live = false
-    }
+      .then((q) => setQueue((cur) => (cur && cur.generated_at > q.generated_at ? cur : q)))
+      .catch((e: any) => setError(e?.message || 'Failed to load queue'))
   }, [token])
+
+  useEffect(() => {
+    load()
+  }, [load])
 
   useEffect(
     () =>
       subscribe((msg) => {
+        if (msg?.type === 'auth_ok') {
+          load()
+          return
+        }
         const q = reduceCorchQueue(msg)
         if (q) {
           setQueue(q)
           setError(null)
         }
       }),
-    [subscribe],
+    [subscribe, load],
   )
 
   const run = useCallback(
