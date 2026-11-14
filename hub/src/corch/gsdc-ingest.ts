@@ -27,6 +27,8 @@ export const GSDC_HEALTHY_STREAM_MS = 30000
 export const GSDC_IDLE_TIMEOUT_MS = 3 * 60 * 1000
 const MAX_FRAME_BYTES = 2 * 1024 * 1024
 const MAX_BOARD_BYTES = 8 * 1024 * 1024
+/** Event-wide cap on derived text (done refs + candidate text) held for one transaction. */
+const MAX_DERIVED_BYTES = 16 * 1024 * 1024
 /** stream-error codes the console is known to send (hosted/runs/hub.js); anything else collapses to plain stream_error. */
 const KNOWN_STREAM_ERROR_CODES = new Set(['listener_unavailable'])
 
@@ -186,6 +188,7 @@ export function createGsdcIngest(deps: GsdcDeps) {
     // Each board is derived the moment it is read and then dropped: memory stays bounded by the compact entries
     // (title <= 200, body <= 4000 chars per enrolled project), not by the size of every board in the snapshot.
     const entries: GsdcApplyEntry[] = []
+    let derivedBytes = 0
     for (const summary of summaries) {
       const projects = byIdent.get(`github://${summary.slug.toLowerCase()}`)
       if (!projects || projects.length === 0) continue
@@ -197,7 +200,10 @@ export function createGsdcIngest(deps: GsdcDeps) {
       // Canonical (lowercase) slug, like the hub repo_ident: a case change in the console must not fork the identity.
       const d = deriveCandidate(summary.slug.toLowerCase(), summary, parsed.data)
       if (d.kind === 'skip') continue
+      const bytes = d.doneRefs.reduce((n, r) => n + r.length, 0) + (d.candidate ? d.candidate.title.length + d.candidate.body.length + d.candidate.sourceRef.length : 0)
       for (const project of projects) {
+        derivedBytes += bytes
+        if (derivedBytes > MAX_DERIVED_BYTES) throw new GsdcFailure('bad_payload')
         entries.push({ projectId: project.id, userId: project.user_id, priority: project.priority, doneRefs: d.doneRefs, candidate: d.candidate })
       }
     }
@@ -213,8 +219,8 @@ export function createGsdcIngest(deps: GsdcDeps) {
       console.error(`[corch.gsdc] apply failed: ${err?.message ?? err}`)
       throw new GsdcFailure('apply_failed')
     }
-    if (!alive()) return // no evaluation (launch) after stop
     for (const userId of touched) {
+      if (!alive()) return // no evaluation (launch) once stopped, superseded or aborted
       try {
         await deps.onEnqueued(userId)
       } catch (err: any) {
@@ -283,7 +289,7 @@ export function createGsdcIngest(deps: GsdcDeps) {
             if (!s.success) throw new GsdcFailure('bad_payload')
             summaries.push(s.data)
           }
-          await handleSummaries(summaries, cfg.baseUrl, cfg.token, ac.signal, () => !stopped && gen === generation)
+          await handleSummaries(summaries, cfg.baseUrl, cfg.token, ac.signal, () => !stopped && gen === generation && !ac.signal.aborted)
           if (ev.event === 'snapshot') gotSnapshot = true
           // A fully applied event ends any outage.
           outage = false

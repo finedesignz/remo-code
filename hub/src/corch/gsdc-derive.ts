@@ -8,9 +8,14 @@ import { z } from 'zod'
 
 const Phase = z.object({
   number: z.string().min(1).max(40),
-  name: z.string().nullable().optional(),
-  goal: z.string().nullable().optional(),
+  name: z.string().max(2000).nullable().optional(),
+  goal: z.string().max(20000).nullable().optional(),
 })
+
+/** Hard bounds on what one board may make the hub derive (QC R3): identity strings and phase counts. */
+export const MAX_PHASES_PER_COLUMN = 1000
+export const MAX_MILESTONE_CHARS = 100
+const Phases = z.array(Phase).max(MAX_PHASES_PER_COLUMN)
 
 /** The slice of GET /api/board/projects/{id} that derivation reads. Extra fields are ignored. */
 export const BoardDetail = z.object({
@@ -21,10 +26,10 @@ export const BoardDetail = z.object({
   snapshot: z.object({ state: z.string(), stale: z.boolean() }).nullable(),
   columns: z
     .object({
-      done: z.array(Phase),
-      current: z.array(Phase),
-      backlog: z.array(Phase),
-      pending: z.array(Phase),
+      done: Phases,
+      current: Phases,
+      backlog: Phases,
+      pending: Phases,
     })
     .nullable(),
 })
@@ -33,7 +38,7 @@ export type BoardDetail = z.infer<typeof BoardDetail>
 /** The slice of a fleet summary (snapshot / project frame entry) that the skip rules read. */
 export const BoardSummary = z.object({
   id: z.string().min(1).max(100),
-  slug: z.string().min(1).max(300),
+  slug: z.string().min(1).max(200),
   stale: z.boolean(),
   divergent: z.boolean(),
   active_runs: z.number().int().nonnegative(),
@@ -81,7 +86,7 @@ export function comparePhaseNumbers(a: string, b: string): number {
 
 export function milestoneOf(b: BoardDetail): string {
   const m = b.position?.milestone
-  return m ? (m.version ?? m.heading).trim() || 'none' : 'none'
+  return m ? (m.version ?? m.heading).trim().slice(0, MAX_MILESTONE_CHARS) || 'none' : 'none'
 }
 
 export function sourceRefOf(slug: string, milestone: string, phaseNumber: string): string {

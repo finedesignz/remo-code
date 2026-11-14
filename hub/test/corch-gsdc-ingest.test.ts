@@ -69,7 +69,7 @@ function project(id: string, userId: string, ident: string, priority = 5) {
 
 type Make = () => Response | Promise<Response>
 
-function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<string, Make>; applyThrows?: boolean; applyGate?: Promise<void> } = {}) {
+function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<string, Make>; applyThrows?: boolean; applyGate?: Promise<void>; enqueuedGate?: Promise<void> } = {}) {
   const log = {
     fetches: [] as string[],
     auth: [] as string[],
@@ -125,7 +125,10 @@ function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<st
       },
     },
     notifyOutage: async (o) => void log.outages.push(o),
-    onEnqueued: async (u) => void log.enqueued.push(u),
+    onEnqueued: async (u) => {
+      log.enqueued.push(u)
+      if (opts.enqueuedGate) await opts.enqueuedGate
+    },
   })
   const reconnects = () => timers.filter((t) => t.ms !== GSDC_IDLE_TIMEOUT_MS && !t.cleared)
   return { ingest, log, timers, reconnects }
@@ -605,6 +608,71 @@ describe('review hardening (QC round 2)', () => {
     h.ingest.start()
     await flush()
     expect(h.log.outages).toEqual([{ userIds: ['u1'], signature: 'stream_error' }])
+    h.ingest.stop()
+  })
+})
+
+describe('review hardening (QC round 3)', () => {
+  test('stop() while the first user evaluation is running: the second user is never evaluated', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const h = harness({
+      projects: [project('pa', 'u1', 'github://acme/app'), project('pb', 'u2', 'github://acme/app')],
+      streams: [() => sseResponse([frame('snapshot', { projects: [sum('c1', 'acme/app')] })])],
+      details: { c1: () => json(detail({ current: [{ number: '4' }] })) },
+      enqueuedGate: gate,
+    })
+    h.ingest.start()
+    await flush()
+    expect(h.log.enqueued).toEqual(['u1']) // the first evaluation started and is blocked
+    h.ingest.stop()
+    release()
+    await flush()
+    expect(h.log.enqueued).toEqual(['u1'])
+  })
+
+  test('derived bounds: an oversized phase list or a huge milestone is refused or truncated', async () => {
+    const many = Array.from({ length: 1001 }, (_, i) => ({ number: String(i + 1) }))
+    const h = harness({
+      projects: [project('pa', 'u1', 'github://acme/app')],
+      streams: [() => sseResponse([frame('snapshot', { projects: [sum('c1', 'acme/app')] })])],
+      details: { c1: () => json(detail({ done: many })) },
+    })
+    h.ingest.start()
+    await flush()
+    expect(h.log.upserts).toEqual([])
+    expect(h.log.outages).toEqual([{ userIds: ['u1'], signature: 'bad_payload' }])
+    h.ingest.stop()
+    const h2 = harness({
+      projects: [project('pa', 'u1', 'github://acme/app')],
+      streams: [() => sseResponse([frame('snapshot', { projects: [sum('c1', 'acme/app')] })])],
+      details: { c1: () => json(detail({ current: [{ number: '4' }] }, { position: { milestone: { version: 'v'.repeat(5000), heading: 'x' } } })) },
+    })
+    h2.ingest.start()
+    await flush()
+    expect(h2.log.upserts[0].sourceRef.length).toBeLessThan(200)
+    h2.ingest.stop()
+  })
+})
+
+describe('review hardening (QC round 3, idle abort)', () => {
+  test('the inactivity timeout firing while apply waits invalidates the pending write and the evaluation', async () => {
+    let release!: () => void
+    const applyGate = new Promise<void>((r) => (release = r))
+    const h = harness({
+      projects: [project('pa', 'u1', 'github://acme/app')],
+      streams: [() => sseResponse([frame('snapshot', { projects: [sum('c1', 'acme/app')] })], { hold: true })],
+      details: { c1: () => json(detail({ current: [{ number: '4' }] })) },
+      applyGate,
+    })
+    h.ingest.start()
+    await flush()
+    const idle = h.timers.filter((t) => t.ms === GSDC_IDLE_TIMEOUT_MS && !t.cleared).at(-1)!
+    idle.fn() // the connection is declared dead while the transaction is still waiting
+    release()
+    await flush()
+    expect(h.log.upserts).toEqual([])
+    expect(h.log.enqueued).toEqual([])
     h.ingest.stop()
   })
 })
