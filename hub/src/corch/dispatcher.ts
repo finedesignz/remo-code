@@ -345,12 +345,25 @@ export function createCorchDispatcher(deps: CorchDeps) {
   function runStoreFor(c: RunCtx): RunStore {
     return {
       open: async () => null,
+      // Called immediately before the send: the conditional UPDATE is the liveness check, so a run that
+      // ended (reclaim) between the gates and here throws and the pipeline sends nothing.
       markDispatched: async () => {
-        await deps.store.markRunRunning(c.runId)
+        if (!(await deps.store.markRunRunning(c.runId))) throw new Error('corch_run_not_live')
       },
       markSkipped: async (_token, reason) => endRefusal(c, reason, true),
       markFailed: async () => endFailure(c, 'dispatch_failed', false),
       onFinalize: async () => handleRunEnd(c),
+    }
+  }
+
+  /** True only while the run row exists and has not ended (fail closed on any lookup problem). */
+  async function runIsLive(runId: string): Promise<boolean> {
+    try {
+      const rc = await deps.store.runContext(runId)
+      return !!rc && !rc.run.ended_at
+    } catch (err) {
+      log(`run liveness lookup failed run=${runId}: ${errMsg(err)}`)
+      return false
     }
   }
 
@@ -374,7 +387,9 @@ export function createCorchDispatcher(deps: CorchDeps) {
     const pdeps: PipelineDeps = buildCorchPipelineDeps(deps, {
       store: runStoreFor(c),
       // A parked turn can be minutes stale: it re-enters dispatch() and is fully re-gated.
+      // The run may have ended while parked (reclaim, park expiry, finish): a dead run never re-sends.
       replay: async (r) => {
+        if (!(await runIsLive(c.runId))) return
         await applyOutcome(c, await deps.dispatch(r ?? req, pdeps))
       },
       onParkExpire: async () => endFailure(c, 'spawn_timeout', true),

@@ -12,12 +12,20 @@ import type { QuotaProvider } from './quota-provider.ts'
 type GateResult = { ok: true } | { ok: false; reason: string }
 
 const BAD_TOKEN: GateResult = { ok: false, reason: 'corch_bad_token' }
+/** A replayed or promoted turn of a run that already ended (reclaimed, failed, finished) must never send. */
+const NOT_LIVE: GateResult = { ok: false, reason: 'corch_run_not_live' }
 
-async function contextFor(store: CorchStore, req: DispatchRequest): Promise<RunContext | null> {
+/** The run's context, or the refusal to return: unknown token/run => corch_bad_token, ended run => corch_run_not_live. */
+async function contextFor(store: CorchStore, req: DispatchRequest): Promise<RunContext | GateResult> {
   const runId = runIdFromToken(req.token)
-  if (!runId) return null
-  return store.runContext(runId)
+  if (!runId) return BAD_TOKEN
+  const ctx = await store.runContext(runId)
+  if (!ctx) return BAD_TOKEN
+  if (ctx.run.ended_at) return NOT_LIVE
+  return ctx
 }
+
+const refused = (x: RunContext | GateResult): x is GateResult => 'ok' in x
 
 /** Refuses `project_budget` once the project's CORCH sessions used today's daily_token_budget. */
 export function corchProjectBudgetGate(store: CorchStore): DispatchGate {
@@ -25,7 +33,7 @@ export function corchProjectBudgetGate(store: CorchStore): DispatchGate {
     name: 'corch_project_budget',
     async check(req): Promise<GateResult> {
       const ctx = await contextFor(store, req)
-      if (!ctx) return BAD_TOKEN
+      if (refused(ctx)) return ctx
       const used = await store.projectTokensToday(ctx.project.id, ctx.tz)
       return used >= Number(ctx.project.daily_token_budget) ? { ok: false, reason: 'project_budget' } : { ok: true }
     },
@@ -38,7 +46,7 @@ export function corchConcurrencyGate(store: CorchStore): DispatchGate {
     name: 'corch_concurrency',
     async check(req): Promise<GateResult> {
       const ctx = await contextFor(store, req)
-      if (!ctx) return BAD_TOKEN
+      if (refused(ctx)) return ctx
       const others = await store.liveRunsForUser(ctx.run.user_id, ctx.run.id)
       return others >= ctx.maxConcurrent ? { ok: false, reason: 'corch_concurrency' } : { ok: true }
     },
@@ -51,7 +59,7 @@ export function corchQuotaGate(quota: QuotaProvider, store: CorchStore): Dispatc
     name: 'corch_quota',
     async check(req): Promise<GateResult> {
       const ctx = await contextFor(store, req)
-      if (!ctx) return BAD_TOKEN
+      if (refused(ctx)) return ctx
       const snap = await quota.snapshotFor({ userId: ctx.run.user_id, projectId: ctx.project.id, workItemId: ctx.item.id })
       return snap.ok ? { ok: true } : { ok: false, reason: snap.reason }
     },
