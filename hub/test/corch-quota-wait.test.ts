@@ -98,15 +98,28 @@ function world(quota: any, gateReason: string) {
 }
 
 describe('CORCH-R2.6: a quota refusal requeues with not_before = earliest eligible instant', () => {
-  test('earliestEligibleAt returns T => notBefore {at: T iso}, no attempt, wait_reason = the reason', async () => {
+  test('earliestEligibleAt returns T (soon) => notBefore {at: T iso}, no attempt, wait_reason = the reason', async () => {
     process.env.REMO_CORCH_ENABLED = '1'
-    const T = new Date('2026-11-13T18:30:00Z')
+    const NOW = new Date('2026-11-13T18:00:00Z')
+    const T = new Date(NOW.getTime() + 300_000) // inside the 600s backoff window
     const seen: string[] = []
     const quota = { snapshotFor: async () => ({ ok: false, reason: 'quota:over_ceiling' }), earliestEligibleAt: async (u: string) => (seen.push(u), T) }
     const { ends, deps } = world(quota, 'quota:over_ceiling')
+    deps.now = () => NOW
     await createCorchDispatcher(deps).evaluateUser('u1')
     expect(ends[0]).toEqual({ endReason: 'quota:over_ceiling', consumeAttempt: false, waitReason: 'quota:over_ceiling', notBefore: { at: T.toISOString() } })
     expect(seen).toEqual(['u1'])
+  })
+
+  test('QC3 H1: earliestEligibleAt far in the future => notBefore capped at now+600s (account state governs, not the reset)', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const NOW = new Date('2026-11-13T18:00:00Z')
+    const T = new Date(NOW.getTime() + 4 * 3600_000)
+    const quota = { snapshotFor: async () => ({ ok: false, reason: 'quota:over_ceiling' }), earliestEligibleAt: async () => T }
+    const { ends, deps } = world(quota, 'quota:over_ceiling')
+    deps.now = () => NOW
+    await createCorchDispatcher(deps).evaluateUser('u1')
+    expect(ends[0]).toMatchObject({ consumeAttempt: false, waitReason: 'quota:over_ceiling', notBefore: { at: new Date(NOW.getTime() + 600_000).toISOString() } })
   })
 
   test('earliestEligibleAt returns NULL => notBefore null (an event must re-evaluate)', async () => {

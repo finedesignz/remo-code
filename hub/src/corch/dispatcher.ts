@@ -75,7 +75,7 @@ export interface SendGuard {
 
 /** F3: hold applied when a quota death could not be recorded on its account (the 5h window cap). */
 const QUOTA_DEATH_FALLBACK_HOLD_MS = 5 * 3600_000
-/** QC2 G1: item backoff after a quota death whose account block was recorded (the block alone governs quota). */
+/** QC2 G1 / QC3 H1: max item backoff after a quota death or quota refusal (account state alone governs quota). */
 const QUOTA_DEATH_BACKOFF_MS = 600_000
 
 const ALWAYS_LIVE: SendGuard = { assertLive: () => {} }
@@ -322,7 +322,10 @@ export function createCorchDispatcher(deps: CorchDeps) {
       } catch (err) {
         log(`earliestEligibleAt failed user=${userId}: ${errMsg(err)}`)
       }
-      notBefore = at ? { at: at.toISOString() } : null
+      // QC3 H1: never hold the item to a far-future reset. The account state governs eligibility, so the item waits at
+      // most one backoff window and a healthy snapshot arriving before the reset releases it within that window.
+      const cap = (deps.now ?? (() => new Date()))().getTime() + QUOTA_DEATH_BACKOFF_MS
+      notBefore = at ? { at: new Date(Math.min(at.getTime(), cap)).toISOString() } : null
     }
     const input: EndRequeueInput = {
       endReason: s.endReason,

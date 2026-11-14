@@ -387,6 +387,69 @@ maybe('CORCH-02 e2e - quota ingest on real Postgres', () => {
     expect(reclaimed?.item.id).toBe(item.item.id)
   })
 
+  test('QC3 H1: death -> still over ceiling -> backoff expires -> quota refusal -> healthy reading before reset releases the item within 600s', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const u = await newUser()
+    await post(snapshot([acct('h1', { five_h_pct: 5, seven_d_pct: 10 })]), u.publish)
+    const { createCorchDispatcher } = await import('../../src/corch/dispatcher.ts')
+    const { corchStore } = await import('../../src/corch/store.ts')
+    await h.sql`UPDATE users SET corch_max_concurrent_runs = 5 WHERE id = ${u.userId}`
+    const p = await h.sql<{ id: string }[]>`
+      INSERT INTO corch_projects (user_id, repo_ident) VALUES (${u.userId}, ${`github://acme/h1-${randomUUID()}`}) RETURNING id`
+    const item = await corchStore.enqueueWorkItem({ userId: u.userId, projectId: p[0]!.id, source: 'manual', sourceRef: `h1-${randomUUID()}`, title: 't', body: '', priority: 0 })
+    const { provider: quota } = await provider([{ supervisorId: 's-h1', accountSlot: 'h1', maxConcurrent: 1 }])
+    const captured: any[] = []
+    const deps: any = {
+      store: corchStore,
+      workspace: { resolve: async () => ({ ok: true, sessionId: `s-${randomUUID()}`, worktreePath: 'C:/wt/app' }) },
+      launch: {
+        tzForUser: async () => 'UTC', reserve: async () => ({ ok: true }), release: async () => {},
+        // the quota gate's verdict is the refusal reason (what the real gate returns), null when an account is eligible
+        checkGates: async (req: any) => {
+          const r: any = await quota.snapshotFor({ userId: u.userId, projectId: p[0]!.id, workItemId: item.item.id, runId: String(req.token).replace('corch-run:', '') })
+          return r.ok ? null : r.reason
+        },
+        isRepoAutospawnAllowed: async () => true, supervisorOnlineForUser: async () => true, getTokenCapStatus: async () => ({ over: false }),
+        countAutospawnLaunchesToday: async () => 0, isOverAutospawnDailyLaunchCap: () => false, graceParkPending: () => false,
+        launchSessionForUser: async () => ({ ok: true, runId: 'sup-run', supervisorId: 'sup-1' }), appendRunLog: async () => {},
+      },
+      launchCommand: 'corch_test_launch',
+      quota,
+      pipeline: { isOnline: async () => true, send: async () => {} },
+      dispatch: async (req: any, pdeps: any) => (captured.push({ req, pdeps }), { kind: 'dispatched', runId: 'x' }),
+      prLookup: { lookup: async () => { throw new Error('PR lookup must not run on a quota death') } },
+      notify: async () => {},
+      timers: { setTimeout: () => ({}), clearTimeout: () => {} },
+    }
+    const dispatcher = createCorchDispatcher(deps)
+    await dispatcher.evaluateUser(u.userId)
+    expect(captured.length).toBe(1)
+    await captured[0].pdeps.store.onFinalize(captured[0].req.token, "You've hit your session limit · resets 3pm (America/Los_Angeles)")
+
+    // a fresh live reading that is STILL over the ceiling clears the death block but leaves the account ineligible
+    const resetAt = new Date(Date.now() + 3 * 3600_000).toISOString()
+    await new Promise((r) => setTimeout(r, 20))
+    await post(snapshot([acct('h1', { five_h_pct: 99, seven_d_pct: 99, resets_5h: resetAt, fetched_at: new Date(Date.now() + 5_000).toISOString() })]), u.publish)
+    // the 600s backoff expires, the item is re-dispatched and refused by quota
+    await h.sql`UPDATE corch_work_items SET not_before = now() - interval '1 second' WHERE id = ${item.item.id}`
+    await dispatcher.evaluateUser(u.userId)
+    const refused = (await h.sql`SELECT status, wait_reason, attempts, not_before FROM corch_work_items WHERE id = ${item.item.id}`)[0]!
+    expect(refused.status).toBe('queued')
+    expect(refused.wait_reason).toMatch(/^quota:/)
+    expect(refused.attempts).toBe(0)
+    // held for one backoff window, NOT until the 3h reset
+    expect(Math.abs(refused.not_before.getTime() - (Date.now() + 600_000))).toBeLessThan(60_000)
+    expect(refused.not_before.getTime()).toBeLessThan(new Date(resetAt).getTime())
+
+    // a healthy reading arrives before the reset; the item is claimable once the (<=600s) backoff has passed
+    await new Promise((r) => setTimeout(r, 20))
+    await post(snapshot([acct('h1', { five_h_pct: 5, seven_d_pct: 10, fetched_at: new Date(Date.now() + 10_000).toISOString() })]), u.publish)
+    expect(((await (await get(u.read)).json()) as any).accounts[0]).toMatchObject({ eligible: true, reason: null })
+    expect(await corchStore.claimNext(u.userId, [])).toBeNull() // inside the backoff
+    await h.sql`UPDATE corch_work_items SET not_before = not_before - interval '601 seconds' WHERE id = ${item.item.id}` // 600s elapse
+    expect((await corchStore.claimNext(u.userId, []))?.item.id).toBe(item.item.id)
+  })
+
   const blockRow = async (userId: string, id: string) =>
     (await h.sql`SELECT blocked_at, blocked_until FROM corch_quota_accounts WHERE user_id = ${userId} AND account_id = ${id}`)[0]!
   const approx = (d: Date, ms: number) => Math.abs(d.getTime() - (Date.now() + ms)) < 60_000
