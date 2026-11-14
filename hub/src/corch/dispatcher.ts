@@ -5,7 +5,13 @@
 // dynamic import so unit tests import this module with zero DB.
 
 import type { AutospawnDeps } from '../heal/autospawn-deps.ts'
+import type { DispatchRequest, PipelineDeps, RunStore } from '../dispatch/pipeline.ts'
+import { automationKillSwitchGate, automationLifetimeCounterGate } from '../dispatch/automation-controls.ts'
+import { dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate } from '../dispatch/gates.ts'
 import { corchEnabled, corchLeaseMs } from './flag.ts'
+import { buildCorchKey, buildCorchRunToken } from './keys.ts'
+import { corchProjectBudgetGate, corchConcurrencyGate, corchQuotaGate } from './gates.ts'
+import { DEFAULT_QUOTA_PROVIDER, type QuotaProvider } from './quota-provider.ts'
 import type { CorchStore, CorchWorkItem, CorchProject, EndRequeueInput, NotBefore } from './store.ts'
 
 // ── Seams with fail-closed defaults (LD-11) ──────────────────────────────────
@@ -34,10 +40,76 @@ export const DEFAULT_PR_LOOKUP: PrLookup = {
   lookup: async () => ({ kind: 'unavailable' }),
 }
 
+/** The pipeline seams CORCH needs from the real hub (injected so tests fake them). */
+export interface PipelineSeams {
+  isOnline: PipelineDeps['isOnline']
+  send: PipelineDeps['send']
+  graceKey?: PipelineDeps['graceKey']
+  finalizeTimeoutMs?: number
+}
+
 export interface CorchDeps {
   store: CorchStore
   workspace: Workspace
   launch: AutospawnDeps
+  quota: QuotaProvider
+  pipeline: PipelineSeams
+}
+
+/** Hooks the dispatcher wires into the pipeline for one run (filled by the launch path). */
+export interface PipelineHooks {
+  store: RunStore | null
+  replay: PipelineDeps['replay']
+  onParkExpire: NonNullable<PipelineDeps['onParkExpire']>
+}
+
+const NO_HOOKS: PipelineHooks = {
+  store: null,
+  replay: async () => {},
+  onParkExpire: async () => {},
+}
+
+/**
+ * The single pipeline builder: exactly one `gates:` literal exists under hub/src/corch (LD-5).
+ * Order is binding: kill switch first, lifetime counter last.
+ */
+export function buildCorchPipelineDeps(deps: CorchDeps, hooks: PipelineHooks = NO_HOOKS): PipelineDeps {
+  return {
+    gates: [
+      automationKillSwitchGate,
+      dailyCostCapGate,
+      dailyTokenCapGate,
+      corchProjectBudgetGate(deps.store),
+      corchConcurrencyGate(deps.store),
+      corchQuotaGate(deps.quota, deps.store),
+      sessionInjectRateGate,
+      automationLifetimeCounterGate,
+    ],
+    store: hooks.store,
+    isOnline: (req) => deps.pipeline.isOnline(req),
+    send: (req) => deps.pipeline.send(req),
+    graceKey: deps.pipeline.graceKey,
+    finalizeTimeoutMs: deps.pipeline.finalizeTimeoutMs,
+    replay: hooks.replay,
+    onParkExpire: hooks.onParkExpire,
+  }
+}
+
+/** The dispatch request for a run. The ONLY place the lifetime key is attached (LD-4). */
+export function buildCorchRequest(a: {
+  userId: string
+  sessionId: string
+  runId: string
+  workItemId: string
+  prompt: string
+}): DispatchRequest {
+  return {
+    userId: a.userId,
+    sessionId: a.sessionId,
+    token: buildCorchRunToken(a.runId),
+    prompt: a.prompt,
+    counterKey: buildCorchKey(a.workItemId),
+  }
 }
 
 export type EvaluateResult = { kind: 'disabled' } | { kind: 'done'; claimed: number }
@@ -141,6 +213,14 @@ export async function realCorchDeps(): Promise<CorchDeps> {
   return {
     store: corchStore,
     workspace: DEFAULT_WORKSPACE,
+    quota: DEFAULT_QUOTA_PROVIDER,
+    // Task 4 binds the real heal send/isOnline here; until then nothing can reach a send (workspace refuses).
+    pipeline: {
+      isOnline: async () => false,
+      send: async () => {
+        throw new Error('corch pipeline send is not wired')
+      },
+    },
     // LD-1: the heal/orchestrator launch deps with ONE override: CORCH enrollment replaces the allowlist.
     launch: { ...REAL_AUTOSPAWN, isRepoAutospawnAllowed: (u, r) => corchStore.isEnrolledEnabled(u, r) },
   }

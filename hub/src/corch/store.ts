@@ -86,6 +86,15 @@ export type EndResult =
   | { changed: false }
   | { changed: true; workItemId: string; userId: string; itemStatus: CorchWorkItem['status']; attempts: number }
 
+/** Everything a gate needs about one run: identity, the item/project, the user's cap and tz. */
+export interface RunContext {
+  run: CorchRun
+  item: CorchWorkItem
+  project: CorchProject
+  maxConcurrent: number
+  tz: string
+}
+
 export interface Claimed {
   run: CorchRun
   item: CorchWorkItem
@@ -123,6 +132,11 @@ export interface CorchStore {
   endRunAndRequeue(runId: string, i: EndRequeueInput): Promise<EndResult>
   endRunMarkPrOpen(runId: string, prUrl: string): Promise<EndResult>
   isEnrolledEnabled(userId: string, repoIdent: string): Promise<boolean>
+  runContext(runId: string): Promise<RunContext | null>
+  /** Live (not ended) runs for the user, excluding one run (the request's own). */
+  liveRunsForUser(userId: string, excludeRunId: string): Promise<number>
+  /** Today's four-bucket token total for the project's CORCH sessions, in the user's tz-day. */
+  projectTokensToday(projectId: string, tz: string): Promise<number>
 }
 
 export const corchStore: CorchStore = {
@@ -299,5 +313,37 @@ export const corchStore: CorchStore = {
     const r = await sql`
       SELECT 1 FROM corch_projects WHERE user_id = ${userId} AND repo_ident = ${repoIdent} AND enabled = true`
     return r.length > 0
+  },
+
+  async runContext(runId) {
+    const runs = await sql<CorchRun[]>`SELECT * FROM corch_runs WHERE id = ${runId}`
+    const run = runs[0]
+    if (!run) return null
+    const items = await sql<CorchWorkItem[]>`SELECT * FROM corch_work_items WHERE id = ${run.work_item_id}`
+    const projects = await sql<CorchProject[]>`SELECT * FROM corch_projects WHERE id = ${run.project_id}`
+    const users = await sql<{ cap: number; tz: string }[]>`
+      SELECT corch_max_concurrent_runs AS cap, COALESCE(timezone, 'UTC') AS tz FROM users WHERE id = ${run.user_id}`
+    if (!items[0] || !projects[0] || !users[0]) return null
+    return { run, item: items[0], project: projects[0], maxConcurrent: users[0].cap, tz: users[0].tz }
+  },
+
+  async liveRunsForUser(userId, excludeRunId) {
+    const r = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM corch_runs
+      WHERE user_id = ${userId} AND ended_at IS NULL AND id <> ${excludeRunId}`
+    return r[0]!.n
+  },
+
+  async projectTokensToday(projectId, tz) {
+    // Sessions that hosted a CORCH run of this project; IN (not JOIN) so a session reused across runs
+    // is counted once. Same tz-day boundary and four buckets as getTodayTokenTotal.
+    const r = await sql<{ sum: string | null }[]>`
+      SELECT COALESCE(SUM(
+        input_tokens + output_tokens + cache_creation_input_tokens + cache_read_input_tokens
+      ), 0)::text AS sum
+      FROM token_usage
+      WHERE session_id IN (SELECT session_id FROM corch_runs WHERE project_id = ${projectId} AND session_id IS NOT NULL)
+        AND created_at >= date_trunc('day', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}`
+    return Number(r[0]?.sum ?? 0)
   },
 }
