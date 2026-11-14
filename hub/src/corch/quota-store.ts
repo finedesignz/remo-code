@@ -56,7 +56,11 @@ export const quotaStore = {
                    AND EXCLUDED.source = 'live'
                    AND EXCLUDED.fetched_at IS NOT NULL
                    AND EXCLUDED.fetched_at > corch_quota_accounts.blocked_at
-                THEN NULL ELSE corch_quota_accounts.blocked_at END`
+                THEN NULL ELSE corch_quota_accounts.blocked_at END
+          -- F7: a replayed / out-of-order POST never overwrites a newer stored reading (nor refreshes received_at).
+          WHERE corch_quota_accounts.fetched_at IS NULL
+             OR EXCLUDED.fetched_at IS NULL
+             OR EXCLUDED.fetched_at >= corch_quota_accounts.fetched_at`
       }
       return accounts.length
     })

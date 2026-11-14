@@ -201,6 +201,25 @@ maybe('CORCH-02 e2e - quota ingest on real Postgres', () => {
     }
   }
 
+  test('F7: an incoming reading older than the stored fetched_at is ignored (no overwrite, no received_at refresh); equal or newer is applied', async () => {
+    const u = await newUser()
+    const t0 = Date.now() - 60_000
+    await post(snapshot([acct('ord', { five_h_pct: 10, fetched_at: new Date(t0).toISOString() })]), u.publish)
+    const read = async () =>
+      (await h.sql`SELECT five_h_pct, fetched_at, received_at FROM corch_quota_accounts WHERE user_id = ${u.userId} AND account_id = 'ord'`)[0]!
+    const first = await read()
+    await new Promise((r) => setTimeout(r, 20))
+    await post(snapshot([acct('ord', { five_h_pct: 90, fetched_at: new Date(t0 - 30_000).toISOString() })]), u.publish)
+    const afterOld = await read()
+    expect(Number(afterOld.five_h_pct)).toBe(10)
+    expect(afterOld.fetched_at.getTime()).toBe(first.fetched_at.getTime())
+    expect(afterOld.received_at.getTime()).toBe(first.received_at.getTime())
+    await post(snapshot([acct('ord', { five_h_pct: 30, fetched_at: new Date(t0).toISOString() })]), u.publish) // equal => applied
+    expect(Number((await read()).five_h_pct)).toBe(30)
+    await post(snapshot([acct('ord', { five_h_pct: 40, fetched_at: new Date(t0 + 10_000).toISOString() })]), u.publish)
+    expect(Number((await read()).five_h_pct)).toBe(40)
+  })
+
   test('the real provider picks the lowest account and records corch_runs.account_slot', async () => {
     const u = await newUser()
     await post(snapshot([acct('hi', { five_h_pct: 40, seven_d_pct: 30 }), acct('lo', { five_h_pct: 5, seven_d_pct: 10 }), acct('mid', { five_h_pct: 20, seven_d_pct: 20 })]), u.publish)
