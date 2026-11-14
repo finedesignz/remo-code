@@ -38,12 +38,39 @@ describe('Dockerfile.slot', () => {
   })
 
   test('no Tauri, ConPTY or Rust pty host in the image', () => {
-    expect(code).not.toMatch(/tauri|pty_host|conpty|cargo|rustup|\.msi|\.exe/i)
-    expect(code).not.toMatch(/COPY\s+supervisor\/(tauri|\s|\.)/)
+    expect(code.replaceAll('supervisor/tauri/src-tauri/tauri.conf.json', '')).not.toMatch(/tauri|pty_host|conpty|cargo|rustup|\.msi|\.exe/i)
+    // Only the version manifest may come from supervisor/tauri; never the whole dir, never `COPY supervisor/ ...`.
+    expect(code).not.toMatch(/COPY\s+supervisor\/(tauri\/(?!src-tauri\/tauri\.conf\.json\s)|\s)/)
   })
 
   test('uses an exec-form entrypoint via the slot entrypoint script', () => {
     expect(code).toMatch(/ENTRYPOINT \["\/usr\/local\/bin\/remo-slot-entrypoint"\]/)
+  })
+})
+
+describe('image import closure', () => {
+  test('every import escaping supervisor/src is COPY-ed into the image', () => {
+    const { readdirSync, statSync } = require('node:fs') as typeof import('node:fs')
+    const { resolve, relative, dirname } = require('node:path') as typeof import('node:path')
+    const walk = (d: string): string[] =>
+      readdirSync(d).flatMap((n) => (statSync(join(d, n)).isDirectory() ? walk(join(d, n)) : [join(d, n)]))
+    const srcDir = join(root, 'supervisor', 'src')
+    const escaping = new Set<string>()
+    for (const f of walk(srcDir).filter((p) => /\.(ts|mjs)$/.test(p))) {
+      for (const m of readFileSync(f, 'utf8').matchAll(/^\s*(?:import|export)[^'"\n]*?from\s+'(\.[^']+)'/gm)) {
+        const target = resolve(dirname(f), m[1]!)
+        if (relative(srcDir, target).startsWith('..')) escaping.add(relative(root, target).replace(/\\/g, '/'))
+      }
+    }
+    expect(escaping.size).toBeGreaterThan(0)
+    const copies = [...dockerfile.matchAll(/^COPY\s+(?:--\S+\s+)?(\S+)\s/gm)].map((m) => m[1]!)
+    for (const e of escaping) {
+      const ok = copies.some((c) => e === c || c.startsWith(e + '.') || e.startsWith(c.replace(/\/$/, '') + '/'))
+      expect({ e, ok }).toEqual({ e, ok: true })
+    }
+  })
+  test('git credential helper is host-scoped', () => {
+    expect(read('tools/slot-image/entrypoint.sh')).toMatch(/credential\.https:\/\/\$\{GIT_HOST\}\.helper/)
   })
 })
 
