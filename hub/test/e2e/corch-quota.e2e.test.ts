@@ -324,7 +324,9 @@ maybe('CORCH-02 e2e - quota ingest on real Postgres', () => {
       store: corchStore,
       workspace: { resolve: async () => ({ ok: true, sessionId: `s-${randomUUID()}`, worktreePath: 'C:/wt/app' }) },
       launch: {
-        tzForUser: async () => 'UTC', checkGates: async () => null, reserve: async () => ({ ok: true }), release: async () => {},
+        // what the quota gate does at dispatch: pick and record the account on the run (the F5 launch binding reads it)
+        tzForUser: async () => 'UTC', reserve: async () => ({ ok: true }), release: async () => {},
+        checkGates: async (req: any) => { await quota.snapshotFor({ userId: u.userId, projectId: p[0]!.id, workItemId: item.item.id, runId: String(req.token).replace('corch-run:', '') }); return null },
         isRepoAutospawnAllowed: async () => true, supervisorOnlineForUser: async () => true, getTokenCapStatus: async () => ({ over: false }),
         countAutospawnLaunchesToday: async () => 0, isOverAutospawnDailyLaunchCap: () => false, graceParkPending: () => false,
         launchSessionForUser: async () => ({ ok: true, runId: 'sup-run', supervisorId: 'sup-1' }), appendRunLog: async () => {},
@@ -341,8 +343,6 @@ maybe('CORCH-02 e2e - quota ingest on real Postgres', () => {
     const live = await h.sql`SELECT id FROM corch_runs WHERE user_id = ${u.userId} AND ended_at IS NULL`
     expect(live.length).toBe(1)
     const runId = live[0]!.id as string
-    // what the quota gate does at dispatch: pick and record the account on the run
-    await quota.snapshotFor({ userId: u.userId, projectId: p[0]!.id, workItemId: item.item.id, runId })
     expect((await h.sql`SELECT account_slot FROM corch_runs WHERE id = ${runId}`)[0]!.account_slot).toBe('dead1')
 
     await captured[0].pdeps.store.onFinalize(captured[0].req.token, "You've hit your session limit · resets 3pm (America/Los_Angeles)")
