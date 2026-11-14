@@ -779,6 +779,46 @@ describe('QC round 2 - R2-1: reclaim is serialized with the send', () => {
     expect(log).toEqual(['insert']) // the row was already written; nothing reached the socket
   })
 
+  test('7c panel: corchSend resolves the DAL BEFORE the insert guard; a cancel during the load inserts nothing', async () => {
+    const { corchSend } = await import('../src/corch/dispatcher.ts')
+    const ws: string[] = []
+    const inserts: string[] = []
+    let live = true
+    let resolveDal: ((d: any) => void) | null = null
+    const loadDal = () => new Promise<any>((r) => void (resolveDal = r))
+    const guard = { assertLive: () => { if (!live) throw new Error('corch_run_not_live') } }
+    const base = {
+      getChannel: async () => ({ ws: { send: (d: string) => void ws.push(d) } }),
+      broadcastToSubscribers: () => {},
+    }
+    const r = { userId: 'u1', sessionId: 's1', token: TOKEN, prompt: 'p' } as any
+    const p = corchSend(r, guard, base as any, loadDal)
+    const settled = p.then(() => null, (e: Error) => e)
+    for (let i = 0; i < 20 && !resolveDal; i++) await Promise.resolve()
+    expect(resolveDal).not.toBeNull() // the DAL load is the first await of the send, before any guard
+    live = false // reclaim lands while the DAL module is loading
+    ;(resolveDal as any)({ insertMessage: async (_s: string, _r: string, c: string) => (inserts.push(c), { id: 'm1', created_at: 'now' }) })
+    const err = await settled
+    expect(err?.message).toBe('corch_run_not_live')
+    expect(inserts).toEqual([])
+    expect(ws).toEqual([])
+  })
+
+  test('corchSend with a live run: loads the DAL, inserts once, writes the frame once', async () => {
+    const { corchSend } = await import('../src/corch/dispatcher.ts')
+    const ws: string[] = []
+    const inserts: string[] = []
+    const guard = { assertLive: () => {} }
+    const base = {
+      getChannel: async () => ({ ws: { send: (d: string) => void ws.push(d) } }),
+      broadcastToSubscribers: () => {},
+    }
+    const loadDal = async () => ({ insertMessage: async (_s: string, _r: string, c: string) => (inserts.push(c), { id: 'm1', created_at: 'now' }) })
+    await corchSend({ userId: 'u1', sessionId: 's1', token: TOKEN, prompt: 'p' } as any, guard, base as any, loadDal as any)
+    expect(inserts).toEqual(['p'])
+    expect(ws.length).toBe(1)
+  })
+
   test('reclaimRun cancels the run send path synchronously; the token is gone once the run ended', async () => {
     process.env.REMO_CORCH_ENABLED = '1'
     const { w, deps } = mkWorld({ dispatchOutcome: { kind: 'parked_offline' } })
