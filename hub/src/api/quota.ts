@@ -15,6 +15,7 @@ import { z } from 'zod'
 import { hashToken } from '../lib/crypto'
 import { verifyApiKeyFull } from '../db/dal'
 import { hasExplicitScope, SCOPE_QUOTA_PUBLISH, SCOPE_QUOTA_READ } from '../auth/scopes'
+import { corchQuotaCeilingPct } from '../corch/flag.ts'
 import { quotaStore, type QuotaAccountInput } from '../corch/quota-store.ts'
 import { evaluateAccounts, type QuotaAccountRow } from '../corch/quota-eligibility.ts'
 
@@ -178,7 +179,7 @@ async function noopEvaluate(_userId: string): Promise<void> {}
 export default createQuotaRoutes({
   verifyKey: async (rawKey) => verifyApiKeyFull(await hashToken(rawKey)),
   store: quotaStore,
-  ceilingPct: () => 55,
+  ceilingPct: corchQuotaCeilingPct,
   evaluate: noopEvaluate,
   now: () => new Date(),
 })

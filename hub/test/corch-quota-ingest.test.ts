@@ -227,3 +227,17 @@ describe('CORCH-R2.2: GET /snapshot is per key owner', () => {
     expect(((await res.json()) as any).accounts).toEqual([])
   })
 })
+
+describe('CORCH-R2.3 LD-Q7: an invalid ceiling is a 500 on GET, never a silent default', () => {
+  test('ceilingPct throwing => 500 quota_ceiling_invalid', async () => {
+    const deps: QuotaRouteDeps = {
+      verifyKey: async (raw) => KEYS[raw] ?? null,
+      store: { upsertSnapshot: async () => 0, accountsFor: async () => [row('acct_a')] },
+      ceilingPct: () => { throw new Error('bad') },
+      evaluate: async () => {}, now: () => new Date('2026-11-13T12:00:10Z'),
+    }
+    const res = await get(createQuotaRoutes(deps), 'remokey_read')
+    expect(res.status).toBe(500)
+    expect(await res.json()).toEqual({ error: 'quota_ceiling_invalid' })
+  })
+})
