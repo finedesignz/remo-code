@@ -15,7 +15,7 @@ import { z } from 'zod'
 import { hashToken } from '../lib/crypto'
 import { verifyApiKeyFull } from '../db/dal'
 import { hasExplicitScope, SCOPE_QUOTA_PUBLISH, SCOPE_QUOTA_READ } from '../auth/scopes'
-import { corchQuotaCeilingPct } from '../corch/flag.ts'
+import { corchEnabled, corchQuotaCeilingPct } from '../corch/flag.ts'
 import { quotaStore, type QuotaAccountInput } from '../corch/quota-store.ts'
 import { evaluateAccounts, type QuotaAccountRow } from '../corch/quota-eligibility.ts'
 
@@ -173,13 +173,20 @@ export function createQuotaRoutes(deps: QuotaRouteDeps) {
   return app
 }
 
-/** Task 5 replaces this no-op with the flag-gated dispatcher trigger (LD-Q11). */
-async function noopEvaluate(_userId: string): Promise<void> {}
+/**
+ * LD-Q11: event-driven trigger. With REMO_CORCH_ENABLED off it returns before importing anything; with it on it
+ * runs one evaluation for the user. No timer, no poll, no retry.
+ */
+export async function defaultQuotaEvaluate(userId: string): Promise<void> {
+  if (!corchEnabled()) return
+  const m = await import('../corch/dispatcher.ts')
+  await m.evaluateUserNow(userId)
+}
 
 export default createQuotaRoutes({
   verifyKey: async (rawKey) => verifyApiKeyFull(await hashToken(rawKey)),
   store: quotaStore,
   ceilingPct: corchQuotaCeilingPct,
-  evaluate: noopEvaluate,
+  evaluate: defaultQuotaEvaluate,
   now: () => new Date(),
 })

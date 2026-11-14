@@ -71,7 +71,7 @@ export interface EnqueueInput {
 }
 
 /** When a requeued item becomes eligible again. null = event-driven (no timer). */
-export type NotBefore = null | { midnightTz: string } | { plusSeconds: number }
+export type NotBefore = null | { midnightTz: string } | { plusSeconds: number } | { at: string }
 
 export interface EndRequeueInput {
   endReason: string
@@ -305,6 +305,7 @@ export const corchStore: CorchStore = {
         const nb = i.notBefore
         const midnightTz = nb && 'midnightTz' in nb ? nb.midnightTz : null
         const plusSeconds = nb && 'plusSeconds' in nb ? nb.plusSeconds : null
+        const at = nb && 'at' in nb ? nb.at : null // CORCH-02: an explicit instant (ISO)
         row = await tx`
           UPDATE corch_work_items SET
             status = 'queued',
@@ -314,6 +315,7 @@ export const corchStore: CorchStore = {
                 THEN (date_trunc('day', now() AT TIME ZONE ${midnightTz}::text) + interval '1 day') AT TIME ZONE ${midnightTz}::text
               WHEN ${plusSeconds}::double precision IS NOT NULL
                 THEN now() + make_interval(secs => ${plusSeconds}::double precision)
+              WHEN ${at}::timestamptz IS NOT NULL THEN ${at}::timestamptz
               ELSE NULL END,
             updated_at = now()
           WHERE id = ${itemId} RETURNING status, attempts`

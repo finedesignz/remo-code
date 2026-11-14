@@ -100,3 +100,26 @@ describe('flag OFF is a true no-op (CORCH-R1.2)', () => {
     expect(dispatcherModule.corchSingletonConstructed()).toBe(false)
   })
 })
+
+describe('flag OFF: quota ingest still stores and never constructs the dispatcher (CORCH-02, LD-Q11)', () => {
+  test('a successful POST stores the row, evaluates nothing, and builds no singleton', async () => {
+    delete process.env.REMO_CORCH_ENABLED
+    const { createQuotaRoutes, defaultQuotaEvaluate } = await import('../src/api/quota.ts')
+    const upserts: string[] = []
+    const app = createQuotaRoutes({
+      verifyKey: async () => ({ id: 'k1', user_id: 'user-A', scopes: ['quota:publish'] }),
+      store: { upsertSnapshot: async (u, a) => (upserts.push(u), a.length), accountsFor: async () => [] },
+      ceilingPct: () => 55,
+      evaluate: defaultQuotaEvaluate,
+      now: () => new Date(),
+    })
+    const res = await app.request('/snapshot', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer remokey_x' },
+      body: JSON.stringify({ schema: 1, publisher: 'cug', generated_at: '2026-11-13T12:00:00Z', poll_interval_secs: 300, accounts: [] }),
+    })
+    expect(res.status).toBe(200)
+    expect(upserts).toEqual(['user-A'])
+    expect(dispatcherModule.corchSingletonConstructed()).toBe(false)
+  })
+})

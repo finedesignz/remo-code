@@ -15,10 +15,10 @@ import type { DispatchOutcome, DispatchRequest, PipelineDeps, RunStore } from '.
 import { governedLaunch } from '../dispatch/governed-launch.ts'
 import { automationKillSwitchGate, automationLifetimeCounterGate } from '../dispatch/automation-controls.ts'
 import { dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate } from '../dispatch/gates.ts'
-import { corchEnabled, corchLeaseMs } from './flag.ts'
+import { corchEnabled, corchLeaseMs, corchQuotaCeilingPct } from './flag.ts'
 import { buildCorchKey, buildCorchRunToken, CORCH_ACTOR } from './keys.ts'
 import { corchProjectBudgetGate, corchConcurrencyGate, corchQuotaGate } from './gates.ts'
-import { DEFAULT_QUOTA_PROVIDER, type QuotaProvider } from './quota-provider.ts'
+import { DEFAULT_QUOTA_PROVIDER, createQuotaProvider, type QuotaProvider } from './quota-provider.ts'
 import { buildCorchPrompt } from './prompt.ts'
 import type { CorchStore, CorchWorkItem, CorchProject, EndRequeueInput, EndResult, LiveRun, NotBefore } from './store.ts'
 
@@ -185,7 +185,7 @@ export function buildCorchRequest(a: {
 
 // ── Refusal schedule (LD-7) ──────────────────────────────────────────────────
 
-export type NotBeforeKind = 'midnight' | 'plus_60m' | 'plus_lease' | null
+export type NotBeforeKind = 'midnight' | 'plus_60m' | 'plus_lease' | 'quota' | null
 
 const MIDNIGHT_PREFIXES = [
   'project_budget',
@@ -203,6 +203,7 @@ export function refusalSchedule(reason: string): { endReason: string; waitReason
   if (MIDNIGHT_PREFIXES.some((p) => reason === p || reason.startsWith(p))) notBefore = 'midnight'
   else if (reason.startsWith(INJECT_RATE_PREFIX)) notBefore = 'plus_60m'
   else if (reason.startsWith('autospawn_launch_')) notBefore = 'plus_lease'
+  else if (reason.startsWith('quota:')) notBefore = 'quota' // resolved in refuseRun via deps.quota.earliestEligibleAt (CORCH-02)
   return { endReason, waitReason: reason, notBefore }
 }
 
@@ -304,11 +305,22 @@ export function createCorchDispatcher(deps: CorchDeps) {
     sendable.delete(runId) // before the first await
     const s = refusalSchedule(reason)
     const tz = s.notBefore === 'midnight' ? await deps.launch.tzForUser(userId) : 'UTC'
+    let notBefore = toNotBefore(s.notBefore, tz)
+    if (s.notBefore === 'quota') {
+      // CORCH-R2.6: the earliest instant an account can become eligible, or NULL when only an event can change it.
+      let at: Date | null = null
+      try {
+        at = (await deps.quota.earliestEligibleAt?.(userId)) ?? null
+      } catch (err) {
+        log(`earliestEligibleAt failed user=${userId}: ${errMsg(err)}`)
+      }
+      notBefore = at ? { at: at.toISOString() } : null
+    }
     const input: EndRequeueInput = {
       endReason: s.endReason,
       consumeAttempt: false,
       waitReason: s.waitReason,
-      notBefore: toNotBefore(s.notBefore, tz),
+      notBefore,
     }
     return deps.store.endRunAndRequeue(runId, input)
   }
@@ -701,6 +713,7 @@ export async function corchSend(
 
 export async function realCorchDeps(): Promise<CorchDeps> {
   const { corchStore } = await import('./store.ts')
+  const { quotaStore } = await import('./quota-store.ts')
   const { REAL_AUTOSPAWN } = await import('../heal/autospawn-deps.ts')
   const { AUTOSPAWN_LAUNCH_COMMAND } = await import('../db/orchestrator-rows-dal.ts')
   const { dispatch } = await import('../dispatch/pipeline.ts')
@@ -723,7 +736,14 @@ export async function realCorchDeps(): Promise<CorchDeps> {
     // LD-1: the heal/orchestrator launch deps with ONE override: CORCH enrollment replaces the allowlist.
     launch: { ...REAL_AUTOSPAWN, isRepoAutospawnAllowed: (u, r) => corchStore.isEnrolledEnabled(u, r) },
     launchCommand: AUTOSPAWN_LAUNCH_COMMAND,
-    quota: DEFAULT_QUOTA_PROVIDER,
+    quota: createQuotaProvider({
+      accountsFor: (u) => quotaStore.accountsFor(u),
+      liveRunsByAccount: (u, ex) => quotaStore.liveRunsByAccount(u, ex),
+      onlineSlotSupervisors: (u) => registry.listOnlineSlotSupervisorsForUser(u),
+      claimAccountSlot: (r, u, a, c) => quotaStore.claimAccountSlot(r, u, a, c),
+      now: () => new Date(),
+      ceilingPct: corchQuotaCeilingPct,
+    }),
     pipeline: {
       isOnline: (req) => getChannel(req.sessionId) != null,
       send: (req, guard) => corchSend(req, guard),
