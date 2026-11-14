@@ -354,7 +354,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
     })
     if (!r.changed) return
     if (release) await releaseReservation(c)
-    if (r.itemStatus === 'blocked') await notifyBlocked(c, r.attempts, endReason)
+    if (r.itemStatus === 'blocked' && !r.itemUntouched) await notifyBlocked(c, r.attempts, endReason)
     await afterRunEnd(c)
   }
 
@@ -614,7 +614,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
     } catch (err) {
       log(`pipeline release failed run=${run.id}: ${errMsg(err)}`)
     }
-    if (r.itemStatus === 'blocked') await notifyBlocked(liveRunCtx(run), r.attempts, endReason)
+    if (r.itemStatus === 'blocked' && !r.itemUntouched) await notifyBlocked(liveRunCtx(run), r.attempts, endReason)
     await evaluateUser(run.user_id) // a run ended: the free slot may start another item
     return r
   }

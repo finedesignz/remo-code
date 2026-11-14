@@ -1832,6 +1832,30 @@ DO $$ BEGIN
     CHECK (corch_max_concurrent_runs > 0);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- CORCH-08 AAF provisioning + closure events (additive). Only a project AAF has provisioned is dispatchable:
+-- the default is 'aaf_unprovisioned' (fail closed), set to 'provisioned' only by a successful AAF provision call.
+ALTER TABLE corch_projects ADD COLUMN IF NOT EXISTS aaf_project_id TEXT NULL;
+ALTER TABLE corch_projects ADD COLUMN IF NOT EXISTS aaf_provision_status TEXT NOT NULL DEFAULT 'aaf_unprovisioned';
+DO $$ BEGIN
+  ALTER TABLE corch_projects ADD CONSTRAINT corch_projects_aaf_provision_status_check
+    CHECK (aaf_provision_status IN ('aaf_unprovisioned','provisioned'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- One row per AAF event received (dedupe on the sender's stable event_id). Holds no raw body: only the parsed,
+-- validated fields. user_id / work_item_id are NULL when the event matched no item (audited, unchanged).
+CREATE TABLE IF NOT EXISTS corch_events (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  event_id     TEXT NOT NULL UNIQUE,
+  event        TEXT NOT NULL,
+  repo         TEXT NOT NULL,
+  head_ref     TEXT NOT NULL,
+  pr_number    INTEGER NULL,
+  user_id      UUID NULL REFERENCES users(id) ON DELETE CASCADE,
+  work_item_id UUID NULL REFERENCES corch_work_items(id) ON DELETE SET NULL,
+  outcome      TEXT NOT NULL DEFAULT 'received',
+  received_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- CORCH-02 quota ingest: latest CUG usage reading per account slot; no email column.
 -- One row per (user_id, account_id); blocked_until / blocked_at are hub-owned (quota death).
 CREATE TABLE IF NOT EXISTS corch_quota_accounts (

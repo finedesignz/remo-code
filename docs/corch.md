@@ -20,6 +20,8 @@ default, and the three provider seams all fail closed (see "Fail-closed defaults
 | `REMO_CORCH_LEASE_MS` | 120000 | How long a live run may go without positive liveness knowledge before it is reclaimed or marked stalled. Non-positive or garbage means the default. |
 | `REMO_CORCH_RECONCILE_INTERVAL_MS` | 60000 | The reconciler's single interval. Non-positive or garbage means the default. |
 | `REMO_CORCH_QUOTA_CEILING_PCT` | 55 | CORCH-02. An account is eligible only while `max(5h, 7d)` utilization is below this percent. Validated at boot only when `REMO_CORCH_ENABLED` is on: a value that is non-numeric, `<= 0` or `> 100` refuses boot (`assertCorchConfig`), it never becomes the default. With CORCH off, `GET /api/quota/snapshot` answers `500 quota_ceiling_invalid` instead. |
+| `REMO_CORCH_AAF_EVENT_SECRET` | unset | CORCH-08. Shared secret AgentAutofix signs PR-outcome events with. Unset: `POST /api/corch-events/aaf` answers `503 not_configured` and records nothing. |
+| `REMO_CORCH_AAF_URL`, `REMO_CORCH_AAF_TOKEN`, `REMO_CORCH_AAF_INSTALLATION_ID` | unset | CORCH-08. AgentAutofix base URL (https, or loopback http), a token with scope `projects:write`, and the AAF GitHub installation id. Any unset: no provision call is made and the project stays `aaf_unprovisioned`. The token is read only to build one Authorization header. |
 
 **Boot mutual exclusion:** the hub refuses to boot when `REMO_CORCH_ENABLED` and `REMO_ORCHESTRATOR_ENABLED` are
 both truthy (`assertCorchConfig()` in `hub/src/index.ts`, directly after `assertTokenCapConfig()`). The other three
@@ -332,3 +334,50 @@ real-Postgres `e2e/corch-quota.e2e.test.ts`. Guard additions:
 CORCH-04 adds `corch-gsdc-derive` (table-driven board fixtures), `corch-gsdc-ingest` (fake SSE console: enrolled-only
 reads, reconnect, backoff cap, every failure mode, fencing), the real-Postgres `e2e/corch-gsdc.e2e.test.ts`, and extends
 `corch-no-polling-guard` (allows `gsdc-ingest.ts` timeouts only through the injected timers seam).
+
+
+## AAF event receiver, closure and provisioning (CORCH-08)
+
+Only AgentAutofix-provisioned projects are dispatchable, and a PR outcome closes the work item.
+
+**Provisioning (CORCH-R5.7).** `corch_projects.aaf_provision_status` is `aaf_unprovisioned` (default) or
+`provisioned`, with `aaf_project_id` (additive `ADD COLUMN IF NOT EXISTS`). Enrolling a project
+(`POST /api/corch/projects`) or re-enabling it (`PATCH` enabled false to true) calls AAF
+`POST {REMO_CORCH_AAF_URL}/api/projects/provision` with `{repo_slugs: ["owner/name"], installation_id}` and a bearer
+`REMO_CORCH_AAF_TOKEN` (scope `projects:write`). Any failure, an unreachable AAF, a malformed reply or an unset env
+leaves `aaf_unprovisioned` and never blocks enrollment (`hub/src/corch/aaf-provision.ts`; the reply is untrusted: only a
+well-formed project id for the same repo is kept). `claimNext`, `usersWithDueItems` and `earliestFutureNotBefore`
+require `aaf_provision_status = 'provisioned'`, so an unprovisioned project never dispatches (fail closed). Projects
+enrolled earlier are backfilled once, idempotently: `bun hub/scripts/corch-provision-existing.ts` (needs `DATABASE_URL`
+and the three AAF variables; prints counts only; a second run finds nothing to do).
+
+**Receiver (CORCH-R5.5).** `POST /api/corch-events/aaf`, mounted BEFORE the `/api/*` auth catch-all (pinned in
+`hub/test/mount-order.test.ts`; CSRF-allowlisted, skips the license gate; 120/min per source IP; body cap 16 KiB).
+Auth is the signature, via the shared `runIntake`: raw body before any JSON parse, `X-ZeroExposure-Signature:
+sha256=<hex HMAC-SHA256(secret, X-ZeroExposure-Timestamp + "." + rawBody)>` compared in constant time, a timestamp more
+than 5 minutes off rejected, every credential failure the same `401 {"error":"unauthorized"}`. `X-ZeroExposure-Event-Id`,
+when present, must equal the signed `event_id`. Secret unset: `503`, nothing recorded. The shared vector
+`hub/test/fixtures/corch-event-signature-vector.json` is byte-identical to the agentautofix CORCH-06 copy and is verified
+by `corch-aaf-events.test.ts`. Body: `{event_id, event, repo, pr_number, head_ref, merged_sha?, occurred_at}`; every
+field is untrusted data, used only as a lookup key (never echoed, logged or put in a notification).
+
+**Closure transitions (CORCH-R5.6).** The item is resolved by repo (`github://<repo>` lowercased, case-insensitive) and
+head ref `corch/<work_item_id>`. One transaction dedupes on `corch_events.event_id` (unique) and applies:
+
+| Event | Item status before | Result |
+|---|---|---|
+| `pr.merged` | queued, running, pr_open, blocked | `done` |
+| `pr.closed` (unmerged) | queued, running, pr_open | `blocked` (`wait_reason=pr_closed`), never auto-requeued |
+| `pr.failed` | queued, running, pr_open | `blocked` (`wait_reason=pr_failed`) + ONE notification (telegram and email, the durable channels the gsd-console outage notice uses) |
+| any | done, cancelled, or no matching item, or already blocked (closed/failed) | no change, audited in `corch_events.outcome` |
+| replayed `event_id` | any | `200 duplicate`, no second transition, no second notification |
+
+Responses are `200 {ok:true, status: applied | duplicate | ignored}` (unknown and terminal are both `ignored`).
+`endRunAndRequeue` and `endRunMarkPrOpen` now only touch an item that is still `running`: a run ending after a closure
+event leaves the item as the event set it (`itemUntouched`, no requeue, no second blocked notification), which is why a
+closed PR stays blocked across reconciler passes. Each applied transition triggers one dispatch evaluation (a no-op while
+`REMO_CORCH_ENABLED` is OFF).
+
+Tests: `corch-aaf-events` (auth envelope, vector, skew, replay, non-leaky errors), `corch-aaf-provision` (fake AAF, env
+unset, enrollment hook, backfill), real-Postgres `e2e/corch-aaf.e2e.test.ts` (transitions, reconciler pass, race,
+provision gate, backfill idempotency); `corch-dispatcher` and `corch-quota` e2e fixtures seed `provisioned` projects.
