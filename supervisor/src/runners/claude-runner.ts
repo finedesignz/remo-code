@@ -3,7 +3,7 @@ import { writeFileSync } from 'fs'
 import { join } from 'path'
 import type { CliEvent, CliRunner, RunnerEvent } from './types'
 import { sanitizeSpawnEnv } from './env-sanitize'
-import { slotRequested, slotSpawnEnv } from '../slot'
+import { redactSecret, slotRequested, slotSpawnEnv } from '../slot'
 
 export type OrchestratorRunnerOpts = {
   systemPrompt: string
@@ -176,6 +176,13 @@ export class ClaudeRunner implements CliRunner {
       this.listener?.({ type: 'error', message: `slot spawn refused: ${err?.code ?? 'slot_error'}` })
       this.listener?.({ type: 'exited', code: null })
       return
+    }
+    if (slot) {
+      // The slot token lives in the child's env by design (R4.2), so everything the child can print (stderr, tool
+      // output, assistant text) is scrubbed of the exact token value BEFORE it can reach the hub.
+      const inner = this.listener
+      const tok = env.CLAUDE_CODE_OAUTH_TOKEN
+      if (inner && tok) this.listener = (e) => inner(redactSecret(e, tok))
     }
 
     if (this.orchestrator) {

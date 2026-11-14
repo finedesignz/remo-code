@@ -54,3 +54,19 @@ export function slotSpawnEnv(sanitized: NodeJS.ProcessEnv, processEnv: NodeJS.Pr
   delete out.ANTHROPIC_API_KEY
   return out
 }
+
+/** Deep copy of `value` with every occurrence of the exact `secret` string replaced. Non-string leaves pass through. */
+export function redactSecret<T>(value: T, secret: string): T {
+  if (!secret) return value
+  const walk = (v: unknown): unknown => {
+    if (typeof v === 'string') return v.includes(secret) ? v.split(secret).join('[redacted]') : v
+    if (Array.isArray(v)) return v.map(walk)
+    if (v && typeof v === 'object') {
+      const out: Record<string, unknown> = {}
+      for (const [k, x] of Object.entries(v as Record<string, unknown>)) out[k] = walk(x)
+      return out
+    }
+    return v
+  }
+  return walk(value) as T
+}

@@ -118,6 +118,33 @@ describe('R3.8 memlog claim', () => {
   })
 })
 
+describe('QC hardening: claim unwinding', () => {
+  test('requeued releases the claim only (no worktree frame)', async () => {
+    const w = world()
+    await w.ws.release({ userId: 'u1', itemId: 'item-1', status: 'requeued' })
+    expect(w.frames.length).toBe(0)
+    expect(w.log.at(-1)).toBe('release:corch:item-1:DONE:corch: item requeued')
+  })
+
+  test('a rejected RPC or session error after the claim unwinds the claim and rethrows', async () => {
+    const a = world()
+    ;(a.deps as any).runCommand = async () => { throw new Error('socket exploded') }
+    await expect(createWorkspace(a.deps).resolve({ userId: 'u1', item, project, runId: 'r' })).rejects.toThrow('socket exploded')
+    expect(a.log.some((l) => l.startsWith('release:corch:item-1:DONE'))).toBe(true)
+
+    const b = world()
+    ;(b.deps as any).ensureSession = async () => { throw new Error('db down') }
+    await expect(createWorkspace(b.deps).resolve({ userId: 'u1', item, project, runId: 'r' })).rejects.toThrow('session_error:db down')
+    expect(b.log.some((l) => l.startsWith('release:corch:item-1:DONE'))).toBe(true)
+  })
+
+  test('an RPC TIMEOUT does NOT release the claim (the command may still be mutating the worktree)', async () => {
+    const w = world({ ensure: { exit_code: 1, error: 'supervisor_timeout' } })
+    await expect(resolve(w)).rejects.toThrow('supervisor_timeout')
+    expect(w.log.some((l) => l.startsWith('release:'))).toBe(false)
+  })
+})
+
 describe('R4.4 worktree frames', () => {
   test('haltBeforeMachineSend immediately precedes EVERY corch.* frame', async () => {
     const w = world()

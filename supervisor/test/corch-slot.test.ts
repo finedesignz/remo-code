@@ -6,7 +6,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ClaudeRunner } from '../src/runners/claude-runner'
-import { accountSlot, slotSpawnEnv, SlotConfigError } from '../src/slot'
+import { accountSlot, slotSpawnEnv, SlotConfigError, redactSecret } from '../src/slot'
+import { nativeSupervisorCommands } from '../src/commands/index'
 import { SupervisorClient } from '../src/hub-client'
 import { defaultConfig } from '../src/config'
 import { getHandler } from '../src/commands/index'
@@ -157,6 +158,39 @@ describe('per-slot spawn env (R4.2)', () => {
     const env = buildCodexPtyHostEnv({ ANTHROPIC_API_KEY: SENTINEL_API, PATH: '/bin' } as any)
     expect(env.ANTHROPIC_API_KEY).toBeUndefined()
     expect(env.CLAUDE_CONFIG_DIR).toBeUndefined()
+  })
+})
+
+describe('QC hardening', () => {
+  test('redactSecret scrubs the exact token from every nested string and leaves the rest', () => {
+    const ev = { type: 'log', message: `env dump TOKEN=${SENTINEL_TOKEN}`, nested: { a: [`x ${SENTINEL_TOKEN} y`, 3, null] }, n: 5 }
+    const out = redactSecret(ev, SENTINEL_TOKEN)
+    expect(JSON.stringify(out).includes(SENTINEL_TOKEN)).toBe(false)
+    expect(out.n).toBe(5)
+    expect((out.nested.a as any[])[1]).toBe(3)
+    expect(redactSecret('plain', SENTINEL_TOKEN)).toBe('plain')
+  })
+
+  test('with the slot set, runner events that contain the token are redacted before the listener sees them', () => {
+    clearSlotEnv()
+    process.env.REMO_ACCOUNT_SLOT = 'acct_main'
+    process.env.REMO_SLOT_CLAUDE_CONFIG_DIR = '/data/x'
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = SENTINEL_TOKEN
+    const dir = mkdtempSync(join(tmpdir(), 'corch-slot-red-'))
+    const events: any[] = []
+    const r = new ClaudeRunner(dir, false)
+    r.spawnImpl = fakeSpawn({})
+    r.start((e) => events.push(e))
+    ;(r as any).listener({ type: 'log', message: `claude stderr: ${SENTINEL_TOKEN}` })
+    r.stop()
+    rmSync(dir, { recursive: true, force: true })
+    expect(JSON.stringify(events).includes(SENTINEL_TOKEN)).toBe(false)
+    expect(events.some((e) => e.message === 'claude stderr: [redacted]')).toBe(true)
+  })
+
+  test('corch.* commands are never advertised (a scheduled task cannot reach them)', () => {
+    expect(nativeSupervisorCommands().some((c) => c.name.startsWith('corch.'))).toBe(false)
+    expect(getHandler('corch.worktree_ensure')).not.toBeNull() // still reachable by the hub RPC
   })
 })
 

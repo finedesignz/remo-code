@@ -61,6 +61,14 @@ export async function reconcilePass(deps: CorchDeps, d: CorchDispatcher): Promis
     if (alive.length > 0) await deps.store.touchHeartbeat(alive)
     // CORCH-09 (R3.8): the memlog claim is heartbeated from the same liveness signal. Best effort, never throws.
     for (const run of aliveRuns) await deps.workspace.heartbeat?.({ itemId: run.work_item_id, repoIdent: run.repo_ident }).catch(() => {})
+    // Items waiting on their PR have no live run but still hold their claim until AAF closes them.
+    try {
+      for (const it of (await deps.store.prOpenItems?.(500)) ?? []) {
+        await deps.workspace.heartbeat?.({ itemId: it.id, repoIdent: it.repo_ident }).catch(() => {})
+      }
+    } catch (err: any) {
+      console.error(`[corch] pr_open heartbeat pass failed: ${err?.message ?? err}`)
+    }
   } finally {
     passRunning = false
   }

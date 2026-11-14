@@ -36,7 +36,7 @@ export interface Workspace {
    * CORCH-09: the item reached done, blocked or cancelled. The real Workspace removes the worktree (done and
    * cancelled only, never blocked) and releases the memlog claim. Best effort: it never throws into the caller.
    */
-  release?(a: { userId: string; itemId: string; status: 'done' | 'blocked' | 'cancelled' }): Promise<void>
+  release?(a: { userId: string; itemId: string; status: 'done' | 'blocked' | 'cancelled' | 'requeued' }): Promise<void>
   /** CORCH-09: heartbeat the item's memlog claim; called from the reconciler for every run it sees alive. */
   heartbeat?(a: { itemId: string; repoIdent: string }): Promise<void>
 }
@@ -347,6 +347,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
     const r = await refuseRun(c.runId, c.userId, reason)
     if (!r.changed) return
     if (release) await releaseReservation(c)
+    await releaseIfClaimed(c.runId, c.userId, c.itemId)
     if (!c.inline) await armNotBeforeTimer()
   }
 
@@ -364,17 +365,35 @@ export function createCorchDispatcher(deps: CorchDeps) {
     if (r.itemStatus === 'blocked' && !r.itemUntouched) {
       await notifyBlocked(c, r.attempts, endReason)
       await releaseItem(c.userId, c.itemId, 'blocked')
+    } else {
+      await releaseIfClaimed(c.runId, c.userId, c.itemId)
     }
     await afterRunEnd(c)
   }
 
   /** CORCH-09: item terminal -> the Workspace's removal/claim release. Best effort, never throws (LD-10). */
-  async function releaseItem(userId: string, itemId: string, status: 'done' | 'blocked' | 'cancelled'): Promise<void> {
+  async function releaseItem(userId: string, itemId: string, status: 'done' | 'blocked' | 'cancelled' | 'requeued'): Promise<void> {
     try {
       await deps.workspace.release?.({ userId, itemId, status })
     } catch (err) {
       log(`workspace release failed item=${itemId}: ${errMsg(err)}`)
     }
+  }
+
+  /**
+   * A run ended and its item went back to the queue: a memlog claim exists only if the run got as far as having a
+   * worktree attached, and nothing heartbeats a claim without a live run, so it is released now (the next attempt
+   * re-claims). Not called for pr_open (the claim is kept and heartbeated until done/blocked).
+   */
+  async function releaseIfClaimed(runId: string, userId: string, itemId: string): Promise<void> {
+    try {
+      const rc = await deps.store.runContext(runId)
+      if (!rc?.run.worktree_path) return
+    } catch (err) {
+      log(`run context failed run=${runId}: ${errMsg(err)}`)
+      return
+    }
+    await releaseItem(userId, itemId, 'requeued')
   }
 
   /** A run ended: free slot may start another item. Not re-entered from inside the claiming loop. */
@@ -421,6 +440,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
       notBefore: notBeforeAt === null ? null : { at: new Date(notBeforeAt).toISOString() },
     })
     if (!r.changed) return
+    await releaseIfClaimed(c.runId, c.userId, c.itemId)
     await afterRunEnd(c)
   }
 
@@ -633,7 +653,12 @@ export function createCorchDispatcher(deps: CorchDeps) {
     } catch (err) {
       log(`pipeline release failed run=${run.id}: ${errMsg(err)}`)
     }
-    if (r.itemStatus === 'blocked' && !r.itemUntouched) await notifyBlocked(liveRunCtx(run), r.attempts, endReason)
+    if (r.itemStatus === 'blocked' && !r.itemUntouched) {
+      await notifyBlocked(liveRunCtx(run), r.attempts, endReason)
+      await releaseItem(run.user_id, run.work_item_id, 'blocked')
+    } else {
+      await releaseIfClaimed(run.id, run.user_id, run.work_item_id)
+    }
     await evaluateUser(run.user_id) // a run ended: the free slot may start another item
     return r
   }
@@ -918,7 +943,7 @@ export async function cancelRunSendsNow(runIds: string[]): Promise<void> {
 }
 
 /** CORCH-09: an AAF closure made the item done or blocked: remove the worktree (done) and release the memlog claim. */
-export async function releaseWorkItemNow(a: { userId: string; itemId: string; status: 'done' | 'blocked' | 'cancelled' }): Promise<void> {
+export async function releaseWorkItemNow(a: { userId: string; itemId: string; status: 'done' | 'blocked' | 'cancelled' | 'requeued' }): Promise<void> {
   if (singleton === null) return // flag OFF / nothing ever launched in this process: no claim or worktree is ours
   await (await singleton).releaseItem(a.userId, a.itemId, a.status)
 }

@@ -31,10 +31,26 @@ export interface ExecResult {
 }
 export type ExecFn = (cmd: string[], opts: { cwd?: string; env: NodeJS.ProcessEnv }) => Promise<ExecResult>
 
+/**
+ * Per-command ceiling. It is BELOW the hub's RPC timeout (workspace.ts, 600s) so a stuck git/gh is killed here and
+ * the hub always gets a real reply: the hub never has to give up on a command that is still mutating a worktree.
+ */
+export const EXEC_TIMEOUT_MS = 240_000
+
 const REAL_EXEC: ExecFn = async (cmd, opts) => {
   const p = Bun.spawn(cmd, { cwd: opts.cwd, env: opts.env, stdout: 'pipe', stderr: 'pipe' })
-  const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()])
-  return { code: await p.exited, out: `${out}${err}` }
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    try { p.kill() } catch {}
+  }, EXEC_TIMEOUT_MS)
+  try {
+    const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()])
+    const code = await p.exited
+    return { code: timedOut ? 124 : code, out: `${out}${err}` }
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 let execImpl: ExecFn = REAL_EXEC
@@ -60,8 +76,9 @@ function childEnv(): NodeJS.ProcessEnv {
 /** git args that authenticate https with the slot's GH_TOKEN/GITHUB_TOKEN by env reference (never by value). */
 function authArgs(env: NodeJS.ProcessEnv): string[] {
   if (!env.GH_TOKEN && !env.GITHUB_TOKEN) return []
+  // Scoped to https://github.com ONLY: a clone whose origin points anywhere else never receives the token.
   const helper = '!f() { echo username=x-access-token; echo "password=${GH_TOKEN:-$GITHUB_TOKEN}"; }; f'
-  return ['-c', 'credential.helper=', '-c', `credential.helper=${helper}`]
+  return ['-c', 'credential.helper=', '-c', `credential.https://github.com.helper=${helper}`]
 }
 
 const git = (cwd: string | undefined, args: string[], env: NodeJS.ProcessEnv) =>
@@ -113,6 +130,16 @@ async function defaultBranch(cwd: string, env: NodeJS.ProcessEnv): Promise<strin
   return m ? m[1]! : null
 }
 
+const normUrl = (u: string): string => u.trim().replace(/\\/g, '/').replace(/\.git$/i, '').replace(/\/+$/, '').toLowerCase()
+
+/** True when the canonical clone's root is the canonical path and its `origin` is exactly the expected remote. */
+async function originMatches(lay: Layout, env: NodeJS.ProcessEnv): Promise<boolean> {
+  const top = await git(lay.canonical, ['rev-parse', '--show-toplevel'], env)
+  if (top.code !== 0 || normUrl(top.out) !== normUrl(lay.canonical)) return false
+  const o = await git(lay.canonical, ['remote', 'get-url', 'origin'], env)
+  return o.code === 0 && normUrl(o.out) === normUrl(cloneUrlImpl(lay.owner, lay.name))
+}
+
 export async function runCorchWorktreeEnsure(args: string[]): Promise<CommandResult> {
   const lay = layoutFor(args[0], args[1])
   if (typeof lay === 'string') return { exit_code: 1, error: lay }
@@ -130,6 +157,9 @@ export async function runCorchWorktreeEnsure(args: string[]): Promise<CommandRes
     const c = await git(undefined, ['clone', cloneUrlImpl(lay.owner, lay.name), lay.canonical], env)
     if (c.code !== 0) return { exit_code: 1, error: 'git_clone_failed' }
   }
+
+  // A reused clone must be THE requested repository: bind its origin before any authenticated operation.
+  if (!(await originMatches(lay, env))) return { exit_code: 1, error: 'clone_origin_mismatch' }
 
   const fetched = await git(lay.canonical, ['fetch', 'origin', '--quiet'], env)
   if (fetched.code !== 0) return { exit_code: 1, error: 'git_fetch_failed' }
@@ -159,13 +189,19 @@ export async function runCorchWorktreeRemove(args: string[]): Promise<CommandRes
   const lay = layoutFor(args[0], args[1])
   if (typeof lay === 'string') return { exit_code: 1, error: lay }
   const env = childEnv()
-  const bad = await sandboxCheck(lay.worktree, false)
-  if (bad) return { exit_code: 1, error: bad }
+  for (const p of [lay.worktree, lay.canonical]) {
+    const bad = await sandboxCheck(p, false)
+    if (bad) return { exit_code: 1, error: bad }
+  }
   const list = await git(lay.canonical, ['worktree', 'list', '--porcelain'], env)
   if (list.code !== 0) return { exit_code: 1, error: 'git_worktree_list_failed' }
   const norm = lay.worktree.replace(/\\/g, '/')
-  const present = list.out.split(/\r?\n/).some((l) => l === `worktree ${norm}` || l === `worktree ${lay.worktree}`)
-  if (!present) return { exit_code: 0, snippet: JSON.stringify({ removed: false }) } // idempotent
+  const block = list.out
+    .split(/\r?\n\r?\n/)
+    .find((b) => b.split(/\r?\n/).some((l) => l === `worktree ${norm}` || l === `worktree ${lay.worktree}`))
+  if (!block) return { exit_code: 0, snippet: JSON.stringify({ removed: false }) } // idempotent
+  // Only a worktree on exactly corch/<id> is ours to force-remove; anything else was repurposed and is left alone.
+  if (!block.split(/\r?\n/).includes(`branch refs/heads/${lay.branch}`)) return { exit_code: 1, error: 'worktree_wrong_branch' }
   const rm = await git(lay.canonical, ['worktree', 'remove', '--force', lay.worktree], env)
   if (rm.code !== 0) return { exit_code: 1, error: 'git_worktree_remove_failed' }
   return { exit_code: 0, snippet: JSON.stringify({ removed: true }) }

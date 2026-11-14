@@ -87,6 +87,50 @@ describe('corch.worktree_ensure', () => {
   })
 })
 
+describe('QC hardening', () => {
+  test('a reused clone whose origin is another repository is refused before any fetch', async () => {
+    const r = await runCorchWorktreeEnsure(['github://acme/widget', 'item-9'])
+    expect(r.exit_code).toBe(0)
+    const canon = join(root, 'acme', 'widget')
+    sh(canon, 'remote', 'set-url', 'origin', 'https://github.com/evil/widget.git')
+    try {
+      const bad = await runCorchWorktreeEnsure(['github://acme/widget', 'item-10'])
+      expect(bad).toEqual({ exit_code: 1, error: 'clone_origin_mismatch' })
+    } finally {
+      sh(canon, 'remote', 'set-url', 'origin', origin)
+    }
+  })
+
+  test('the git credential helper is scoped to https://github.com and carries the env REFERENCE, never the value', async () => {
+    const seen: string[][] = []
+    const prev = process.env.GH_TOKEN
+    process.env.GH_TOKEN = 'ghp_SCOPE_SENTINEL'
+    __setCorchWorktreeForTest({ exec: async (cmd) => (seen.push(cmd), { code: 1, out: '' }) })
+    try {
+      await runCorchWorktreeEnsure(['github://acme/scoped', 'item-1'])
+    } finally {
+      __setCorchWorktreeForTest({ exec: null })
+      if (prev === undefined) delete process.env.GH_TOKEN
+      else process.env.GH_TOKEN = prev
+    }
+    const flat = seen.flat().join(' ')
+    expect(flat).toContain('credential.https://github.com.helper=')
+    expect(flat).not.toContain('ghp_SCOPE_SENTINEL')
+    expect(seen.flat().some((a) => a === 'credential.helper=')).toBe(true) // global helper reset, not replaced
+  })
+
+  test('removal refuses a worktree at the path that is not on corch/<id> (repurposed) and leaves it', async () => {
+    const r = await runCorchWorktreeEnsure(['github://acme/widget', 'item-7'])
+    const wt = JSON.parse(r.snippet!).path
+    sh(wt, 'checkout', '-q', '-b', 'someone-elses-work')
+    const rm = await runCorchWorktreeRemove(['github://acme/widget', 'item-7'])
+    expect(rm).toEqual({ exit_code: 1, error: 'worktree_wrong_branch' })
+    expect(existsSync(wt)).toBe(true)
+    sh(wt, 'checkout', '-q', 'corch/item-7')
+    expect(JSON.parse((await runCorchWorktreeRemove(['github://acme/widget', 'item-7'])).snippet!).removed).toBe(true)
+  })
+})
+
 describe('corch.worktree_remove', () => {
   test('removes the worktree and is idempotent', async () => {
     const wt = join(root, 'corch', 'widget-item-1')

@@ -76,7 +76,7 @@ function parseSnippet<T>(r: CommandResult): T | null {
 }
 
 export interface CorchWorkspace extends Workspace {
-  release(a: { userId: string; itemId: string; status: 'done' | 'blocked' | 'cancelled' }): Promise<void>
+  release(a: { userId: string; itemId: string; status: 'done' | 'blocked' | 'cancelled' | 'requeued' }): Promise<void>
   heartbeat(a: { itemId: string; repoIdent: string }): Promise<void>
 }
 
@@ -145,28 +145,31 @@ export function createWorkspace(deps: WorkspaceDeps): CorchWorkspace {
         return { ok: false, reason: claim.reason }
       }
 
-      // 3. worktree on the slot supervisor.
-      const fail = async (code: string): Promise<never> => {
-        await releaseClaim(ident.name, item.id, `corch: ${code}`)
-        throw new Error(code)
-      }
-      const r = await send(userId, supervisorId, 'corch.worktree_ensure', [project.repo_ident, item.id])
-      if ('refused' in r) {
-        await releaseClaim(ident.name, item.id, 'corch: halted before worktree')
-        return { ok: false, reason: r.refused }
-      }
-      const wt = parseSnippet<{ path?: string; branch?: string }>(r)
-      if (!wt || typeof wt.path !== 'string') return fail(`worktree_ensure_failed:${r.error ?? 'no_reply'}`)
-      if (wt.branch !== item.branch || normPath(wt.path) !== normPath(expected)) return fail('worktree_layout_mismatch')
-
-      // 4. the session row for the path, hosted by the slot supervisor.
-      let sessionId: string
+      // From here a claim is held: ANY throw or rejection unwinds it (an RPC timeout excepted: the command may still be
+      // mutating the worktree, so the claim is NOT released and simply lapses/re-claims on the next attempt).
       try {
-        sessionId = await deps.ensureSession({ userId, worktreePath: wt.path, hostname: sup.hostname, name: `corch ${ident.name} ${item.id.slice(0, 8)}` })
+        // 3. worktree on the slot supervisor.
+        const r = await send(userId, supervisorId, 'corch.worktree_ensure', [project.repo_ident, item.id])
+        if ('refused' in r) {
+          await releaseClaim(ident.name, item.id, 'corch: halted before worktree')
+          return { ok: false, reason: r.refused }
+        }
+        const wt = parseSnippet<{ path?: string; branch?: string }>(r)
+        if (!wt || typeof wt.path !== 'string') throw new Error(`worktree_ensure_failed:${r.error ?? 'no_reply'}`)
+        if (wt.branch !== item.branch || normPath(wt.path) !== normPath(expected)) throw new Error('worktree_layout_mismatch')
+
+        // 4. the session row for the path, hosted by the slot supervisor.
+        let sessionId: string
+        try {
+          sessionId = await deps.ensureSession({ userId, worktreePath: wt.path, hostname: sup.hostname, name: `corch ${ident.name} ${item.id.slice(0, 8)}` })
+        } catch (err) {
+          throw new Error(`session_error:${(err as Error)?.message ?? 'unknown'}`)
+        }
+        return { ok: true, sessionId, worktreePath: wt.path }
       } catch (err) {
-        return fail(`session_error:${(err as Error)?.message ?? 'unknown'}`)
+        if (!/supervisor_timeout/.test((err as Error)?.message ?? '')) await releaseClaim(ident.name, item.id, `corch: ${(err as Error)?.message ?? 'error'}`.slice(0, 200))
+        throw err
       }
-      return { ok: true, sessionId, worktreePath: wt.path }
     },
 
     /** Item reached done, blocked or cancelled: remove the worktree (done/cancelled only) and release the claim. */
@@ -179,7 +182,7 @@ export function createWorkspace(deps: WorkspaceDeps): CorchWorkspace {
       }
       if (!run) return
       const ident = parseRepoIdent(run.repo_ident)
-      if (a.status !== 'blocked' && run.supervisor_id && run.worktree_path) {
+      if ((a.status === 'done' || a.status === 'cancelled') && run.supervisor_id && run.worktree_path) {
         try {
           const r = await send(a.userId, run.supervisor_id, 'corch.worktree_remove', [run.repo_ident, a.itemId])
           if ('refused' in r || r.exit_code !== 0) log(`worktree remove not done item=${a.itemId}: ${'refused' in r ? r.refused : (r.error ?? 'error')}`)
@@ -194,7 +197,7 @@ export function createWorkspace(deps: WorkspaceDeps): CorchWorkspace {
       const ident = parseRepoIdent(a.repoIdent)
       if (!ident) return
       try {
-        await deps.memlog.heartbeat({ repo: ident.name, session: memlogSessionFor(a.itemId) })
+        if (!(await deps.memlog.heartbeat({ repo: ident.name, session: memlogSessionFor(a.itemId) }))) log(`memlog heartbeat not recorded item=${a.itemId}`)
       } catch (err) {
         log(`memlog heartbeat failed item=${a.itemId}: ${(err as Error)?.message ?? err}`)
       }
@@ -231,7 +234,7 @@ export async function realWorkspaceDeps(quota: QuotaProvider, memlog: MemlogClie
     quota,
     memlog,
     store: corchStore,
-    runCommand: (supervisorId, userId, command, args) => runSupervisorReadCommand(supervisorId, userId, command, args, 120_000),
+    runCommand: (supervisorId, userId, command, args) => runSupervisorReadCommand(supervisorId, userId, command, args, 600_000),
     halt: async (userId) => {
       const h = await haltBeforeMachineSend({ userId })
       return h.ok ? { ok: true } : { ok: false, reason: h.reason }
