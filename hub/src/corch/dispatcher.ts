@@ -131,3 +131,30 @@ export function createCorchDispatcher(deps: CorchDeps) {
 
   return { evaluateUser, inFlight }
 }
+
+// ── Real dependencies + singleton (LD-2: dynamic imports only) ───────────────
+
+/** CORCH-01 defaults: the quota/workspace seams refuse, so nothing can launch until later phases. */
+export async function realCorchDeps(): Promise<CorchDeps> {
+  const { corchStore } = await import('./store.ts')
+  const { REAL_AUTOSPAWN } = await import('../heal/autospawn-deps.ts')
+  return {
+    store: corchStore,
+    workspace: DEFAULT_WORKSPACE,
+    // LD-1: the heal/orchestrator launch deps with ONE override: CORCH enrollment replaces the allowlist.
+    launch: { ...REAL_AUTOSPAWN, isRepoAutospawnAllowed: (u, r) => corchStore.isEnrolledEnabled(u, r) },
+  }
+}
+
+let singleton: Promise<ReturnType<typeof createCorchDispatcher>> | null = null
+
+export function getCorch(): Promise<ReturnType<typeof createCorchDispatcher>> {
+  singleton ??= realCorchDeps().then(createCorchDispatcher)
+  return singleton
+}
+
+/** Event trigger for enqueue / enrollment: no-op (and no DB access) when the flag is OFF. */
+export async function evaluateUserNow(userId: string): Promise<void> {
+  if (!corchEnabled()) return
+  await (await getCorch()).evaluateUser(userId)
+}

@@ -71,6 +71,7 @@ import { startRevanoteStallSweep, stopRevanoteStallSweep } from './revanote/stal
 import { healUnifiedEnabled } from './heal/config.ts'
 import { assertTokenCapConfig } from './dispatch/gates.ts'
 import { assertCorchConfig } from './corch/flag.ts'
+import { corchRoutes } from './corch/routes.ts'
 import { assertAutomationControlsEnv, assertAutomationControlsTables } from './dispatch/automation-controls.ts'
 import { registerTokenCapAlarm } from './observability/token-cap-alarm.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
@@ -467,6 +468,8 @@ app.route('/api/error-setup', errorSetupApi)
 // The public webhook route lives at /api/revanote/webhook/* (mounted above).
 app.route('/api/orchestrator', orchestratorApi)
 app.route('/api/automation', automationApi)
+// CORCH-01: cookie enrollment + enqueue routes (flag OFF = store/list only). API keys get 403 from authMiddleware.
+app.route('/api/corch', corchRoutes)
 // Phase 31 (auto-dev-orchestrator): authed config REST for the one-per-session
 // orchestrator task + its rows. Data-only (controller path is flag-OFF). Mounted
 // alongside the other authed user routes (post-auth catch-all).

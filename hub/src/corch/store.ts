@@ -92,8 +92,31 @@ export interface Claimed {
   project: CorchProject
 }
 
+export interface CreateProjectInput {
+  userId: string
+  repoIdent: string
+  priority: number
+  dailyTokenBudget: number
+  enabled: boolean
+  acceptExternal: boolean
+}
+
+export interface ProjectPatch {
+  priority?: number
+  dailyTokenBudget?: number
+  enabled?: boolean
+  acceptExternal?: boolean
+}
+
 /** Every store method, so tests can implement fakes. */
 export interface CorchStore {
+  createProject(i: CreateProjectInput): Promise<{ project: CorchProject; created: boolean }>
+  listProjects(userId: string): Promise<CorchProject[]>
+  getProject(userId: string, projectId: string): Promise<CorchProject | null>
+  getProjectByIdent(userId: string, repoIdent: string): Promise<CorchProject | null>
+  /** Returns the updated row and the previous enabled flag, or null when the caller has no such project. */
+  updateProject(userId: string, projectId: string, patch: ProjectPatch): Promise<{ project: CorchProject; previousEnabled: boolean } | null>
+  listWorkItems(userId: string, status: CorchWorkItem['status'] | null, limit: number): Promise<CorchWorkItem[]>
   enqueueWorkItem(i: EnqueueInput): Promise<{ item: CorchWorkItem; created: boolean }>
   claimNext(userId: string, excludeIds: string[]): Promise<Claimed | null>
   attachSession(runId: string, sessionId: string, worktreePath: string | null): Promise<boolean>
@@ -103,6 +126,58 @@ export interface CorchStore {
 }
 
 export const corchStore: CorchStore = {
+  async createProject(i) {
+    const inserted = await sql<CorchProject[]>`
+      INSERT INTO corch_projects (user_id, repo_ident, priority, daily_token_budget, enabled, accept_external)
+      VALUES (${i.userId}, ${i.repoIdent}, ${i.priority}, ${i.dailyTokenBudget}, ${i.enabled}, ${i.acceptExternal})
+      ON CONFLICT (user_id, repo_ident) DO NOTHING
+      RETURNING *`
+    if (inserted.length > 0) return { project: inserted[0]!, created: true }
+    const existing = await sql<CorchProject[]>`
+      SELECT * FROM corch_projects WHERE user_id = ${i.userId} AND repo_ident = ${i.repoIdent}`
+    return { project: existing[0]!, created: false }
+  },
+
+  async listProjects(userId) {
+    return sql<CorchProject[]>`
+      SELECT * FROM corch_projects WHERE user_id = ${userId} ORDER BY priority DESC, created_at ASC`
+  },
+
+  async getProject(userId, projectId) {
+    const r = await sql<CorchProject[]>`SELECT * FROM corch_projects WHERE id = ${projectId} AND user_id = ${userId}`
+    return r[0] ?? null
+  },
+
+  async getProjectByIdent(userId, repoIdent) {
+    const r = await sql<CorchProject[]>`
+      SELECT * FROM corch_projects WHERE user_id = ${userId} AND repo_ident = ${repoIdent}`
+    return r[0] ?? null
+  },
+
+  async updateProject(userId, projectId, p) {
+    return sql.begin(async (tx) => {
+      const prev = await tx<{ enabled: boolean }[]>`
+        SELECT enabled FROM corch_projects WHERE id = ${projectId} AND user_id = ${userId} FOR UPDATE`
+      if (prev.length === 0) return null
+      const rows = await tx<CorchProject[]>`
+        UPDATE corch_projects SET
+          priority = COALESCE(${p.priority ?? null}::integer, priority),
+          daily_token_budget = COALESCE(${p.dailyTokenBudget ?? null}::bigint, daily_token_budget),
+          enabled = COALESCE(${p.enabled ?? null}::boolean, enabled),
+          accept_external = COALESCE(${p.acceptExternal ?? null}::boolean, accept_external),
+          updated_at = now()
+        WHERE id = ${projectId} AND user_id = ${userId} RETURNING *`
+      return { project: rows[0]!, previousEnabled: prev[0]!.enabled }
+    })
+  },
+
+  async listWorkItems(userId, status, limit) {
+    return sql<CorchWorkItem[]>`
+      SELECT * FROM corch_work_items
+      WHERE user_id = ${userId} AND (${status}::text IS NULL OR status = ${status}::text)
+      ORDER BY created_at DESC LIMIT ${limit}`
+  },
+
   async enqueueWorkItem(i) {
     const id = randomUUID()
     const branch = corchBranch(id)
