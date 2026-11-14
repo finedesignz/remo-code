@@ -6037,6 +6037,10 @@ Read model shared with the `corch_queue` WebSocket event and the Telegram `/queu
 {
   "paused": true,
   "max_concurrent_runs": 0,
+  "counts": {
+    "property1": 0,
+    "property2": 0
+  },
   "projects": [
     {
       "id": "string",
@@ -6106,6 +6110,8 @@ Status Code **200**
 |---|---|---|---|---|
 |» paused|boolean|true|none|none|
 |» max_concurrent_runs|integer|true|none|none|
+|» counts|object|true|none|none|
+|»» **additionalProperties**|integer|false|none|none|
 |» projects|[object]|true|none|none|
 |»» id|string|true|none|none|
 |»» repo_ident|string|true|none|none|

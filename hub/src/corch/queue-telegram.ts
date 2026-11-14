@@ -13,17 +13,18 @@ const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 3)}...`
 
 export function renderQueueSummary(q: QueueSnapshot): string {
   const queued = q.items.filter((i) => i.status === 'queued')
-  const blocked = q.items.filter((i) => i.status === 'blocked').length
+  const blocked = q.counts.blocked ?? 0
+  const queuedTotal = q.counts.queued ?? queued.length
   const lines: string[] = [
     `CORCH queue: ${q.paused ? 'PAUSED (live runs continue, nothing new starts)' : 'running'}`,
     `Live runs: ${q.live_runs.length}/${q.max_concurrent_runs}`,
   ]
   for (const r of q.live_runs) lines.push(`  - ${short(r.repo_ident)} (${r.status}${r.account_slot ? `, slot ${r.account_slot}` : ''})`)
-  lines.push(`Queued: ${queued.length}`)
+  lines.push(`Queued: ${queuedTotal}`)
   queued.slice(0, QUEUE_TOP_N).forEach((i, n) => {
     lines.push(`  ${n + 1}. ${short(i.repo_ident)}: ${clip(i.title, 60)} [p${i.priority}] ${i.wait_reason ? `waiting: ${clip(i.wait_reason, 40)}` : 'ready'}`)
   })
-  if (queued.length > QUEUE_TOP_N) lines.push(`  ...and ${queued.length - QUEUE_TOP_N} more`)
+  if (queuedTotal > QUEUE_TOP_N) lines.push(`  ...and ${queuedTotal - QUEUE_TOP_N} more`)
   lines.push(`Blocked: ${blocked}`)
   return lines.join('\n')
 }

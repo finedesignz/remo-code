@@ -7029,6 +7029,12 @@
                     "max_concurrent_runs": {
                       "type": "integer"
                     },
+                    "counts": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "integer"
+                      }
+                    },
                     "projects": {
                       "type": "array",
                       "items": {
@@ -7218,6 +7224,7 @@
                   "required": [
                     "paused",
                     "max_concurrent_runs",
+                    "counts",
                     "projects",
                     "items",
                     "live_runs",

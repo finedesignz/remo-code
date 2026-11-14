@@ -236,6 +236,8 @@ export interface CorchStore {
   cancelQueuedItem(userId: string, itemId: string): Promise<CancelItemResult>
   /** CORCH-11: items (open + last 24h of terminal ones, no body) for the queue view, in dispatch order. */
   queueViewItems(userId: string, limit: number): Promise<QueueViewItem[]>
+  /** CORCH-11: item counts per status over ALL the user's items (not limited by the view's row cap). */
+  queueViewCounts(userId: string): Promise<Record<string, number>>
   /** CORCH-11: the user's live (not ended) runs for the queue view. */
   queueViewRuns(userId: string): Promise<QueueViewRun[]>
   claimNext(userId: string, excludeIds: string[]): Promise<Claimed | null>
@@ -481,6 +483,9 @@ export const corchStore: CorchStore = {
 
   async updateSettings(userId, p) {
     return sql.begin(async (tx) => {
+      // The SAME per-user advisory lock claimNext holds: a pause can never commit between a claim reading
+      // corch_paused=false and inserting its run. After this returns, no new claim can start.
+      await tx`SELECT pg_advisory_xact_lock(hashtext(${corchUserLockKey(userId)}))`
       const prev = await tx<{ corch_paused: boolean }[]>`SELECT corch_paused FROM users WHERE id = ${userId} FOR UPDATE`
       if (prev.length === 0) return null
       const rows = await tx<CorchSettings[]>`
@@ -517,8 +522,19 @@ export const corchStore: CorchStore = {
       FROM corch_work_items i JOIN corch_projects p ON p.id = i.project_id AND p.user_id = i.user_id
       WHERE i.user_id = ${userId}
         AND (i.status NOT IN ('done', 'cancelled') OR i.updated_at > now() - interval '24 hours')
-      ORDER BY (i.status IN ('done', 'cancelled')), p.priority DESC, i.priority DESC, i.created_at ASC, i.id ASC
+      -- Dispatchable and in-flight work first, then blocked, then recently closed: the row cap can only ever cut the
+      -- least relevant rows (a pile of blocked items cannot hide the queue).
+      ORDER BY CASE WHEN i.status IN ('done', 'cancelled') THEN 2 WHEN i.status = 'blocked' THEN 1 ELSE 0 END,
+               p.priority DESC, i.priority DESC, i.created_at ASC, i.id ASC
       LIMIT ${limit}`
+  },
+
+  async queueViewCounts(userId) {
+    const r = await sql<{ status: string; n: number }[]>`
+      SELECT status, count(*)::int AS n FROM corch_work_items WHERE user_id = ${userId} GROUP BY status`
+    const out: Record<string, number> = {}
+    for (const x of r) out[x.status] = x.n
+    return out
   },
 
   async queueViewRuns(userId) {

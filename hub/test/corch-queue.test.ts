@@ -37,7 +37,7 @@ const fakeStore = {
   },
 }
 
-const SNAP = { paused: false, max_concurrent_runs: 1, projects: [], items: [], live_runs: [], quota_accounts: [], generated_at: 'x' }
+const SNAP = { paused: false, max_concurrent_runs: 1, counts: {}, projects: [], items: [], live_runs: [], quota_accounts: [], generated_at: 'x' }
 const deps = {
   store: fakeStore as any,
   evaluate: async (u: string) => void triggers.push(u),
@@ -169,6 +169,7 @@ describe('queue snapshot builder + WS publisher (R6.1, no polling)', () => {
           listProjects: async () => [{ id: 'p1', repo_ident: 'github://a/b', priority: 2, enabled: true, aaf_provision_status: 'provisioned' }] as any,
           getSettings: async () => ({ corch_paused: true, corch_max_concurrent_runs: 2 }),
           queueViewItems: async () => [{ id: 'i1', project_id: 'p1', repo_ident: 'github://a/b', title: 't', source: 'manual', priority: 0, status: 'queued', wait_reason: 'quota:x', not_before: now, attempts: 1, pr_url: null, created_at: now }] as any,
+          queueViewCounts: async () => ({ queued: 1 }),
           queueViewRuns: async () => [{ id: 'r1', work_item_id: 'i1', repo_ident: 'github://a/b', status: 'running', account_slot: 'a1', supervisor_id: 's', started_at: new Date(now.getTime() - 90_000), heartbeat_at: now }] as any,
         },
         accountsFor: async () => [],
@@ -179,6 +180,7 @@ describe('queue snapshot builder + WS publisher (R6.1, no polling)', () => {
       'u1',
     )
     expect(snap.paused).toBe(true)
+    expect(snap.counts).toEqual({ queued: 1 })
     expect(snap.max_concurrent_runs).toBe(2)
     expect(snap.items[0]!.not_before).toBe(now.toISOString())
     expect(snap.live_runs[0]!.age_seconds).toBe(90)
@@ -206,6 +208,33 @@ describe('queue snapshot builder + WS publisher (R6.1, no polling)', () => {
     await p1
     expect(sent).toEqual([1, 2]) // three triggers during one build collapse into one rebuild
     expect(sent.at(-1)).toBe(n)
+  })
+
+  test('a failed build never discards a trigger that arrived meanwhile (it still gets its own rebuild)', async () => {
+    const { createQueuePublisher } = await import('../src/corch/queue-view.ts')
+    let n = 0
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const sent: number[] = []
+    const logs: string[] = []
+    const pub = createQueuePublisher(
+      async () => {
+        const mine = ++n
+        if (mine === 1) {
+          await gate
+          throw new Error('transient')
+        }
+        return { ...SNAP, generated_at: String(mine) } as any
+      },
+      (_u, e) => void sent.push(Number(e.queue.generated_at)),
+      (m) => logs.push(m),
+    )
+    const p1 = pub('u1')
+    pub('u1') // arrives while build 1 is pending
+    release()
+    await p1
+    expect(logs.length).toBe(1)
+    expect(sent).toEqual([2])
   })
 
   test('publisher swallows build failures (never blocks a transition)', async () => {
@@ -243,7 +272,7 @@ describe('Telegram /queue (R6.4)', () => {
     const { renderQueueSummary } = await import('../src/corch/queue-telegram.ts')
     const items = Array.from({ length: 7 }, (_, i) => ({ id: `i${i}`, repo_ident: 'github://a/b', title: `T${i}`, priority: i, status: 'queued', wait_reason: i === 0 ? 'quota:5h' : null }))
     items.push({ id: 'b', repo_ident: 'github://a/b', title: 'x', priority: 0, status: 'blocked', wait_reason: null })
-    const text = renderQueueSummary({ ...SNAP, paused: true, items, live_runs: [{ repo_ident: 'github://a/c', status: 'running', account_slot: 's1' }] } as any)
+    const text = renderQueueSummary({ ...SNAP, counts: { queued: 7, blocked: 1 }, paused: true, items, live_runs: [{ repo_ident: 'github://a/c', status: 'running', account_slot: 's1' }] } as any)
     expect(text).toContain('PAUSED')
     expect(text).toContain('Live runs: 1/1')
     expect(text).toContain('Queued: 7')
@@ -251,5 +280,13 @@ describe('Telegram /queue (R6.4)', () => {
     expect(text).toContain('...and 2 more')
     expect(text).toContain('Blocked: 1')
     expect(text).not.toContain('T6')
+  })
+
+  test('counts come from the uncapped aggregates, not the capped item list', async () => {
+    const { renderQueueSummary } = await import('../src/corch/queue-telegram.ts')
+    const text = renderQueueSummary({ ...SNAP, counts: { queued: 40, blocked: 300 }, items: [] } as any)
+    expect(text).toContain('Queued: 40')
+    expect(text).toContain('...and 35 more')
+    expect(text).toContain('Blocked: 300')
   })
 })

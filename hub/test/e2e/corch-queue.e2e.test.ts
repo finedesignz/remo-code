@@ -95,6 +95,33 @@ maybe('CORCH-11 e2e - pause, priority, cancel, queue view on real Postgres', () 
     expect(await store.claimNext(h.userId, [])).toBeNull()
   })
 
+  test('pause serializes with claimNext: after updateSettings returns, no claim can start (shared advisory lock)', async () => {
+    for (let n = 0; n < 6; n++) await enqueue(n % 2 ? p1 : p2, `race${n}`)
+    await h.sql`UPDATE users SET corch_max_concurrent_runs = 6 WHERE id = ${h.userId}`
+    // a claim storm racing one pause
+    const claims = Array.from({ length: 6 }, () => store.claimNext(h.userId, []))
+    const pause = store.updateSettings(h.userId, { paused: true })
+    await Promise.allSettled([pause, ...claims])
+    const before = await h.sql`SELECT count(*)::int AS n FROM corch_runs WHERE user_id = ${h.userId}`
+    // after the pause returned, nothing may claim any more
+    expect(await store.claimNext(h.userId, [])).toBeNull()
+    const after = await h.sql`SELECT count(*)::int AS n FROM corch_runs WHERE user_id = ${h.userId}`
+    expect(after[0]!.n).toBe(before[0]!.n)
+  })
+
+  test('a pile of blocked items cannot hide queued ones; counts are uncapped', async () => {
+    for (let n = 0; n < 4; n++) {
+      const b = await enqueue(p1, `blk${n}`, 100)
+      await h.sql`UPDATE corch_work_items SET status = 'blocked' WHERE id = ${b.item.id}`
+    }
+    await enqueue(p2, 'visible', 0)
+    const items = await store.queueViewItems(h.userId, 2) // cap smaller than the blocked pile
+    expect(items[0]!.status).toBe('queued')
+    const counts = await store.queueViewCounts(h.userId)
+    expect(counts.blocked).toBe(4)
+    expect(counts.queued).toBe(1)
+  })
+
   test('queue view: items in dispatch order, live runs, settings, no body field', async () => {
     await enqueue(p1, 'x', 1)
     await enqueue(p2, 'y', 2)
