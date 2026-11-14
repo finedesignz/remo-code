@@ -32,6 +32,10 @@ export const EXT_READ_COMMANDS = [
   'work_diff_scope',
   'work_build',
   'work_publish',
+  // CORCH-09: issued ONLY by hub/src/corch/workspace.ts, each after haltBeforeMachineSend.
+  'corch.worktree_ensure',
+  'corch.worktree_remove',
+  'corch.pr_lookup',
 ] as const
 export type ExtReadCommand = (typeof EXT_READ_COMMANDS)[number]
 

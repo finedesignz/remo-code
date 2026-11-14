@@ -47,6 +47,8 @@ export interface AafEventDeps {
   }
   /** Cancel the in-process send guard of runs the closure ended (a send already past its liveness check). */
   cancelRunSends: (runIds: string[]) => Promise<void>
+  /** CORCH-09: the item reached done/blocked: remove its worktree (done only) and release its memlog claim. Best effort. */
+  releaseItem?: (a: { userId: string; itemId: string; status: 'done' | 'blocked' }) => Promise<void>
   /** One owner notification for a failed PR. Resolves true on a durable delivery. Never throws into the route. */
   notifyFailed: (userId: string, workItemId: string) => Promise<boolean>
   /** One dispatch evaluation for the owner (a no-op while the CORCH flag is OFF). */
@@ -80,6 +82,7 @@ const REAL_DEPS: AafEventDeps = {
   },
   evaluate: async (userId) => (await import('./dispatcher.ts')).evaluateUserNow(userId),
   cancelRunSends: async (runIds) => (await import('./dispatcher.ts')).cancelRunSendsNow(runIds),
+  releaseItem: async (a) => (await import('./dispatcher.ts')).releaseWorkItemNow(a),
 }
 
 export function createAafEventRoutes(deps: AafEventDeps = REAL_DEPS): Hono {
@@ -135,6 +138,13 @@ export function createAafEventRoutes(deps: AafEventDeps = REAL_DEPS): Hono {
       // not leave a window in which a send that already passed its liveness check can still reach the socket.
       if (result.kind === 'transitioned' && result.endedRunIds.length > 0) {
         await deps.cancelRunSends(result.endedRunIds).catch((err) => console.warn(`[corch] aaf cancel sends failed: ${err?.name ?? 'error'}`))
+      }
+
+      // CORCH-09: the item is terminal (done: PR merged; blocked: PR closed or failed). Remove the worktree (never on
+      // blocked) and release the memlog claim. Best effort and AFTER the cancel above; a failure never changes the answer.
+      if (result.kind === 'transitioned') {
+        await Promise.resolve(deps.releaseItem?.({ userId: result.userId, itemId: result.workItemId, status: result.to }))
+          .catch((err) => console.warn(`[corch] aaf release failed item=${result.workItemId}: ${err?.name ?? 'error'}`))
       }
 
       // pr.failed owner notification: durable intent in corch_events, claimed atomically so exactly one delivery

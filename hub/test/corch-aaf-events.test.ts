@@ -26,6 +26,7 @@ let storeThrows = false
 let notified: Array<[string, string]> = []
 let evaluated: string[] = []
 let cancelled: string[] = []
+let released: Array<{ userId: string; itemId: string; status: string }> = []
 let secret: string | null = SECRET
 
 const deps = () => ({
@@ -61,6 +62,9 @@ const deps = () => ({
   },
   cancelRunSends: async (ids: string[]) => {
     cancelled.push(...ids)
+  },
+  releaseItem: async (a: { userId: string; itemId: string; status: string }) => {
+    released.push(a)
   },
 })
 
@@ -101,6 +105,7 @@ beforeEach(() => {
   notified = []
   evaluated = []
   cancelled = []
+  released = []
   secret = SECRET
   delete process.env.REMO_CORCH_ENABLED
 })
@@ -269,6 +274,17 @@ describe('POST /api/corch-events/aaf receiver', () => {
     expect(cancelled).toEqual(['run-1', 'run-2'])
     await post(bodyOf()) // replay: nothing more to cancel
     expect(cancelled).toEqual(['run-1', 'run-2'])
+  })
+
+  test('CORCH-09: a terminal transition releases the item (worktree + memlog claim) once; a failing release never changes the answer', async () => {
+    nextResult = { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'done', endedRunIds: [] }
+    expect((await post(bodyOf())).status).toBe(200)
+    expect(released).toEqual([{ userId: 'u1', itemId: 'w1', status: 'done' }])
+    await post(bodyOf()) // replay: duplicate, nothing to release
+    expect(released.length).toBe(1)
+    nextResult = { kind: 'transitioned', userId: 'u1', workItemId: 'w2', to: 'blocked', endedRunIds: [] }
+    expect((await post(bodyOf({ event_id: 'evt-0000000002', event: 'pr.closed' }))).status).toBe(200)
+    expect(released.at(-1)).toEqual({ userId: 'u1', itemId: 'w2', status: 'blocked' })
   })
 
   test('send guards are cancelled BEFORE notification I/O (a slow channel leaves no dispatch window)', async () => {

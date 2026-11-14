@@ -17,6 +17,9 @@ const PASS_LIMIT = 100
 let passRunning = false
 /** Id of the last run the previous pass read; null = start from the first run. Reset when a page is short. */
 let cursor: string | null = null
+/** CORCH-09: pr_open items heartbeated per pass; the cursor walks them all across passes (no item is starved). */
+const PR_OPEN_PAGE = 200
+let prOpenCursor: string | null = null
 
 /** One reconcile pass. Returns immediately while the flag is OFF or another pass is still running. */
 export async function reconcilePass(deps: CorchDeps, d: CorchDispatcher): Promise<void> {
@@ -27,6 +30,7 @@ export async function reconcilePass(deps: CorchDeps, d: CorchDispatcher): Promis
     const now = Date.now()
     const lease = corchLeaseMs()
     const alive: string[] = []
+    const aliveRuns: LiveRun[] = []
     const runs: LiveRun[] = await deps.store.liveRunsPage(cursor, PASS_LIMIT)
     // A full page continues after its last run next pass; a short page means the walk is complete.
     cursor = runs.length >= PASS_LIMIT ? runs[runs.length - 1]!.id : null
@@ -50,6 +54,7 @@ export async function reconcilePass(deps: CorchDeps, d: CorchDispatcher): Promis
       const known = owner ?? deps.inventory.forUser(run.user_id)
       if (known.fresh && known.sessionIds.has(run.session_id)) {
         alive.push(run.id)
+        aliveRuns.push(run)
         continue
       }
       if (now - new Date(run.heartbeat_at).getTime() <= lease) continue
@@ -57,6 +62,16 @@ export async function reconcilePass(deps: CorchDeps, d: CorchDispatcher): Promis
       else await d.stallRun(run)
     }
     if (alive.length > 0) await deps.store.touchHeartbeat(alive)
+    // CORCH-09 (R3.8): the memlog claim is heartbeated from the same liveness signal. Best effort, never throws.
+    for (const run of aliveRuns) await deps.workspace.heartbeat?.({ itemId: run.work_item_id, repoIdent: run.repo_ident }).catch(() => {})
+    // Items waiting on their PR have no live run but still hold their claim until AAF closes them.
+    try {
+      const page = (await deps.store.prOpenItems?.(PR_OPEN_PAGE, prOpenCursor)) ?? []
+      prOpenCursor = page.length >= PR_OPEN_PAGE ? page[page.length - 1]!.id : null // a short page completes the walk
+      for (const it of page) await deps.workspace.heartbeat?.({ itemId: it.id, repoIdent: it.repo_ident }).catch(() => {})
+    } catch (err: any) {
+      console.error(`[corch] pr_open heartbeat pass failed: ${err?.message ?? err}`)
+    }
   } finally {
     passRunning = false
   }

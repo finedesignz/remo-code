@@ -9,6 +9,7 @@ import { assertWithinRoots, assertTargetWithinRoots, SandboxEscapeError, Sandbox
 import { ProcessManager, type ProcState } from './process-manager'
 import { scanAllCommands } from './commands-scanner'
 import { getHandler, nativeSupervisorCommands } from './commands/index'
+import { accountSlot } from './slot'
 import { getConfigPath, saveConfig, type SupervisorConfig } from './config'
 import { log as obs } from './observability/logger'
 import { VERSION } from './version'
@@ -36,7 +37,7 @@ export function resolveRepoInventoryIntervalMs(raw?: string | null): number {
 
 type OutboundMsg =
   | { type: 'auth'; api_key: string; project_dir: string; hostname: string; role: 'supervisor' }
-  | { type: 'supervisor.hello'; version: string; os: string; hostname: string; roots: string[]; capabilities: string[]; allow_dangerous_skip_permissions: boolean; restrict_to_git: boolean; max_concurrent: number; audit_log_enabled: boolean }
+  | { type: 'supervisor.hello'; version: string; os: string; hostname: string; roots: string[]; capabilities: string[]; allow_dangerous_skip_permissions: boolean; restrict_to_git: boolean; max_concurrent: number; audit_log_enabled: boolean; account_slot?: string }
   | { type: 'supervisor.state'; state: ProcState; run_id?: string | null; repo_path?: string | null; pid?: number | null; restart_count?: number; last_exit?: any }
   | { type: 'supervisor.log'; level: string; message: string; run_id?: string; ts?: string }
   | { type: 'repo.scan_result'; req_id: string; repos: any[] }
@@ -304,6 +305,9 @@ export class SupervisorClient {
         restrict_to_git: this.cfg.requireGitRepo,
         max_concurrent: this.cfg.maxConcurrent,
         audit_log_enabled: this.cfg.auditLogEnabled,
+        // CORCH-09 (R4.1): only a headless slot supervisor (REMO_ACCOUNT_SLOT set) advertises an account; the key is
+        // ABSENT otherwise, so every desktop MSI stays a non-target.
+        ...(accountSlot() ? { account_slot: accountSlot()! } : {}),
       })
       // Sync commands + skills (best-effort, async)
       try {
