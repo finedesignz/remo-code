@@ -207,7 +207,7 @@ function mkWorld(opts: { attempts?: number; maxAttempts?: number; prLookup?: any
     },
     attachSession: async () => true,
     markRunLaunched: async (id: string, sup: string) => void w.launched.push([id, sup]),
-    markRunRunning: async (id: string) => void w.running.push(id),
+    markRunRunning: async (id: string) => (w.running.push(id), !w.ended.has(id)),
     endRunAndRequeue: async (runId: string, input: any) => {
       let result: any
       if (w.ended.has(runId)) result = { changed: false }
@@ -439,7 +439,10 @@ function mkRecon(opts: { runs?: any[]; inv?: Record<string, Inv>; userInv?: Inv;
     releases: [] as Array<[string, string]>,
     supervisorRuns: [] as any[],
   }
-  deps.store.liveRunsOldestHeartbeat = async (limit: number) => (r.readLimits.push(limit), r.runs)
+  deps.store.liveRunsPage = async (afterId: string | null, limit: number) => {
+    r.readLimits.push(limit)
+    return [...r.runs].sort((a, b) => (a.id < b.id ? -1 : 1)).filter((x) => afterId === null || x.id > afterId).slice(0, limit)
+  }
   deps.store.touchHeartbeat = async (ids: string[]) => void r.touched.push(ids)
   deps.store.markStalled = async (id: string) => {
     r.stalledCalls.push(id)
@@ -527,19 +530,28 @@ describe('reconciler (CORCH-R3.3)', () => {
     expect(r.touched).toEqual([['run-1']])
   })
 
-  test('without a supervisor id the union of the user fresh inventories decides', async () => {
+  test('without a supervisor id another supervisor inventory is never proof of absence (stalled, not reclaimed)', async () => {
     process.env.REMO_CORCH_ENABLED = '1'
-    const { w, d, deps } = mkRecon({ runs: [liveRun({ supervisor_id: null })], userInv: { fresh: true, sessionIds: new Set(['x']) } })
+    const { w, r, d, deps } = mkRecon({ runs: [liveRun({ supervisor_id: null })], userInv: { fresh: true, sessionIds: new Set(['x']) } })
     await reconcilePass(deps, d)
-    expect(w.ends.map((e) => e.input.endReason)).toEqual(['session_absent'])
+    expect(w.ends).toEqual([])
+    expect(r.stalledCalls).toEqual(['run-1'])
   })
 
-  test('no session id, not in flight, older than the lease: claim_orphaned without an attempt', async () => {
+  test('without a supervisor id a fresh inventory that LISTS the session is positive proof of life', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, r, d, deps } = mkRecon({ runs: [liveRun({ supervisor_id: null })], userInv: { fresh: true, sessionIds: new Set(['s1']) } })
+    await reconcilePass(deps, d)
+    expect(r.touched).toEqual([['run-1']])
+    expect(w.ends).toEqual([])
+  })
+
+  test('no session id, not in flight, older than the lease: claim_orphaned consumes an attempt (bounded, QC MED 2)', async () => {
     process.env.REMO_CORCH_ENABLED = '1'
     const { w, d, deps } = mkRecon({ runs: [liveRun({ session_id: null, supervisor_id: null })] })
     await reconcilePass(deps, d)
-    expect(w.ends.map((e) => e.input)).toMatchObject([{ endReason: 'claim_orphaned', consumeAttempt: false }])
-    expect(w.attempts).toBe(0)
+    expect(w.ends.map((e) => e.input)).toMatchObject([{ endReason: 'claim_orphaned', consumeAttempt: true }])
+    expect(w.attempts).toBe(1)
   })
 
   test('runs of this process in-flight launches are skipped', async () => {
@@ -562,7 +574,7 @@ describe('reconciler (CORCH-R3.3)', () => {
     const { r, d, deps } = mkRecon()
     let release!: () => void
     const gate = new Promise<void>((res) => (release = res))
-    deps.store.liveRunsOldestHeartbeat = async (limit: number) => {
+    deps.store.liveRunsPage = async (_afterId: string | null, limit: number) => {
       r.readLimits.push(limit)
       await gate
       return []
@@ -591,5 +603,176 @@ describe('reconciler (CORCH-R3.3)', () => {
     r.supervisorRuns = [liveRun()]
     await d.onSupervisorClosed('sup-1')
     expect(w.ends).toEqual([])
+  })
+})
+
+// ── QC round 1 (Codex 1-6, Claude MED 1/2) ───────────────────────────────────
+
+describe('QC round 1 - C1: an ended run never sends', () => {
+  const live = (ended: Date | null) => async () => ({ ...ctx(), run: { id: 'run-1', user_id: 'u1', project_id: 'p1', work_item_id: 'w1', ended_at: ended } })
+
+  test('all three corch gates refuse an ended run (corch_run_not_live)', async () => {
+    const store = fakeStore({ runContext: live(new Date()) })
+    for (const g of [corchProjectBudgetGate(store), corchConcurrencyGate(store), corchQuotaGate({ snapshotFor: async () => ({ ok: true }) } as any, store)]) {
+      expect(await g.check(req())).toEqual({ ok: false, reason: 'corch_run_not_live' })
+    }
+  })
+
+  test('a parked replay after the run ended does not call dispatch; while live it does', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, deps } = mkWorld({ dispatchOutcome: { kind: 'parked_offline' } })
+    let endedAt: Date | null = null
+    deps.store.runContext = async () => (await live(endedAt)())
+    await createCorchDispatcher(deps).evaluateUser('u1')
+    const { req: r0, pdeps } = w.dispatched[0]!
+    await pdeps.replay(r0)
+    expect(w.dispatched.length).toBe(2) // live: replay re-enters dispatch
+    endedAt = new Date()
+    w.ended.add('run-1')
+    await pdeps.replay(r0)
+    expect(w.dispatched.length).toBe(2) // ended: nothing
+  })
+
+  test('markDispatched (called right before the send) throws for an ended run so the pipeline never sends', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, deps } = mkWorld()
+    await createCorchDispatcher(deps).evaluateUser('u1')
+    const store = w.dispatched[0]!.pdeps.store
+    await store.markDispatched('corch-run:run-1') // live: fine
+    w.ended.add('run-1')
+    await expect(store.markDispatched('corch-run:run-1')).rejects.toThrow('corch_run_not_live')
+  })
+})
+
+describe('QC round 1 - C3: not_before rearm is race-safe', () => {
+  test('an older, slower query that returns null cannot cancel the timer a newer query armed', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, deps } = mkWorld()
+    const d = createCorchDispatcher(deps)
+    const FUTURE = new Date(Date.now() + 3_600_000)
+    let n = 0
+    let releaseFirst!: () => void
+    deps.store.earliestFutureNotBefore = async () => {
+      if (++n === 1) {
+        await new Promise<void>((res) => (releaseFirst = res))
+        return null
+      }
+      return FUTURE
+    }
+    const p1 = d.armNotBeforeTimer()
+    const p2 = d.armNotBeforeTimer()
+    await new Promise((r) => setTimeout(r, 5))
+    releaseFirst()
+    await Promise.all([p1, p2])
+    expect(w.setTimeouts.length - w.clearTimeouts).toBe(1) // exactly one armed timer remains
+  })
+})
+
+describe('QC round 1 - C4: the reconciler does not starve behind unknown-inventory runs', () => {
+  test('150 stalled-forever runs: two passes touch all 150, not the same 100 twice', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const runs = Array.from({ length: 150 }, (_, i) =>
+      liveRun({ id: `run-${String(i).padStart(3, '0')}`, work_item_id: `w${i}`, supervisor_id: 'sup-x' }),
+    )
+    const { r, d, deps } = mkRecon({ runs }) // sup-x inventory unknown: every run is stalled, heartbeat unchanged
+    await reconcilePass(deps, d)
+    await reconcilePass(deps, d)
+    expect(new Set(r.stalledCalls).size).toBe(150)
+    await reconcilePass(deps, d) // the cursor wrapped: the third pass starts over
+    expect(r.readLimits).toEqual([100, 100, 100])
+    expect(r.stalledCalls.length).toBe(150 + 100)
+  })
+})
+
+describe('QC round 1 - C5: session_busy consumes an attempt', () => {
+  test('the real pipeline order (markSkipped session_busy, THEN return dropped_busy) is one attempt-consuming end, no hot loop', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, deps } = mkWorld()
+    deps.dispatch = async (req: any, pdeps: any) => {
+      w.dispatched.push({ req, pdeps })
+      await pdeps.store.markSkipped(req.token, 'session_busy')
+      return { kind: 'dropped_busy' }
+    }
+    await createCorchDispatcher(deps).evaluateUser('u1')
+    expect(w.ends.filter((e) => e.result.changed).map((e) => e.input)).toMatchObject([{ endReason: 'dropped_busy', consumeAttempt: true }])
+    expect(w.attempts).toBe(1)
+    expect(w.releases.length).toBe(1)
+  })
+})
+
+describe('QC round 1 - C6: boot evaluates already-due backlog once', () => {
+  test('startCorchWith evaluates due users once (event-driven) and arms the timer', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { startCorchWith } = await import('../src/corch/reconciler.ts')
+    const { w, deps } = mkWorld()
+    deps.store.usersWithDueItems = async () => ['u1']
+    const d = createCorchDispatcher(deps)
+    const stop = await startCorchWith(d)
+    stop()
+    expect(w.claims).toBeGreaterThanOrEqual(1) // the due item was claimed at boot without any other trigger
+  })
+
+  test('flag OFF: startCorchWith touches nothing', async () => {
+    delete process.env.REMO_CORCH_ENABLED
+    const { startCorchWith } = await import('../src/corch/reconciler.ts')
+    const { w, deps } = mkWorld()
+    deps.store.usersWithDueItems = async () => ['u1']
+    const stop = await startCorchWith(createCorchDispatcher(deps))
+    stop()
+    expect(w.claims).toBe(0)
+  })
+})
+
+describe('QC round 1 - Claude MED 1: a throw in launch never leaves a live run', () => {
+  test('a throwing gate store (checkGates rejects): run ended as failure, evaluateUser resolves, timer re-armed', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, deps } = mkWorld()
+    deps.launch.checkGates = async () => {
+      throw new Error('db down')
+    }
+    const d = createCorchDispatcher(deps)
+    const r = await d.evaluateUser('u1')
+    expect(r.kind).toBe('done')
+    expect(w.ends.map((e) => e.input)).toMatchObject([{ endReason: 'launch_error', consumeAttempt: true }])
+    expect(w.attempts).toBe(1)
+  })
+
+  test('markRunLaunched throwing: run ended as failure with the reservation released, nothing dispatched', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, deps } = mkWorld()
+    deps.store.markRunLaunched = async () => {
+      throw new Error('db down')
+    }
+    await createCorchDispatcher(deps).evaluateUser('u1')
+    expect(w.ends.map((e) => e.input)).toMatchObject([{ endReason: 'launch_error', consumeAttempt: true }])
+    expect(w.dispatched.length).toBe(0)
+    expect(w.releases.length).toBe(1)
+  })
+})
+
+describe('QC round 1 - Claude MED 2: workspace/orphan failures are bounded', () => {
+  test('workspace.resolve throwing consumes an attempt; the third blocks with ONE notification', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, deps } = mkWorld({ attempts: 2 })
+    deps.workspace = {
+      resolve: async () => {
+        throw new Error('worktree boom')
+      },
+    }
+    const d = createCorchDispatcher(deps)
+    await d.evaluateUser('u1')
+    expect(w.ends.map((e) => e.input)).toMatchObject([{ endReason: 'workspace_error', consumeAttempt: true }])
+    expect(w.status).toBe('blocked')
+    expect(w.notifications.length).toBe(1)
+    expect(w.launchCalls).toBe(0)
+  })
+
+  test('claim_orphaned at the last attempt blocks with ONE notification', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { w, d, deps } = mkRecon({ runs: [liveRun({ session_id: null, supervisor_id: null })] })
+    w.attempts = 2
+    await reconcilePass(deps, d)
+    expect(w.status).toBe('blocked')
+    expect(w.notifications.length).toBe(1)
   })
 })

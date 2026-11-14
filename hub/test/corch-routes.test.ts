@@ -280,3 +280,27 @@ describe('POST /api/ext/corch/work-items (handler; the ext:corch scope gate is p
     expect((await app.request('/api/ext/corch/work-items', ext(noRef))).status).toBe(400)
   })
 })
+
+describe('PATCH /api/corch/projects/:id with a non-UUID id (QC round 1 LOW 3)', () => {
+  test('404 project_not_found without reaching the store (Postgres would raise 22P02 => 500)', async () => {
+    const { createCorchRoutes } = await import('../src/corch/routes.ts')
+    let reached = 0
+    const strict = {
+      ...fakeStore,
+      async updateProject() {
+        reached++
+        throw new Error('invalid input syntax for type uuid')
+      },
+    }
+    const app = new Hono<{ Variables: { userId: string } }>()
+    app.use('*', async (c, next) => {
+      c.set('userId', 'u1')
+      await next()
+    })
+    app.route('/api/corch', createCorchRoutes({ ...fakeDeps, store: strict as any }))
+    const r = await app.request('/api/corch/projects/not-a-uuid', patch({ priority: 1 }))
+    expect(r.status).toBe(404)
+    expect(await r.json()).toEqual({ error: 'project_not_found' })
+    expect(reached).toBe(0)
+  })
+})
