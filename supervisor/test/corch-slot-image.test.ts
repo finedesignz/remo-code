@@ -31,16 +31,20 @@ describe('Dockerfile.slot', () => {
     }
     const envText = envParts.join('\n')
     expect(envText).toContain('REMO_ROOTS')
-    for (const name of ['CLAUDE_CODE_OAUTH_TOKEN', 'REMO_API_KEY', 'REMO_ACCOUNT_SLOT', 'REMO_HUB_URL', 'REMO_GIT_TOKEN', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY']) {
+    for (const name of ['CLAUDE_CODE_OAUTH_TOKEN', 'REMO_API_KEY', 'REMO_ACCOUNT_SLOT', 'REMO_HUB_URL', 'GH_TOKEN', 'GITHUB_TOKEN', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY']) {
       expect(envText).not.toContain(name)
     }
     expect(envText).not.toMatch(/token|secret|password|api_key/i)
   })
 
   test('no Tauri, ConPTY or Rust pty host in the image', () => {
-    expect(code.replaceAll('supervisor/tauri/src-tauri/tauri.conf.json', '')).not.toMatch(/tauri|pty_host|conpty|cargo|rustup|\.msi|\.exe/i)
+    expect(code.replaceAll('supervisor/tauri/src-tauri/tauri.conf.json', '').replace(/^.*-deletes*$/m, '')).not.toMatch(/tauri|pty_host|conpty|cargo|rustup|\.msi|\.exe/i)
     // Only the version manifest may come from supervisor/tauri; never the whole dir, never `COPY supervisor/ ...`.
     expect(code).not.toMatch(/COPY\s+supervisor\/(tauri\/(?!src-tauri\/tauri\.conf\.json\s)|\s)/)
+  })
+
+  test('deps stage strips Windows ConPTY/winpty binaries shipped inside node-pty', () => {
+    expect(code).toMatch(/find node_modules -type f[^\n]*\*\.exe[^\n]*\*\.dll[^\n]*winpty[^\n]*conpty[^\n]*-delete/)
   })
 
   test('uses an exec-form entrypoint via the slot entrypoint script', () => {

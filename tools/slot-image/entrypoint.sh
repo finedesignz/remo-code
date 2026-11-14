@@ -27,8 +27,8 @@ fi
 
 # Optional git credentials from runtime env (never persisted to a file).
 GIT_HOST="${REMO_GIT_HOST:-github.com}"
-if [ -n "${REMO_GIT_TOKEN:-}" ]; then
-  git config --global "credential.https://${GIT_HOST}.helper" '!f() { test "$1" = get && echo username=x-access-token && echo "password=$REMO_GIT_TOKEN"; }; f'
+if [ -n "${GH_TOKEN:-}" ]; then
+  git config --global "credential.https://${GIT_HOST}.helper" '!f() { test "$1" = get && echo username=x-access-token && echo "password=$GH_TOKEN"; }; f'
 fi
 
 exec bun src/index.ts run
