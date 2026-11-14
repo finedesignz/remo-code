@@ -672,10 +672,31 @@ export function guardSendDeps(guard: SendGuard, base: SendDeps): SendDeps {
   }
 }
 
-/** The corch send seam: the shared sender (heal sink) behind the run's cancellation token. */
-export async function corchSend(req: DispatchRequest, guard: SendGuard, base?: SendDeps): Promise<void> {
+type DalInsert = { insertMessage: SendDeps['insertMessage'] }
+
+/**
+ * The corch send seam: the shared sender (heal sink) behind the run's cancellation token.
+ *
+ * The DAL module is resolved FIRST, before any guard runs, and the insert dep calls the resolved
+ * `insertMessage` directly. `REAL_SEND_DEPS.insertMessage` awaits a dynamic import before inserting,
+ * which would leave an await between `guard.assertLive()` and the row write (a reclaim during that
+ * await would still persist the cancelled prompt). `base` may override individual deps; `loadDal` is
+ * the test seam for the DAL load.
+ */
+export async function corchSend(
+  req: DispatchRequest,
+  guard: SendGuard,
+  base?: Partial<SendDeps>,
+  loadDal: () => Promise<DalInsert> = () => import('../db/dal.ts') as unknown as Promise<DalInsert>,
+): Promise<void> {
+  const insertMessage = base?.insertMessage ?? (await loadDal()).insertMessage
   const { sendUserMessage, REAL_SEND_DEPS } = await import('../heal/sinks/shared.ts')
-  await sendUserMessage(req, { storedContent: req.prompt }, guardSendDeps(guard, base ?? REAL_SEND_DEPS))
+  const deps: SendDeps = {
+    ...REAL_SEND_DEPS,
+    ...base,
+    insertMessage: (sessionId, role, content) => insertMessage(sessionId, role, content),
+  }
+  await sendUserMessage(req, { storedContent: req.prompt }, guardSendDeps(guard, deps))
 }
 
 export async function realCorchDeps(): Promise<CorchDeps> {
