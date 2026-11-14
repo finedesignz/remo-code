@@ -69,7 +69,7 @@ function project(id: string, userId: string, ident: string, priority = 5) {
 
 type Make = () => Response | Promise<Response>
 
-function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<string, Make>; applyThrows?: boolean } = {}) {
+function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<string, Make>; applyThrows?: boolean; applyGate?: Promise<void> } = {}) {
   const log = {
     fetches: [] as string[],
     auth: [] as string[],
@@ -85,8 +85,10 @@ function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<st
   const ingest = createGsdcIngest({
     store: {
       listEnabledProjects: async () => opts.projects ?? [],
-      applyGsdcBoards: async (entries: any[]) => {
+      applyGsdcBoards: async (entries: any[], shouldCommit: () => boolean = () => true) => {
         if (opts.applyThrows) throw new Error('db down')
+        if (opts.applyGate) await opts.applyGate
+        if (!shouldCommit()) throw new Error('gsdc_apply_cancelled')
         const users = new Set<string>()
         for (const e of entries) {
           log.cancels.push({ projectId: e.projectId, source: 'gsd_console', refs: e.doneRefs })
@@ -339,7 +341,8 @@ describe('fail closed (CORCH-R1.16)', () => {
     ['401', () => [() => json({}, 401)], 'http_401'],
     ['402', () => [() => json({}, 402)], 'http_402'],
     ['403', () => [() => json({}, 403)], 'http_403'],
-    ['stream-error', () => [() => sseResponse([frame('stream-error', { code: 'listener_down', message: 'x' })])], 'stream_error:listener_down'],
+    ['stream-error', () => [() => sseResponse([frame('stream-error', { code: 'listener_unavailable', message: 'x' })])], 'stream_error:listener_unavailable'],
+    ['stream-error with an unknown (possibly hostile) code', () => [() => sseResponse([frame('stream-error', { code: 'leak_abc123', message: 'x' })])], 'stream_error'],
     ['stream ends with no snapshot', () => [() => sseResponse([])], 'stream_ended'],
     ['malformed snapshot', () => [() => sseResponse(['event: snapshot\ndata: {not json\n\n'])], 'bad_payload'],
     ['snapshot entry fails schema', () => [() => sseResponse([frame('snapshot', { projects: [{ id: 1 }] })])], 'bad_payload'],
@@ -569,6 +572,39 @@ describe('review hardening (QC round 1)', () => {
     for (const t of h.reconnects()) t.fn()
     await flush()
     expect(reads()).toBe(1)
+    h.ingest.stop()
+  })
+})
+
+describe('review hardening (QC round 2)', () => {
+  test('stop() while the apply transaction is waiting: rolled back, no failure, no evaluation', async () => {
+    let release!: () => void
+    const applyGate = new Promise<void>((r) => (release = r))
+    const h = harness({
+      projects: [project('pa', 'u1', 'github://acme/app')],
+      streams: [() => sseResponse([frame('snapshot', { projects: [sum('c1', 'acme/app')] })])],
+      details: { c1: () => json(detail({ current: [{ number: '4' }] })) },
+      applyGate,
+    })
+    h.ingest.start()
+    await flush()
+    h.ingest.stop()
+    release()
+    await flush()
+    expect(h.log.upserts).toEqual([])
+    expect(h.log.cancels).toEqual([])
+    expect(h.log.enqueued).toEqual([])
+    expect(h.log.outages).toEqual([])
+  })
+
+  test('a hostile stream-error code never reaches the notification', async () => {
+    const h = harness({
+      projects: [project('pa', 'u1', 'github://acme/app')],
+      streams: [() => sseResponse([frame('stream-error', { code: 'gsdc_TESTTOKEN', message: 'x' })])],
+    })
+    h.ingest.start()
+    await flush()
+    expect(h.log.outages).toEqual([{ userIds: ['u1'], signature: 'stream_error' }])
     h.ingest.stop()
   })
 })

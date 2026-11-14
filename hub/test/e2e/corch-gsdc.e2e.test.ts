@@ -62,13 +62,32 @@ maybe('CORCH-04 e2e - gsd-console ingest on real Postgres', () => {
     expect(await st(otherRef.item.id)).toBe('queued')
     expect(await st(manual.item.id)).toBe('queued')
     expect(await st(running.item.id)).toBe('running')
+    // An entry for a project that is no longer enabled writes nothing; shouldCommit=false rolls everything back.
+    const made = await mk(off.project.id, 'gsd_console', 'o/n:v1:7')
+    await store.applyGsdcBoards([
+      { projectId: off.project.id, userId: h.userId, priority: 1, doneRefs: ['o/n:v1:7'], candidate: { sourceRef: 'o/n:v1:8', title: 't', body: '' } },
+    ])
+    expect(await st(made.item.id)).toBe('queued')
+    expect((await h.sql`SELECT 1 FROM corch_work_items WHERE project_id = ${off.project.id} AND source_ref = 'o/n:v1:8'`).length).toBe(0)
+    await expect(
+      store.applyGsdcBoards(
+        [{ projectId: on.project.id, userId: h.userId, priority: 1, doneRefs: ['o/n:v1:2'], candidate: null }],
+        () => false,
+      ),
+    ).rejects.toBeDefined()
+    expect(await st(otherRef.item.id)).toBe('queued')
     // All or nothing: a failing entry rolls back the earlier entries of the same call.
     const before = await st(otherRef.item.id)
+    // A late rollback (the last check, right before commit) undoes the earlier entry's cancellation.
+    let checks = 0
     await expect(
-      store.applyGsdcBoards([
-        { projectId: on.project.id, userId: h.userId, priority: 1, doneRefs: ['o/n:v1:2'], candidate: null },
-        { projectId: '00000000-0000-4000-8000-000000000000', userId: h.userId, priority: 1, doneRefs: [], candidate: { sourceRef: 'x', title: 't', body: '' } },
-      ]),
+      store.applyGsdcBoards(
+        [
+          { projectId: on.project.id, userId: h.userId, priority: 1, doneRefs: ['o/n:v1:2'], candidate: null },
+          { projectId: on.project.id, userId: h.userId, priority: 1, doneRefs: [], candidate: null },
+        ],
+        () => ++checks < 3,
+      ),
     ).rejects.toBeDefined()
     expect(await st(otherRef.item.id)).toBe(before)
   })
