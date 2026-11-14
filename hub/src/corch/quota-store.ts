@@ -45,14 +45,18 @@ export const quotaStore = {
             enabled = EXCLUDED.enabled,
             cug_blocked = EXCLUDED.cug_blocked,
             received_at = now(),
-            blocked_until = corch_quota_accounts.blocked_until,
-            blocked_at = CASE
-              WHEN corch_quota_accounts.blocked_until IS NULL
-                   AND corch_quota_accounts.blocked_at IS NOT NULL
+            -- F1: CUG is the single quota source. A live reading fetched after the death supersedes the
+            -- text-detected block (both columns), so a death can never outlive the next reading.
+            blocked_until = CASE WHEN corch_quota_accounts.blocked_at IS NOT NULL
+                   AND EXCLUDED.source = 'live'
                    AND EXCLUDED.fetched_at IS NOT NULL
                    AND EXCLUDED.fetched_at > corch_quota_accounts.blocked_at
-                THEN NULL
-              ELSE corch_quota_accounts.blocked_at END`
+                THEN NULL ELSE corch_quota_accounts.blocked_until END,
+            blocked_at = CASE WHEN corch_quota_accounts.blocked_at IS NOT NULL
+                   AND EXCLUDED.source = 'live'
+                   AND EXCLUDED.fetched_at IS NOT NULL
+                   AND EXCLUDED.fetched_at > corch_quota_accounts.blocked_at
+                THEN NULL ELSE corch_quota_accounts.blocked_at END`
       }
       return accounts.length
     })
@@ -99,10 +103,12 @@ export const quotaStore = {
   },
 
   /**
-   * CORCH-R2.5 (LD-Q10): block the account after a quota death. blocked_at = now(); blocked_until = the signal's
-   * reset when it is in the future, else the named window's reset from the reading, else the earliest future of
-   * resets_5h / resets_7d, else NULL (then only a snapshot with a newer fetched_at clears it, LD-Q5).
-   * Returns the resulting blocked_until (null when none, or when the account has no row).
+   * CORCH-R2.5 (LD-Q10), CORCH-02 QC F1: a text-detected quota death is NOT authoritative (the text is run output).
+   * blocked_at = now() (the death instant); blocked_until = min(candidate reset, now + window cap) where the cap is
+   * 7d for the 7d window and 5h otherwise, and the candidate is the signal's reset when in the future, else the named
+   * window's reset from the reading, else the earliest future reading reset, else the cap. A far-future or past
+   * epoch therefore clamps; the next live reading fetched after blocked_at clears the block (upsertSnapshot).
+   * Returns the resulting blocked_until (null only when the account has no row).
    */
   async markDeath(a: { userId: string; accountId: string; resetAt: Date | null; window?: '5h' | '7d' | null }): Promise<Date | null> {
     const resetAt = a.resetAt ? a.resetAt.toISOString() : null
@@ -110,12 +116,15 @@ export const quotaStore = {
     const rows = await sql<{ blocked_until: Date | null }[]>`
       UPDATE corch_quota_accounts SET
         blocked_at = now(),
-        blocked_until = CASE
-          WHEN ${resetAt}::timestamptz IS NOT NULL AND ${resetAt}::timestamptz > now() THEN ${resetAt}::timestamptz
-          WHEN ${window}::text = '5h' THEN CASE WHEN resets_5h > now() THEN resets_5h END
-          WHEN ${window}::text = '7d' THEN CASE WHEN resets_7d > now() THEN resets_7d END
-          ELSE (SELECT min(t) FROM (VALUES (resets_5h), (resets_7d)) AS v(t) WHERE t > now())
-        END
+        blocked_until = LEAST(
+          now() + (CASE WHEN ${window}::text = '7d' THEN interval '7 days' ELSE interval '5 hours' END),
+          COALESCE(
+            CASE WHEN ${resetAt}::timestamptz > now() THEN ${resetAt}::timestamptz END,
+            CASE WHEN ${window}::text = '5h' THEN CASE WHEN resets_5h > now() THEN resets_5h END
+                 WHEN ${window}::text = '7d' THEN CASE WHEN resets_7d > now() THEN resets_7d END
+                 ELSE (SELECT min(t) FROM (VALUES (resets_5h), (resets_7d)) AS v(t) WHERE t > now())
+            END,
+            'infinity'::timestamptz))
       WHERE user_id = ${a.userId} AND account_id = ${a.accountId}
       RETURNING blocked_until`
     return rows[0]?.blocked_until ?? null

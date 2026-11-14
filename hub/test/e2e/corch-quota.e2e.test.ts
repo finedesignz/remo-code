@@ -307,41 +307,67 @@ maybe('CORCH-02 e2e - quota ingest on real Postgres', () => {
     expect(g.accounts[0]).toMatchObject({ eligible: false, reason: 'quota:blocked' })
   })
 
-  test('markDeath with no signal reset and no future reading reset leaves blocked_until NULL; only a newer snapshot clears that NULL-until block', async () => {
+  const blockRow = async (userId: string, id: string) =>
+    (await h.sql`SELECT blocked_at, blocked_until FROM corch_quota_accounts WHERE user_id = ${userId} AND account_id = ${id}`)[0]!
+  const approx = (d: Date, ms: number) => Math.abs(d.getTime() - (Date.now() + ms)) < 60_000
+
+  test('F1: a death with no usable reset blocks for now+5h (never indefinitely); an older reading does not clear it, a newer live one does', async () => {
     const u = await newUser()
     const past = new Date(Date.now() - 3600_000).toISOString()
     await post(snapshot([acct('nb', { resets_5h: past, resets_7d: past })]), u.publish)
     const { quotaStore } = await provider([])
-    expect(await quotaStore.markDeath({ userId: u.userId, accountId: 'nb', resetAt: null })).toBeNull()
-    const blocked = (await h.sql`SELECT blocked_at, blocked_until FROM corch_quota_accounts WHERE user_id = ${u.userId} AND account_id = 'nb'`)[0]!
+    const got = await quotaStore.markDeath({ userId: u.userId, accountId: 'nb', resetAt: null })
+    expect(got).not.toBeNull()
+    expect(approx(got!, 5 * 3600_000)).toBe(true)
+    const blocked = await blockRow(u.userId, 'nb')
     expect(blocked.blocked_at).not.toBeNull()
-    expect(blocked.blocked_until).toBeNull()
-    // a reading fetched BEFORE blocked_at does not clear it
+    expect(approx(blocked.blocked_until, 5 * 3600_000)).toBe(true)
+    // a reading fetched BEFORE the death does not clear it
     await post(snapshot([acct('nb', { fetched_at: new Date(Date.now() - 30_000).toISOString() })]), u.publish)
-    expect((await h.sql`SELECT blocked_at FROM corch_quota_accounts WHERE user_id = ${u.userId} AND account_id = 'nb'`)[0]!.blocked_at).not.toBeNull()
-    // a reading fetched AFTER blocked_at clears it
+    expect((await blockRow(u.userId, 'nb')).blocked_until).not.toBeNull()
+    // a non-live reading fetched after the death does not clear it
     await new Promise((r) => setTimeout(r, 20))
+    await post(snapshot([acct('nb', { source: 'cache', fetched_at: new Date(Date.now() + 5_000).toISOString() })]), u.publish)
+    expect((await blockRow(u.userId, 'nb')).blocked_until).not.toBeNull()
+    // a live reading fetched AFTER the death clears block and death mark
     await post(snapshot([acct('nb', { fetched_at: new Date(Date.now() + 5_000).toISOString() })]), u.publish)
-    expect((await h.sql`SELECT blocked_at FROM corch_quota_accounts WHERE user_id = ${u.userId} AND account_id = 'nb'`)[0]!.blocked_at).toBeNull()
+    const cleared = await blockRow(u.userId, 'nb')
+    expect(cleared.blocked_at).toBeNull()
+    expect(cleared.blocked_until).toBeNull()
   })
 
-  test('a time-bounded block is NOT cleared by a newer snapshot; an explicit resetAt wins; a past resetAt falls back', async () => {
+  test('F1: a far-future legacy epoch is clamped to now+5h (5h/legacy) or now+7d (7d window); a past epoch falls back to the reading reset', async () => {
+    const u = await newUser()
+    await post(snapshot([acct('c5'), acct('c7'), acct('cp', { resets_5h: new Date(Date.now() + 2 * 3600_000).toISOString() })]), u.publish)
+    const { quotaStore } = await provider([])
+    const far = new Date(99999999999 * 1000)
+    const a = await quotaStore.markDeath({ userId: u.userId, accountId: 'c5', resetAt: far })
+    expect(approx(a!, 5 * 3600_000)).toBe(true)
+    const b = await quotaStore.markDeath({ userId: u.userId, accountId: 'c7', resetAt: far, window: '7d' })
+    expect(approx(b!, 7 * 86_400_000)).toBe(true)
+    const c = await quotaStore.markDeath({ userId: u.userId, accountId: 'cp', resetAt: new Date(Date.now() - 1000), window: '5h' })
+    expect(approx(c!, 2 * 3600_000)).toBe(true) // the reading's own 5h reset (< cap)
+  })
+
+  test('F1: a death at low usage is cleared by the next live reading (GET reads eligible again)', async () => {
+    const u = await newUser()
+    await post(snapshot([acct('low', { five_h_pct: 3, seven_d_pct: 4 })]), u.publish)
+    const { quotaStore } = await provider([])
+    await quotaStore.markDeath({ userId: u.userId, accountId: 'low', resetAt: new Date(99999999999 * 1000) })
+    expect(((await (await get(u.read)).json()) as any).accounts[0]).toMatchObject({ eligible: false, reason: 'quota:blocked' })
+    await new Promise((r) => setTimeout(r, 20))
+    await post(snapshot([acct('low', { five_h_pct: 3, seven_d_pct: 4, fetched_at: new Date(Date.now() + 5_000).toISOString() })]), u.publish)
+    expect(((await (await get(u.read)).json()) as any).accounts[0]).toMatchObject({ eligible: true, reason: null })
+  })
+
+  test('an explicit in-cap resetAt wins; a past resetAt falls back; an unknown account has nothing to block', async () => {
     const u = await newUser()
     await post(snapshot([acct('tb')]), u.publish)
     const { quotaStore } = await provider([])
     const until = new Date(Date.now() + 3 * 3600_000)
     const got = await quotaStore.markDeath({ userId: u.userId, accountId: 'tb', resetAt: until })
     expect(got?.getTime()).toBe(until.getTime())
-    await new Promise((r) => setTimeout(r, 20))
-    await post(snapshot([acct('tb', { fetched_at: new Date(Date.now() + 5_000).toISOString() })]), u.publish)
-    const row = (await h.sql`SELECT blocked_at, blocked_until FROM corch_quota_accounts WHERE user_id = ${u.userId} AND account_id = 'tb'`)[0]!
-    expect(row.blocked_at).not.toBeNull()
-    expect(row.blocked_until.getTime()).toBe(until.getTime())
-    // past resetAt is ignored in favour of the earliest future reading reset
-    const fb = await quotaStore.markDeath({ userId: u.userId, accountId: 'tb', resetAt: new Date(Date.now() - 1000) })
-    const r5 = (await h.sql`SELECT resets_5h FROM corch_quota_accounts WHERE user_id = ${u.userId} AND account_id = 'tb'`)[0]!.resets_5h as Date
-    expect(fb?.getTime()).toBe(r5.getTime())
-    // an unknown account has nothing to block
+    expect((await blockRow(u.userId, 'tb')).blocked_until.getTime()).toBe(until.getTime())
     expect(await quotaStore.markDeath({ userId: u.userId, accountId: 'nope', resetAt: until })).toBeNull()
   })
 })
