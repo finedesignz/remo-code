@@ -69,7 +69,7 @@ function project(id: string, userId: string, ident: string, priority = 5) {
 
 type Make = () => Response | Promise<Response>
 
-function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<string, Make>; applyThrows?: boolean; applyGate?: Promise<void>; enqueuedGate?: Promise<void> } = {}) {
+function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<string, Make>; applyThrows?: boolean; applyGate?: Promise<void>; enqueuedGate?: Promise<void>; listThrows?: number } = {}) {
   const log = {
     fetches: [] as string[],
     auth: [] as string[],
@@ -84,7 +84,13 @@ function harness(opts: { projects?: any[]; streams?: Make[]; details?: Record<st
   const details = opts.details ?? {}
   const ingest = createGsdcIngest({
     store: {
-      listEnabledProjects: async () => opts.projects ?? [],
+      listEnabledProjects: async () => {
+        if ((opts.listThrows ?? 0) > 0) {
+          opts.listThrows!--
+          throw new Error("db blip")
+        }
+        return opts.projects ?? []
+      },
       applyGsdcBoards: async (entries: any[], shouldCommit: () => boolean = () => true) => {
         if (opts.applyThrows) throw new Error('db down')
         if (opts.applyGate) await opts.applyGate
@@ -720,6 +726,26 @@ describe('review hardening (QC round 4)', () => {
     expect(h.ingest.failures).toBe(failuresBefore)
     expect(h.log.outages.length).toBe(1)
     expect(h.log.upserts).toEqual([])
+    h.ingest.stop()
+  })
+})
+
+describe('review hardening (QC round 6)', () => {
+  test('a failed recipient lookup does not suppress the outage notification: retried on the next failure, then sent once', async () => {
+    const h = harness({
+      projects: [project('pa', 'u1', 'github://acme/app')],
+      streams: [() => json({}, 503), () => json({}, 503), () => json({}, 503)],
+      listThrows: 1,
+    })
+    h.ingest.start()
+    await flush()
+    expect(h.log.outages).toEqual([]) // lookup failed: nothing delivered yet
+    h.reconnects().at(-1)!.fn()
+    await flush()
+    expect(h.log.outages).toEqual([{ userIds: ['u1'], signature: 'http_5xx' }])
+    h.reconnects().at(-1)!.fn()
+    await flush()
+    expect(h.log.outages.length).toBe(1) // delivered once, then silent for the rest of the outage
     h.ingest.stop()
   })
 })

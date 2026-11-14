@@ -169,8 +169,8 @@ export interface CorchStore {
    * CORCH-04: apply the derived gsd-console boards of ONE stream event in a single transaction (all or
    * nothing). Per entry: cancel QUEUED `gsd_console` items of that project whose source_ref is in `doneRefs`
    * (exact match; running, pr_open, done, blocked and already cancelled items are never touched), then upsert
-   * the candidate (ON CONFLICT DO NOTHING on (user_id, source, source_ref)). Returns the user ids that got
-   * a NEWLY created item. An entry whose project is no longer enabled (re-checked inside the transaction under a
+   * the candidate (ON CONFLICT DO NOTHING on (user_id, source, source_ref)). Returns the user ids that have
+   * a QUEUED candidate item after the call (new or already queued), so the caller re-evaluates them. An entry whose project is no longer enabled (re-checked inside the transaction under a
    * row lock that conflicts with updateProject) is skipped. `shouldCommit` is re-checked before each entry and
    * before the commit; false rolls everything back (throws).
    */
@@ -490,6 +490,14 @@ export const corchStore: CorchStore = {
             ON CONFLICT (user_id, source, source_ref) DO NOTHING
             RETURNING id`
           if (r.length > 0) created.add(e.userId)
+          else {
+            // Already known: still report the user when that item is waiting in the queue, so a lost evaluation
+            // trigger (a reconnect after a mid-processing abort) is re-fired by the fresh snapshot.
+            const known = await tx`
+              SELECT 1 FROM corch_work_items
+              WHERE user_id = ${e.userId} AND source = 'gsd_console' AND source_ref = ${e.candidate.sourceRef} AND status = 'queued'`
+            if (known.length > 0) created.add(e.userId)
+          }
         }
       }
       if (!shouldCommit()) throw new Error('gsdc_apply_cancelled')
