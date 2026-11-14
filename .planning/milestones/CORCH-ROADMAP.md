@@ -15,6 +15,7 @@ below is the panel's F6 order and is binding: one phase = one PR in one repo.
 - [ ] **CORCH-03** cug-hub-publisher (claude-usage-guard) - `hub_publish.rs` posts the snapshot (no email/label), default off
 - [ ] **CORCH-04** gsd-console-ingestion (remo-code hub) - SSE-triggered board reads become queued phase items, fail closed
 - [ ] **CORCH-05** aaf-provision-adoption (agentautofix) - `POST /api/projects/provision` + red-CI adoption of `corch/*` PRs by convention
+- [ ] **CORCH-05b** aaf-worker-corch-target (agentautofix) - worker `pr_followup` target check (prFollowup.ts:348, runFix.ts:1309) accepts adopted `corch/*` jobs; stacked on 05; must land before cutover item 4
 - [ ] **CORCH-06** aaf-event-outbox (agentautofix) - outbox + timestamped `signedPost` for `pr.merged|pr.closed|pr.failed`
 - [ ] **CORCH-07** aaf-quota-feed (agentautofix) - fixer reads the hub quota feed at claim time, fail closed
 - [ ] **CORCH-08** aaf-event-receiver-closure (remo-code hub) - HMAC receiver, closure transitions, provision on enrollment
@@ -34,7 +35,7 @@ below is the panel's F6 order and is binding: one phase = one PR in one repo.
 | 12 | remo-code (tests + docs) | CI; live proof after owner cutover items | Live proof on a throwaway repo only |
 | 13 | remo-code hub | Coolify hub deploy | Deletes flag-OFF code only (precondition verified live) |
 | 03 | claude-usage-guard | Signed release (Azure Trusted Signing during bundling) | None until `hub_publish_url` is configured |
-| 05, 06, 07 | agentautofix | AAF Coolify deploy | None until the AAF env in the cutover list is set |
+| 05, 05b, 06, 07 | agentautofix | AAF Coolify deploy | None until the AAF env in the cutover list is set |
 
 **Hard ordering constraints**
 
@@ -274,6 +275,15 @@ board API and SSE event shapes against gsd-console `origin/main`.
 
 **Not in this phase:** outbox (06), quota feed (07), the AAF stuck queue, the trusted auto-merge review exposure.
 
+### CORCH-05b -- aaf-worker-corch-target (agentautofix, AAF Coolify deploy)
+
+**Dir:** `.planning/phases/CORCH-05b-aaf-worker-corch-target/` (planning); code PR in agentautofix, stacked on the CORCH-05 branch (needs `corchAdoption.ts`).
+**Goal:** The AAF worker accepts adopted `corch/*` follow-up jobs: the `pr_followup` target check at `prFollowup.ts:348` and `runFix.ts:1309` currently refuses them, so an adopted red-CI job is created by 05 but never fixed.
+**Depends on:** CORCH-05. **Flags/env:** none new (adoption stays gated by `CORCH_TRUSTED_PR_AUTHORS`).
+**Success criteria:** vitest proves an adopted `corch/*` same-repo job passes the target check and non-adopted foreign targets are still refused; `pwsh scripts/preflight.ps1` exits 0.
+
+**Standing obligation (cross-PR):** whichever of #663 (05) / #664 (06) merges SECOND must add `enqueueCorchEvent(..., 'pr.failed')` in the `corchAdoption.ts` escalation path (06 provides the outbox, 05 provides the escalation). If both are on `main` and the call is absent, ship it as a small follow-up PR. Checked 2026-11-13: neither merged.
+
 ### CORCH-06 -- aaf-event-outbox (agentautofix, AAF Coolify deploy)
 
 **Dir:** `.planning/phases/CORCH-06-aaf-event-outbox/` (planning); code PR in agentautofix.
@@ -459,7 +469,7 @@ records done.
 | 1 | Mint hub key scope `quota:publish` (cookie-only `/api/api-keys`); configure CUG `hub_publish_url` + credential | 03 live, 12 | Key never printed; stored via Pass |
 | 2 | Mint hub key scope `quota:read` for AAF; set AAF `QUOTA_FEED_URL`, `QUOTA_FEED_TOKEN`, `QUOTA_FEED_ACCOUNT_ID` | 07 live, 12 | A11 mapping |
 | 3 | Shared event secret: AAF `CORCH_EVENT_URL` + `CORCH_EVENT_SECRET`, hub `REMO_CORCH_AAF_EVENT_SECRET` | 06/08 live, 12 | Same value both sides |
-| 4 | AAF `CORCH_TRUSTED_PR_AUTHORS` (machine-user login) | 05 live, 12 | Default empty = adoption off |
+| 4 | AAF `CORCH_TRUSTED_PR_AUTHORS` (machine-user login); PREREQUISITE: CORCH-05b merged and deployed (worker accepts adopted jobs) | 05 + 05b live, 12 | Default empty = adoption off |
 | 5 | AAF key with `projects:write`; hub `REMO_CORCH_AAF_URL`, `REMO_CORCH_AAF_TOKEN` | 08 live, 12 | |
 | 6 | gsd-console `gsdc_` `board:read` token mint (browser-only); hub `REMO_CORCH_GSDC_URL`, `REMO_CORCH_GSDC_TOKEN` | 04 live, 12 | |
 | 7 | Machine-user GitHub account creation, write access to enrolled repos, its git credential for slot containers | 09 live, 12 | 12b gate 4 per panel F5 |
