@@ -16,6 +16,7 @@ let settings = { corch_paused: false, corch_max_concurrent_runs: 1 }
 let itemStatus = 'queued'
 let triggers: string[] = []
 let published: string[] = []
+let released: string[] = []
 const calls: string[] = []
 
 const fakeStore = {
@@ -44,6 +45,7 @@ const deps = {
   provision: async (p: any) => p,
   queue: async () => SNAP as any,
   publish: (u: string) => void published.push(u),
+  releaseCancelled: async (a: { itemId: string }) => void released.push(a.itemId),
 }
 
 const savedFlag = process.env.REMO_CORCH_ENABLED
@@ -56,6 +58,7 @@ beforeEach(() => {
   itemStatus = 'queued'
   triggers = []
   published = []
+  released = []
   calls.length = 0
   delete process.env.REMO_CORCH_ENABLED
 })
@@ -147,6 +150,8 @@ describe('priority + cancel (R6.3)', () => {
     const ok = await a.request(`/api/corch/work-items/${ITEM}/cancel`, send('POST'))
     expect(ok.status).toBe(200)
     expect(published).toEqual(['u1'])
+    await tick()
+    expect(released).toEqual([ITEM])
     for (const st of ['running', 'pr_open', 'done', 'blocked', 'cancelled']) {
       itemStatus = st
       published = []
@@ -155,6 +160,7 @@ describe('priority + cancel (R6.3)', () => {
       expect((await r.json()).status).toBe(st)
       expect(published).toEqual([])
     }
+    expect(released).toEqual([ITEM]) // only the one successful cancel released anything
     expect((await a.request('/api/corch/work-items/bad/cancel', send('POST'))).status).toBe(404)
   })
 })

@@ -737,6 +737,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
       for (let n = 0; n < MAX_CLAIMS_PER_EVALUATION; n++) {
         const c = await deps.store.claimNext(userId, excluded)
         if (!c) break
+        deps.publishQueue?.(userId) // the committed claim is visible (and no longer cancellable) before slow workspace/launch work
         claimed++
         excluded.push(c.item.id)
         inFlight.add(c.item.id)
