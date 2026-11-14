@@ -23,7 +23,7 @@ refuses to start (exit 64) if any required one is missing and never prints a val
 | `REMO_HUB_URL` | yes | Hub origin, for example `https://app.remo-code.com` |
 | `REMO_API_KEY` | yes | This slot's own `purpose='host'` key (`POST /api/api-keys {host:true}`), written to a 0600 `supervisor.json` at start |
 | `CLAUDE_CODE_OAUTH_TOKEN` | yes | Exactly one account's subscription OAuth token; handed only to the spawned `claude` child. No API key is supported |
-| `GH_TOKEN` | optional | Git credential, wired through an in-memory credential helper (the supervisor already redacts this exact name from child output) scoped to `https://$REMO_GIT_HOST` (default `github.com`) only; nothing written to disk |
+| `GH_TOKEN` | yes for CORCH | Git credential (also used by `gh api` for `corch.pr_lookup`); without it clone, push and PR lookup fail, so a slot without it cannot complete work items. Wired through an in-memory credential helper (the supervisor already redacts this exact name from child output) scoped to `https://$REMO_GIT_HOST` (default `github.com`) only; nothing written to disk |
 
 Non-secret defaults baked in: `REMO_ROOTS=/data/work`, `REMO_SLOT_CLAUDE_CONFIG_DIR=/data/claude`,
 `REMO_CODE_CONFIG_DIR=/home/node/.config/remo-code`, `REMO_MAX_CONCURRENT=1`.
@@ -45,7 +45,7 @@ action: change the Coolify runtime secret and redeploy.
 ## Registration check
 
 1. Container log shows the supervisor connecting; no `[remo-slot] ... is required` line.
-2. `GET /api/supervisors` lists the host and its `account_slot` equals `REMO_ACCOUNT_SLOT`.
+2. `GET /api/supervisors` lists the host with `online: true` and its `account_slot` equals `REMO_ACCOUNT_SLOT` (read from the live hub registry; `null` when offline).
 3. `docker exec <c> id -u` is not 0; `docker history --no-trunc <image>` and `docker inspect <image>` contain no token.
 
 Local smoke (dummy values only): `docker build -f Dockerfile.slot -t remo-slot .` then run with

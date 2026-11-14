@@ -13,6 +13,12 @@ labels:
   platform: linux/amd64
 
 steps:
+  - name: slot-image-static-tests
+    image: oven/bun:latest
+    commands:
+      - bun install --frozen-lockfile
+      - bun test supervisor/test/corch-slot-image.test.ts
+
   - name: build-slot-image
     image: woodpeckerci/plugin-docker-buildx
     settings:
