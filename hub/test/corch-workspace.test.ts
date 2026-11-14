@@ -206,7 +206,7 @@ describe('R4.5 PR lookup', () => {
   test('targets the run\'s own supervisor + worktree path and sends only path and branch', async () => {
     const w = world({ prUrl: null })
     await lookup(w)
-    expect(w.frames).toEqual([{ command: 'corch.pr_lookup', args: [`${ROOT}/corch/app-item-1`, 'corch/item-1'], supervisorId: 'sup-1' }])
+    expect(w.frames).toEqual([{ command: 'corch.pr_lookup', args: [`${ROOT}/corch/app-item-1`, 'corch/item-1', 'github://acme/app'], supervisorId: 'sup-1' }])
   })
 
   test('a run with no supervisor or worktree is unavailable without a frame', async () => {

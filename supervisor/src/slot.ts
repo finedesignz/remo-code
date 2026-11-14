@@ -55,15 +55,21 @@ export function slotSpawnEnv(sanitized: NodeJS.ProcessEnv, processEnv: NodeJS.Pr
   return out
 }
 
-/** Deep copy of `value` with every occurrence of the exact `secret` string replaced. Non-string leaves pass through. */
-export function redactSecret<T>(value: T, secret: string): T {
-  if (!secret) return value
+/**
+ * Deep copy of `value` with every occurrence of any exact secret string replaced, in string values AND object keys.
+ * Best-effort backstop, not a boundary: it cannot see a secret split across separate events or re-encoded by the child.
+ * The real control is that no hub-held state ever contains the token and that the child's own env is the only holder.
+ */
+export function redactSecret<T>(value: T, secret: string | readonly string[]): T {
+  const secrets = (Array.isArray(secret) ? secret : [secret]).filter((x): x is string => typeof x === 'string' && x.length >= 8)
+  if (secrets.length === 0) return value
+  const scrub = (str: string): string => secrets.reduce((acc, sec) => (acc.includes(sec) ? acc.split(sec).join('[redacted]') : acc), str)
   const walk = (v: unknown): unknown => {
-    if (typeof v === 'string') return v.includes(secret) ? v.split(secret).join('[redacted]') : v
+    if (typeof v === 'string') return scrub(v)
     if (Array.isArray(v)) return v.map(walk)
     if (v && typeof v === 'object') {
       const out: Record<string, unknown> = {}
-      for (const [k, x] of Object.entries(v as Record<string, unknown>)) out[k] = walk(x)
+      for (const [k, x] of Object.entries(v as Record<string, unknown>)) out[scrub(k)] = walk(x)
       return out
     }
     return v

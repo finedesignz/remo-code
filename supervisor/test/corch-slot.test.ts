@@ -169,6 +169,11 @@ describe('QC hardening', () => {
     expect(out.n).toBe(5)
     expect((out.nested.a as any[])[1]).toBe(3)
     expect(redactSecret('plain', SENTINEL_TOKEN)).toBe('plain')
+    // several secrets (token + git credentials) and object KEYS
+    const multi = redactSecret({ [`k-${SENTINEL_TOKEN}`]: 'v ghp_SENTINEL_GIT_0001 w', n: [`${SENTINEL_TOKEN}`] }, [SENTINEL_TOKEN, 'ghp_SENTINEL_GIT_0001'])
+    const wire = JSON.stringify(multi)
+    expect(wire.includes(SENTINEL_TOKEN)).toBe(false)
+    expect(wire.includes('ghp_SENTINEL_GIT_0001')).toBe(false)
   })
 
   test('with the slot set, runner events that contain the token are redacted before the listener sees them', () => {
@@ -206,7 +211,7 @@ describe('corch.* replies carry no env value (R4.3)', () => {
       for (const [cmd, args] of [
         ['corch.worktree_ensure', ['github://o/n', 'item-1']],
         ['corch.worktree_remove', ['github://o/n', 'item-1']],
-        ['corch.pr_lookup', [tmpdir(), 'corch/item-1']],
+        ['corch.pr_lookup', [tmpdir(), 'corch/item-1', 'github://o/n']],
       ] as const) {
         const r = await getHandler(cmd)!([...args])
         const wire = JSON.stringify(r)

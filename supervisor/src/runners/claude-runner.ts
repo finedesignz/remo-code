@@ -181,8 +181,9 @@ export class ClaudeRunner implements CliRunner {
       // The slot token lives in the child's env by design (R4.2), so everything the child can print (stderr, tool
       // output, assistant text) is scrubbed of the exact token value BEFORE it can reach the hub.
       const inner = this.listener
-      const tok = env.CLAUDE_CODE_OAUTH_TOKEN
-      if (inner && tok) this.listener = (e) => inner(redactSecret(e, tok))
+      // The slot token plus the git credentials the slot keeps in env (all are secrets the child could print).
+      const secrets = [env.CLAUDE_CODE_OAUTH_TOKEN, env.GH_TOKEN, env.GITHUB_TOKEN].filter((x): x is string => !!x)
+      if (inner && secrets.length > 0) this.listener = (e) => inner(redactSecret(e, secrets))
     }
 
     if (this.orchestrator) {
