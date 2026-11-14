@@ -16,7 +16,7 @@
 
 import { gsdcConfig } from './flag.ts'
 import { BoardDetail, BoardSummary, deriveCandidate } from './gsdc-derive.ts'
-import type { CorchProject, CorchStore } from './store.ts'
+import type { CorchProject, CorchStore, GsdcApplyEntry } from './store.ts'
 import type { CorchTimers } from './dispatcher.ts'
 
 export const GSDC_BACKOFF_BASE_MS = 1000
@@ -26,22 +26,47 @@ export const GSDC_HEALTHY_STREAM_MS = 30000
 /** No bytes (events or keepalive comments) for this long => treat the stream as dead and reconnect. */
 export const GSDC_IDLE_TIMEOUT_MS = 3 * 60 * 1000
 const MAX_FRAME_BYTES = 2 * 1024 * 1024
+const MAX_BOARD_BYTES = 8 * 1024 * 1024
 
 export interface GsdcOutage {
   /** Enabled-project owners; the real notifier fans out to each. Never includes console text. */
   userIds: string[]
-  /** Stable error signature: unreachable | http_5xx | http_401 | http_402 | http_403 | http_<n> | stream_error | stream_error:<code> | stream_ended | bad_payload | token_unset | url_unset */
+  /** Stable error signature: unreachable | http_5xx | http_401 | http_402 | http_403 | http_<n> | stream_error | stream_error:<code> | stream_ended | bad_payload | apply_failed | token_unset | url_unset */
   signature: string
 }
 
 export interface GsdcDeps {
-  store: Pick<CorchStore, 'listEnabledProjects' | 'enqueueWorkItem' | 'cancelQueuedBySourceRefs'>
+  store: Pick<CorchStore, 'listEnabledProjects' | 'applyGsdcBoards'>
   fetch: (url: string, init: { headers: Record<string, string>; signal: AbortSignal }) => Promise<Response>
   timers: CorchTimers
   notifyOutage: (o: GsdcOutage) => Promise<void>
   /** A new item was queued for this user: evaluate now (event-driven). */
   onEnqueued: (userId: string) => Promise<void>
   now?: () => number
+}
+
+/** Read a JSON body with a hard byte cap (a hostile or broken console cannot make the hub buffer without bound). */
+async function readBoundedJson(res: Response): Promise<unknown> {
+  const declared = Number(res.headers.get('content-length') ?? '0')
+  if (declared > MAX_BOARD_BYTES || !res.body) throw new GsdcFailure('bad_payload')
+  const reader = res.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    for (;;) {
+      const { value, done } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > MAX_BOARD_BYTES) {
+        await reader.cancel().catch(() => {})
+        throw new GsdcFailure('bad_payload')
+      }
+      chunks.push(value)
+    }
+    return JSON.parse(new TextDecoder().decode(Buffer.concat(chunks)))
+  } catch (err) {
+    throw err instanceof GsdcFailure ? err : new GsdcFailure('bad_payload')
+  }
 }
 
 class GsdcFailure extends Error {
@@ -59,14 +84,21 @@ function httpSignature(status: number): string {
 }
 
 /** Parse SSE blocks from a byte stream; yields {event, data} per blank-line terminated block. */
-export async function* parseSse(body: ReadableStream<Uint8Array>): AsyncGenerator<{ event: string; data: string }> {
+export async function* parseSse(
+  body: ReadableStream<Uint8Array>,
+  onChunk: () => void = () => {},
+): AsyncGenerator<{ event: string; data: string }> {
   const reader = body.getReader()
   const dec = new TextDecoder()
   let buf = ''
   try {
     for (;;) {
       const { value, done } = await reader.read()
-      if (value) buf += dec.decode(value, { stream: !done }).replace(/\r\n/g, '\n')
+      if (value) {
+        onChunk() // any bytes, keepalive comments included, prove the stream is alive
+        // Normalize the WHOLE buffer: a CRLF split across two chunks must still collapse to one newline.
+        buf = (buf + dec.decode(value, { stream: !done })).replace(/\r\n/g, '\n')
+      }
       if (buf.length > MAX_FRAME_BYTES) throw new GsdcFailure('bad_payload')
       let i: number
       while ((i = buf.indexOf('\n\n')) >= 0) {
@@ -134,15 +166,17 @@ export function createGsdcIngest(deps: GsdcDeps) {
       throw new GsdcFailure('unreachable')
     }
     if (!res.ok) throw new GsdcFailure(httpSignature(res.status))
-    try {
-      return await res.json()
-    } catch {
-      throw new GsdcFailure('bad_payload')
-    }
+    return readBoundedJson(res)
   }
 
   /** Re-read the boards of the given summaries (enrolled only) and apply the result all-or-nothing. */
-  async function handleSummaries(summaries: BoardSummary[], base: string, token: string, signal: AbortSignal): Promise<void> {
+  async function handleSummaries(
+    summaries: BoardSummary[],
+    base: string,
+    token: string,
+    signal: AbortSignal,
+    alive: () => boolean,
+  ): Promise<void> {
     const enabled = await deps.store.listEnabledProjects()
     const byIdent = new Map<string, CorchProject[]>()
     for (const p of enabled) byIdent.set(p.repo_ident, [...(byIdent.get(p.repo_ident) ?? []), p])
@@ -159,26 +193,24 @@ export function createGsdcIngest(deps: GsdcDeps) {
       reads.push({ summary, projects, board: parsed.data })
     }
 
-    // Every read succeeded: apply.
-    const touched = new Set<string>()
+    // Every read succeeded: derive, then apply the whole event in ONE transaction. Nothing is written once the
+    // ingest was stopped or superseded while the reads were in flight.
+    const entries: GsdcApplyEntry[] = []
     for (const { summary, projects, board } of reads) {
-      const d = deriveCandidate(summary.slug, summary, board)
+      // Canonical (lowercase) slug, like the hub repo_ident: a case change in the console must not fork the identity.
+      const d = deriveCandidate(summary.slug.toLowerCase(), summary, board)
       if (d.kind === 'skip') continue
       for (const project of projects) {
-        await deps.store.cancelQueuedBySourceRefs(project.id, 'gsd_console', d.doneRefs)
-        if (d.candidate) {
-          const r = await deps.store.enqueueWorkItem({
-            userId: project.user_id,
-            projectId: project.id,
-            source: 'gsd_console',
-            sourceRef: d.candidate.sourceRef,
-            title: d.candidate.title,
-            body: d.candidate.body,
-            priority: project.priority,
-          })
-          if (r.created) touched.add(project.user_id)
-        }
+        entries.push({ projectId: project.id, userId: project.user_id, priority: project.priority, doneRefs: d.doneRefs, candidate: d.candidate })
       }
+    }
+    if (!alive()) return
+    let touched: string[]
+    try {
+      touched = await deps.store.applyGsdcBoards(entries)
+    } catch (err: any) {
+      console.error(`[corch.gsdc] apply failed: ${err?.message ?? err}`)
+      throw new GsdcFailure('apply_failed')
     }
     for (const userId of touched) {
       try {
@@ -222,8 +254,7 @@ export function createGsdcIngest(deps: GsdcDeps) {
 
       // Events are processed strictly in order.
       try {
-        for await (const ev of parseSse(res.body)) {
-          rearmIdle()
+        for await (const ev of parseSse(res.body, rearmIdle)) {
           if (stopped || gen !== generation) return
           if (ev.event === 'stream-error') {
             let code = ''
@@ -249,7 +280,7 @@ export function createGsdcIngest(deps: GsdcDeps) {
             if (!s.success) throw new GsdcFailure('bad_payload')
             summaries.push(s.data)
           }
-          await handleSummaries(summaries, cfg.baseUrl, cfg.token, ac.signal)
+          await handleSummaries(summaries, cfg.baseUrl, cfg.token, ac.signal, () => !stopped && gen === generation)
           if (ev.event === 'snapshot') gotSnapshot = true
           // A fully applied event ends any outage.
           outage = false
@@ -274,6 +305,7 @@ export function createGsdcIngest(deps: GsdcDeps) {
       arm(backoffMs(failures), gen)
     } finally {
       if (idle !== null) deps.timers.clearTimeout(idle)
+      ac.abort() // never leave a failed or finished SSE connection open (the console caps streams per account)
       if (abort === ac) abort = null
     }
   }
