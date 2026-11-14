@@ -131,6 +131,12 @@ export function createAafEventRoutes(deps: AafEventDeps = REAL_DEPS): Hono {
 
       if (result.kind === 'unchanged') return c.json({ ok: true, status: 'ignored' })
 
+      // Cancel the in-process send guard of the runs the closure ended BEFORE any notification I/O: a slow channel must
+      // not leave a window in which a send that already passed its liveness check can still reach the socket.
+      if (result.kind === 'transitioned' && result.endedRunIds.length > 0) {
+        await deps.cancelRunSends(result.endedRunIds).catch((err) => console.warn(`[corch] aaf cancel sends failed: ${err?.name ?? 'error'}`))
+      }
+
       // pr.failed owner notification: durable intent in corch_events, claimed atomically so exactly one delivery
       // owns it. A delivery failure releases the claim and answers 503 so the sender retries the SAME event_id;
       // that retry is a "duplicate" which still reaches this claim and re-attempts the notification.
@@ -158,9 +164,6 @@ export function createAafEventRoutes(deps: AafEventDeps = REAL_DEPS): Hono {
         notifyFailed = true
       }
 
-      if (result.kind === 'transitioned' && result.endedRunIds.length > 0) {
-        await deps.cancelRunSends(result.endedRunIds).catch((err) => console.warn(`[corch] aaf cancel sends failed: ${err?.name ?? 'error'}`))
-      }
       if (result.kind === 'transitioned' && corchEnabled()) {
         void deps.evaluate(result.userId).catch((err) => console.warn(`[corch] aaf evaluate trigger failed: ${err?.name ?? 'error'}`))
       }

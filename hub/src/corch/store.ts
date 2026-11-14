@@ -404,7 +404,9 @@ export const corchStore: CorchStore = {
     // A fresh claim held by another delivery means "not delivered yet" (the sender must retry), not "done".
     const cur = await sql<{ notify_state: string }[]>`
       SELECT notify_state FROM corch_events WHERE event_id = ${eventId}`
-    return cur[0]?.notify_state === 'sending' ? { kind: 'busy' } : { kind: 'none' }
+    // 'pending' here means a concurrent delivery claimed, failed and released between our UPDATE and this read: still
+    // not delivered, so it is unfinished too. Only 'none' (nothing owed) and 'sent' are done.
+    return cur[0]?.notify_state === 'sending' || cur[0]?.notify_state === 'pending' ? { kind: 'busy' } : { kind: 'none' }
   },
 
   async finishAafNotify(eventId, token, delivered) {

@@ -271,6 +271,24 @@ describe('POST /api/corch-events/aaf receiver', () => {
     expect(cancelled).toEqual(['run-1', 'run-2'])
   })
 
+  test('send guards are cancelled BEFORE notification I/O (a slow channel leaves no dispatch window)', async () => {
+    nextResult = { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'blocked', endedRunIds: ['run-9'] }
+    nextNotify = true
+    let cancelledAtNotify: string[] = []
+    const app = createAafEventRoutes({
+      ...deps(),
+      notifyFailed: async () => {
+        cancelledAtNotify = [...cancelled]
+        return true
+      },
+    } as any)
+    const b = bodyOf({ event: 'pr.failed' })
+    const ts = Math.floor(Date.now() / 1000)
+    const res = await app.request('/aaf', { method: 'POST', body: b, headers: { 'x-zeroexposure-timestamp': String(ts), 'x-zeroexposure-signature': sign(ts, b) } })
+    expect(res.status).toBe(200)
+    expect(cancelledAtNotify).toEqual(['run-9'])
+  })
+
   test('an undelivered (false) notification also answers 503 so the sender retries', async () => {
     nextResult = { kind: 'transitioned', userId: 'u1', workItemId: 'w1', to: 'blocked', endedRunIds: [] }
     nextNotify = true
