@@ -230,7 +230,7 @@ maybe('CORCH-02 e2e - quota ingest on real Postgres', () => {
       { supervisorId: 's-mid', accountSlot: 'mid', maxConcurrent: 1 },
     ])
     const r = await p.snapshotFor({ userId: u.userId, projectId: 'x', workItemId: runs[0]!.itemId, runId: runs[0]!.runId })
-    expect(r).toEqual({ ok: true, account_slot: 'lo', supervisor_id: null })
+    expect(r).toEqual({ ok: true, account_slot: 'lo', supervisor_id: 's-lo' })
     const row = (await h.sql`SELECT account_slot FROM corch_runs WHERE id = ${runs[0]!.runId}`)[0]!
     expect(row.account_slot).toBe('lo')
     // already holding an account: never moved

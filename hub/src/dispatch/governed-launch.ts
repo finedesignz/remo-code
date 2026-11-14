@@ -65,6 +65,12 @@ export interface GovernedLaunchArgs {
     rationale: (launch?: LaunchInfo) => string
   }
   preLaunch?: PreLaunchGovernor
+  /**
+   * CORCH-02 QC F5 (opt-in; heal and orchestrator omit it): resolved AFTER the gates pass (the quota gate records the
+   * run's account) and BEFORE the reservation / launch. ok => the launch targets exactly that supervisor; not ok =>
+   * refused with the reason, nothing reserved or launched.
+   */
+  resolveTarget?: () => Promise<{ ok: true; supervisorId: string } | { ok: false; reason: string }>
 }
 
 export interface GovernedLaunchDeps {
@@ -79,6 +85,7 @@ export interface GovernedLaunchDeps {
     sessionId: string
     machine: true
     skipPermissions?: false
+    targetSupervisorId?: string
   }) => Promise<LaunchResult>
   appendRunLog: (row: {
     session_id: string
@@ -142,6 +149,7 @@ export async function governedLaunch(
 
   // ── HEAL policy: gates + reservation + ledger ALL before the spawn (AM-F1-2/3) ──
   let reserved = false
+  let targetSupervisorId: string | undefined
   const releaseIfReserved = async (): Promise<void> => {
     if (!preLaunch || !reserved) return
     reserved = false
@@ -155,6 +163,12 @@ export async function governedLaunch(
   if (preLaunch) {
     const gateReason = await preLaunch.checkGates()
     if (gateReason) return { kind: 'refused', reason: gateReason }
+
+    if (args.resolveTarget) {
+      const t = await args.resolveTarget()
+      if (!t.ok) return { kind: 'refused', reason: t.reason }
+      targetSupervisorId = t.supervisorId
+    }
 
     const res = await preLaunch.reserve()
     if (!res.ok) return { kind: 'refused', reason: res.reason }
@@ -174,7 +188,7 @@ export async function governedLaunch(
     // HEAL policy spawns are triggered by untrusted text: never inherit the session's
     // dangerously_skip_permissions (machine-triggered spawns force it false). Legacy keeps the
     // session-derived value (orchestrator behaviour unchanged).
-    launch = await deps.launchSessionForUser({ userId, sessionId, machine: true, ...(preLaunch ? { skipPermissions: false as const } : {}) })
+    launch = await deps.launchSessionForUser({ userId, sessionId, machine: true, ...(preLaunch ? { skipPermissions: false as const } : {}), ...(targetSupervisorId ? { targetSupervisorId } : {}) })
   } catch (err) {
     await releaseIfReserved()
     return { kind: 'failed', reason: `autospawn_launch_threw: ${msg(err)}` }

@@ -93,7 +93,7 @@ describe('CORCH-R2.7 SC4: createQuotaProvider selection', () => {
   test('picks the lowest max(5h,7d), tie-break account_id ascending: b over c, a never', async () => {
     const f = fake({ rows: rows3(), supervisors: [sup('a'), sup('b'), sup('c')] })
     const r = await createQuotaProvider(f.deps).snapshotFor(A)
-    expect(r).toEqual({ ok: true, account_slot: 'b', supervisor_id: null })
+    expect(r).toEqual({ ok: true, account_slot: 'b', supervisor_id: 'sup-b' })
     expect(f.claims).toEqual([{ runId: 'r1', userId: 'u1', accountId: 'b', capacity: 1 }])
   })
 
@@ -145,7 +145,7 @@ describe('CORCH-R2.7 SC4: createQuotaProvider selection', () => {
   test("a run already carrying account_slot 'a' only considers a (never moved), and no second claim is made", async () => {
     const f = fake({ rows: rows3(), supervisors: [sup('a'), sup('b'), sup('c')] })
     const r = await createQuotaProvider(f.deps).snapshotFor({ ...A, accountSlot: 'a' })
-    expect(r).toEqual({ ok: true, account_slot: 'a', supervisor_id: null })
+    expect(r).toEqual({ ok: true, account_slot: 'a', supervisor_id: 'sup-a' })
     expect(f.claims.length).toBe(0)
   })
 
@@ -184,10 +184,22 @@ describe('CORCH-R2.7 SC4: createQuotaProvider selection', () => {
     expect(await createQuotaProvider(f.deps).snapshotFor(A)).toEqual({ ok: false, reason: 'quota:no_slot_supervisor' })
   })
 
+  test('F5: the selection carries the supervisor advertising the chosen account (lowest id on a tie); supervisorFor resolves it, null when none', async () => {
+    const f = fake({
+      rows: [row('a', { seven_d_pct: 30 }), row('b', { seven_d_pct: 10 })],
+      supervisors: [sup('b', 1, 'sup-b2'), sup('b', 1, 'sup-b1'), sup('a')],
+    })
+    const p = createQuotaProvider(f.deps)
+    expect(await p.snapshotFor(A)).toEqual({ ok: true, account_slot: 'b', supervisor_id: 'sup-b1' })
+    expect(await p.supervisorFor!('u1', 'a')).toBe('sup-a')
+    expect(await p.supervisorFor!('u1', 'b')).toBe('sup-b1')
+    expect(await p.supervisorFor!('u1', 'nobody')).toBeNull()
+  })
+
   test('without a runId nothing is claimed but a candidate is still chosen', async () => {
     const f = fake({ rows: [row('a')], supervisors: [sup('a')] })
     const r = await createQuotaProvider(f.deps).snapshotFor({ userId: 'u1', projectId: 'p1', workItemId: 'w1' })
-    expect(r).toEqual({ ok: true, account_slot: 'a', supervisor_id: null })
+    expect(r).toEqual({ ok: true, account_slot: 'a', supervisor_id: 'sup-a' })
     expect(f.claims.length).toBe(0)
   })
 })

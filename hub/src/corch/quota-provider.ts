@@ -3,7 +3,7 @@
 // CORCH-01 (LD-11): the quota seam. The default refuses, so no work item can launch (CORCH-R1.13).
 // CORCH-02 (LD-Q8, LD-Q9, LD-Q13): createQuotaProvider is the real provider used when REMO_CORCH_ENABLED
 // is on. It imports no DB module: everything is injected (realCorchDeps wires quota-store by dynamic import).
-// No supervisor targeting here (CORCH-09): success returns supervisor_id null.
+// F5: success carries the supervisor advertising the chosen account; supervisorFor re-resolves it at launch.
 
 import { evaluateAccounts, type QuotaAccountRow } from './quota-eligibility.ts'
 
@@ -21,6 +21,11 @@ export interface QuotaProvider {
   }): Promise<QuotaSnapshot>
   /** When an account can next become eligible; null when only an event can change it. */
   earliestEligibleAt?(userId: string): Promise<Date | null>
+  /**
+   * CORCH-02 QC F5: the online supervisor (lowest id) advertising `accountId`, or null when none does. The corch
+   * launch targets exactly this supervisor so the quota account that was checked is the one that runs.
+   */
+  supervisorFor?(userId: string, accountId: string): Promise<string | null>
   /**
    * Block an account after a quota death until its reset (CORCH-R2.5). Returns the resulting blocked_until
    * (null when only a newer reading can clear the block).
@@ -47,6 +52,13 @@ export interface QuotaProviderDeps {
   now(): Date
   ceilingPct(): number
   markDeath?(a: { userId: string; accountId: string; resetAt: Date | null; window?: '5h' | '7d' | null }): Promise<Date | null>
+}
+
+/** The deterministic supervisor for an account: lowest supervisorId among those advertising it. */
+function supervisorIdFor(supervisors: OnlineSlotSupervisor[], accountId: string): string | null {
+  let best: string | null = null
+  for (const s of supervisors) if (s.accountSlot === accountId && (best === null || s.supervisorId < best)) best = s.supervisorId
+  return best
 }
 
 export function createQuotaProvider(deps: QuotaProviderDeps): QuotaProvider {
@@ -89,7 +101,7 @@ export function createQuotaProvider(deps: QuotaProviderDeps): QuotaProvider {
         const ok = await deps.claimAccountSlot(a.runId, a.userId, pick.row.account_id, pick.capacity)
         if (!ok) return { ok: false, reason: 'quota:slot_taken' }
       }
-      return { ok: true, account_slot: pick.row.account_id, supervisor_id: null }
+      return { ok: true, account_slot: pick.row.account_id, supervisor_id: supervisorIdFor(supervisors, pick.row.account_id) }
     },
 
     async earliestEligibleAt(userId) {
@@ -106,6 +118,10 @@ export function createQuotaProvider(deps: QuotaProviderDeps): QuotaProvider {
         if (min === null || d.getTime() < min.getTime()) min = d
       }
       return min
+    },
+
+    async supervisorFor(userId, accountId) {
+      return supervisorIdFor(await deps.onlineSlotSupervisors(userId), accountId)
     },
 
     markDeath: deps.markDeath,

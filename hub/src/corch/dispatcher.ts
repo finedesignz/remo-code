@@ -506,6 +506,8 @@ export function createCorchDispatcher(deps: CorchDeps) {
     })
 
     const a = deps.launch
+    const supervisorFor = deps.quota.supervisorFor?.bind(deps.quota)
+    const UNBOUND = 'quota:supervisor_unbound'
     const launched = await governedLaunch(
       {
         userId,
@@ -524,6 +526,20 @@ export function createCorchDispatcher(deps: CorchDeps) {
             a.reserve({ userId, sessionId: ws.sessionId, ...lifetime, actor: CORCH_ACTOR, enforceRate: true }),
           release: () => releaseReservation(c),
         },
+        // F5: the quota gate recorded the run's account; launch on exactly the supervisor advertising it, or refuse
+        // (fail closed, no attempt). A provider without supervisorFor is the CORCH-01 seam (it cannot launch in prod).
+        resolveTarget: supervisorFor
+          ? async () => {
+              try {
+                const accountId = (await deps.store.runContext(run.id))?.run.account_slot ?? null
+                const supervisorId = accountId ? await supervisorFor(userId, accountId) : null
+                return supervisorId ? { ok: true as const, supervisorId } : { ok: false as const, reason: UNBOUND }
+              } catch (err) {
+                log(`supervisor binding failed run=${run.id}: ${errMsg(err)}`)
+                return { ok: false as const, reason: UNBOUND }
+              }
+            }
+          : undefined,
       },
       a,
     )
