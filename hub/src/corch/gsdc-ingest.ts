@@ -45,7 +45,10 @@ export interface GsdcDeps {
   store: Pick<CorchStore, 'listEnabledProjects' | 'applyGsdcBoards'>
   fetch: (url: string, init: { headers: Record<string, string>; signal: AbortSignal }) => Promise<Response>
   timers: CorchTimers
-  notifyOutage: (o: GsdcOutage) => Promise<void>
+  /** Resolves with the userIds the notice reached on a DURABLE channel (email/telegram); others are retried. */
+  notifyOutage: (o: GsdcOutage) => Promise<string[]>
+  /** One 7d ticket per error signature per outage (CORCH-R1.16). Fire-and-forget: must never throw into ingestion. */
+  reportTicket?: (signature: string) => void
   /** A new item was queued for this user: evaluate now (event-driven). */
   onEnqueued: (userId: string) => Promise<void>
   now?: () => number
@@ -139,6 +142,10 @@ export function createGsdcIngest(deps: GsdcDeps) {
   let outage = false
   /** True once the owner notification of the CURRENT outage was actually delivered (retried until it is). */
   let notified = false
+  /** Owners the current outage notice already reached durably (retries go to the rest only). */
+  const notifiedUsers = new Set<string>()
+  /** Signatures already ticketed during the current outage. */
+  const ticketed = new Set<string>()
   let generation = 0
 
   const clearTimer = () => {
@@ -149,14 +156,25 @@ export function createGsdcIngest(deps: GsdcDeps) {
   async function reportFailure(signature: string, gen: number): Promise<void> {
     failures++
     outage = true
+    if (gen === generation && !stopped && !ticketed.has(signature)) {
+      ticketed.add(signature)
+      try {
+        deps.reportTicket?.(signature)
+      } catch {
+        /* a ticket failure never affects ingestion */
+      }
+    }
     if (notified) return
     try {
       const users = [...new Set((await deps.store.listEnabledProjects()).map((p) => p.user_id))]
       // A stopped or superseded connection must neither send a stale notification nor flip shared state.
       if (stopped || gen !== generation) return
-      await deps.notifyOutage({ userIds: users, signature, isLive: () => !stopped && gen === generation })
+      const pending = users.filter((u) => !notifiedUsers.has(u))
+      const reached = await deps.notifyOutage({ userIds: pending, signature, isLive: () => !stopped && gen === generation })
       if (stopped || gen !== generation) return
-      notified = true // only after delivery: a failed recipient lookup is retried on the next failure of this outage
+      for (const u of reached) notifiedUsers.add(u)
+      // only after DURABLE delivery to every owner: any owner not reached is retried on the next failure of this outage
+      notified = users.every((u) => notifiedUsers.has(u))
     } catch (err: any) {
       console.error(`[corch.gsdc] outage notification failed: ${err?.message ?? err}`)
     }
@@ -307,6 +325,8 @@ export function createGsdcIngest(deps: GsdcDeps) {
           // A fully applied event ends any outage.
           outage = false
           notified = false
+          notifiedUsers.clear()
+          ticketed.clear()
           if (now() - startedAt >= GSDC_HEALTHY_STREAM_MS) failures = 0
         }
       } catch (err) {
