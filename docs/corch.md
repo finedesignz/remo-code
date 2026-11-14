@@ -485,3 +485,8 @@ Everything here is additive and works with `REMO_CORCH_ENABLED` OFF (the routes 
 
 Tests: hub `corch-queue.test.ts` (routes, publisher, lockstep, summary), real-Postgres `e2e/corch-queue.e2e.test.ts` (pause gates `claimNext`,
 priority order, cancel states, view); web `corch-queue-panel.test.tsx`, `no-indigo.test.ts`.
+
+CORCH-12 adds the real-Postgres `e2e/corch-full-loop.e2e.test.ts` (one flow through the real quota route, real
+provider, claim, launch, PR lookup and the signed AAF event route: happy path to `done` with the `event_id` recorded,
+death requeue, quota wait, `pr.closed` to `blocked`) and [corch-enable-runbook.md](corch-enable-runbook.md), the
+ordered owner-gated cutover list, live-proof procedure and the A8 permission-allowlist record.
