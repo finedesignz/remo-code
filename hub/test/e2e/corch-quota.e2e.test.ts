@@ -220,6 +220,21 @@ maybe('CORCH-02 e2e - quota ingest on real Postgres', () => {
     expect(Number((await read()).five_h_pct)).toBe(40)
   })
 
+  test('QC2 G2: a future-dated reading is a 400 and never stored, so a genuine live reading after a death still clears the block', async () => {
+    const u = await newUser()
+    await post(snapshot([acct('fut', { fetched_at: new Date(Date.now() - 60_000).toISOString() })]), u.publish)
+    const bad = await post(snapshot([acct('fut', { fetched_at: '2099-01-01T00:00:00Z' })]), u.publish)
+    expect(bad.status).toBe(400)
+    const stored = (await h.sql`SELECT fetched_at FROM corch_quota_accounts WHERE user_id = ${u.userId} AND account_id = 'fut'`)[0]!
+    expect(stored.fetched_at.getFullYear()).toBeLessThan(2099)
+    const { quotaStore } = await provider([])
+    await quotaStore.markDeath({ userId: u.userId, accountId: 'fut', resetAt: null })
+    await new Promise((r) => setTimeout(r, 20))
+    expect((await post(snapshot([acct('fut', { fetched_at: new Date(Date.now() + 5_000).toISOString() })]), u.publish)).status).toBe(200)
+    const cleared = await blockRow(u.userId, 'fut')
+    expect(cleared.blocked_until).toBeNull()
+  })
+
   test('the real provider picks the lowest account and records corch_runs.account_slot', async () => {
     const u = await newUser()
     await post(snapshot([acct('hi', { five_h_pct: 40, seven_d_pct: 30 }), acct('lo', { five_h_pct: 5, seven_d_pct: 10 }), acct('mid', { five_h_pct: 20, seven_d_pct: 20 })]), u.publish)

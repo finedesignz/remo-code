@@ -252,3 +252,32 @@ describe('CORCH-R2.3 LD-Q7: an invalid ceiling is a 500 on GET, never a silent d
     expect(await res.json()).toEqual({ error: 'quota_ceiling_invalid' })
   })
 })
+
+describe('CORCH-02 QC2 G2: a future-dated reading is rejected (400, no write)', () => {
+  // server clock in setup() is 2026-11-13T12:00:10Z; the allowed skew is 120s
+  test('fetched_at more than 120s ahead => 400 invalid_snapshot, nothing stored or evaluated; a normal reading after it is applied', async () => {
+    const { app, upserts, evaluated } = setup()
+    const bad = await post(app, 'remokey_publish', snap([acct('a'), acct('b', { fetched_at: '2099-01-01T00:00:00Z' })]))
+    expect(bad.status).toBe(400)
+    expect(await bad.json()).toEqual({ error: 'invalid_snapshot' })
+    expect(upserts.length).toBe(0)
+    expect(evaluated.length).toBe(0)
+    const ok = await post(app, 'remokey_publish', snap([acct('a')]))
+    expect(ok.status).toBe(200)
+    expect(upserts.length).toBe(1)
+  })
+
+  test('the boundary: exactly +120s is accepted, +121s is rejected; null fetched_at and past readings are unaffected', async () => {
+    const { app, upserts } = setup()
+    expect((await post(app, 'remokey_publish', snap([acct('a', { fetched_at: '2026-11-13T12:02:10Z' })]))).status).toBe(200)
+    expect((await post(app, 'remokey_publish', snap([acct('a', { fetched_at: '2026-11-13T12:02:11Z' })]))).status).toBe(400)
+    expect((await post(app, 'remokey_publish', snap([acct('a', { fetched_at: null }), acct('b', { fetched_at: '2020-01-01T00:00:00Z' })]))).status).toBe(200)
+    expect(upserts.length).toBe(2)
+  })
+
+  test('the top-level generated_at is bounded the same way', async () => {
+    const { app, upserts } = setup()
+    expect((await post(app, 'remokey_publish', snap([acct('a')], { generated_at: '2099-01-01T00:00:00Z' }))).status).toBe(400)
+    expect(upserts.length).toBe(0)
+  })
+})

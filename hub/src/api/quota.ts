@@ -21,6 +21,8 @@ import { evaluateAccounts, type QuotaAccountRow } from '../corch/quota-eligibili
 
 export const QUOTA_MAX_BODY_BYTES = 64 * 1024
 export const QUOTA_MAX_ACCOUNTS = 32
+/** QC2 G2: how far past server time a reading's fetched_at / the snapshot's generated_at may be. */
+export const QUOTA_MAX_FUTURE_SKEW_MS = 120_000
 
 const iso = z.string().datetime({ offset: true })
 const pct = z.number().finite().min(0).max(1000).nullable()
@@ -110,6 +112,14 @@ export function createQuotaRoutes(deps: QuotaRouteDeps) {
       }
       const parsed = SnapshotSchema.safeParse(json)
       if (!parsed.success) {
+        console.warn(`[quota] invalid_snapshot user=${key.user_id}`)
+        return c.json({ error: 'invalid_snapshot' }, 400)
+      }
+      // QC2 G2: a future-dated timestamp would pin the stored row ahead of every genuine later reading (the store
+      // rejects anything older than the stored fetched_at), so it is rejected outright. No write, no echo.
+      const limit = deps.now().getTime() + QUOTA_MAX_FUTURE_SKEW_MS
+      const stamps = [parsed.data.generated_at, ...parsed.data.accounts.map((a) => a.fetched_at)]
+      if (stamps.some((t) => t !== null && Date.parse(t) > limit)) {
         console.warn(`[quota] invalid_snapshot user=${key.user_id}`)
         return c.json({ error: 'invalid_snapshot' }, 400)
       }
