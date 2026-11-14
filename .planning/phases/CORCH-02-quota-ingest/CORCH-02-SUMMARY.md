@@ -118,3 +118,35 @@ None beyond the plan's threat model (new route `/api/quota/*` is T-CORCH02-01..0
 ## Self-Check: PASSED
 
 All 8 commit hashes exist on `phase-corch-02-quota-ingest`; created files exist; working tree clean after the Task 8 commit.
+
+## QC round 1 fixes
+
+Source: `QC-CODEX.md` (CONTENT BLOCK, 6 findings) and `QC-CLAUDE.md` (CONTENT BLOCK, 1 HIGH, 2 MED, 4 LOW). Locked fix spec F1-F7 from the orchestrator. Tests first (red), then fix, one commit per item.
+
+| Item | Finding | Commit | Test |
+|---|---|---|---|
+| F1 | Both seats HIGH: run text could block an account indefinitely. CUG is the single quota source: `markDeath` blocks `min(candidate reset, now + 5h or 7d)`; a live reading with `fetched_at > blocked_at` clears `blocked_until` and `blocked_at`. `blocked_at` is the death_at record (no new column). | `9c450ac` | `corch-quota.e2e` F1 x3 (far-future epoch clamps; older / non-live reading does not clear, newer live clears; death at low usage cleared by next reading, GET eligible again) |
+| F2 | Codex #5: a later death shortened an existing block. `GREATEST(existing, new)`. | `2a3e396` | `corch-quota.e2e` F2 (both orders) |
+| F3 | Codex #4: failed `runContext`/`markDeath` allowed immediate redispatch. Requeue with `not_before = now + 5h`, log without content. | `781c455` | `corch-quota-death` F3 x2 (throwing markDeath, throwing runContext) |
+| F4 | Both seats: claim write-skew race. `claimAccountSlot` runs in one tx behind `pg_advisory_xact_lock(hashtext(user:account))`. | `2bce816` | `corch-quota.e2e` F4: claim blocks behind the held lock (deterministic, red before fix); 5 concurrent claims, capacity 1, exactly one wins |
+| F5 | Codex HIGH #2: account not bound to launch. Selection carries `supervisor_id`; new `QuotaProvider.supervisorFor`; `governedLaunch` opt-in `resolveTarget` -> `launchSessionForUser` opt-in `targetSupervisorId` (corch only); no binding -> `quota:supervisor_unbound` (no attempt, no reservation). | `4f98be1`, `8bdb9ac` (e2e fixture) | `corch-quota-binding` (6: A->A's supervisor, B->B's, no match / no account / lookup throws -> refusal, seam provider untargeted, governedLaunch opt-in), `corch-quota-selection` F5, `launch-machine-guard` x3 (target overrides hostname pick; foreign target refused; no target unchanged) |
+| F6 | Codex MED #6: GET eligibility ignored busy counts. Route store dep `liveRunsByAccount`. | `e5e0eed` | `corch-quota-ingest` F6 |
+| F7 | Claude LOW #6: replayed older reading overwrote a newer one. Upsert `WHERE fetched_at IS NULL OR EXCLUDED.fetched_at IS NULL OR EXCLUDED.fetched_at >= stored`. | `9a4c442` | `corch-quota.e2e` F7 (older ignored incl. `received_at`; equal and newer applied) |
+
+Docs: `docs/corch.md` updated for F1-F7 semantics (committed with this section).
+
+### Deviations
+
+- F5: `resolveTarget` runs inside the HEAL pre-launch block, after the gates (the quota gate records the run's account) and before the reservation and ledger row, so a refusal reserves nothing. A quota provider without `supervisorFor` (the CORCH-01 seam fakes and `DEFAULT_QUOTA_PROVIDER`, which already refuses at the gate) launches untargeted; the real `createQuotaProvider` always defines it. The target is resolved from the run's recorded `account_slot` at launch time, not carried through the gate result (the gate list returns only a refusal reason).
+- F1: no new `death_at` column (additive DDL avoided): `blocked_at` already records the death instant. Existing e2e tests that pinned the old semantics (NULL-until block; time-bounded block not cleared by a newer snapshot) were rewritten to the new rules.
+- One commit (`4f98be1`) was made with a failing e2e fixture (the chained command did not stop on the failing test); `8bdb9ac` fixes the fixture immediately after. The product code was correct.
+
+### Follow-ups left (Claude LOW, as instructed)
+
+- LOW 4: clear relies on publisher-supplied `fetched_at` (skewed/replayed value greater than `blocked_at` clears a block); consider received_at ordering or monotonic `generated_at`.
+- LOW 5: unbounded `corch_quota_accounts` row growth per user (free-form `account_id`, never pruned).
+- LOW 7: POST/GET `/api/quota/snapshot` and the DDL are live with the flag OFF (data stored, nothing dispatched); rate-limit key uses the first 24 chars of Authorization.
+
+### Final checks (fresh DBs on 127.0.0.1:55432, CI-equivalent env, each file in its own bun process)
+
+All corch unit files (boot-assert 15, flag-off 5, gates 58, no-polling-guard 2, prompt 3, quota-binding 6, quota-death 16, quota-eligibility 37, quota-ingest 29, quota-selection 23, quota-wait 14, routes 13), guards (kill-switch-coverage 10, token-cap-coverage 7, counter-key-assignment-guard 9, launch-callers-guard 12, launch-machine-guard 11, api-keys-scopes 37, mount-order 29) and e2e (corch-quota 17, corch-dispatcher 28) pass with 0 fail. `check-baseline` (CI env, fresh DB) OK: pass=4043 skip=0 fail=0. Typecheck 253 errors (limit 253; no new). `schema-lint` OK (5 allowed, none new). `docs:sync` not run: no route or OpenAPI shape changed.

@@ -39,9 +39,10 @@ combinations boot.
   `(user_id, account_id)`. Columns: `slot`, `five_h_pct`, `seven_d_pct` (NUMERIC, NULL = unknown), `resets_5h`,
   `resets_7d`, `fetched_at`, `source`, `enabled`, `cug_blocked`, `received_at` (hub clock, set on every POST) and
   the hub-owned `blocked_until` / `blocked_at` (quota death). **No email or label column exists, ever.** Upsert
-  rules: every CUG field and `received_at` are overwritten per POST; `blocked_until` is preserved; a block with
-  `blocked_at` set and `blocked_until` NULL clears only when the incoming `fetched_at` is later than `blocked_at`;
-  a time-bounded block is never cleared by a snapshot. Rows for accounts absent from later POSTs are kept and age
+  rules: every CUG field and `received_at` are overwritten per POST, except that a reading whose `fetched_at` is OLDER
+  than the stored one is ignored entirely (replay / out-of-order); a quota-death block (`blocked_until` / `blocked_at`)
+  is cleared by the next `source = 'live'` reading whose `fetched_at` is later than `blocked_at`, because CUG is the
+  single quota source and the death text is only run output. Rows for accounts absent from later POSTs are kept and age
   out through the staleness rules (fail closed). `user_id` always comes from the verified key.
 
 ## Routes
@@ -211,8 +212,12 @@ account). It picks the lowest `max(5h ?? 7d, 7d)`, tie-break `account_id` ascend
 `corch_runs.account_slot` with one conditional `UPDATE` (refusal `quota:slot_taken` if the account filled meanwhile).
 A run that already holds an account is never moved. A hello without `account_slot` is never a target. No candidate:
 the shared reason when every account has the same one, `quota:no_slot_supervisor` when accounts are eligible but none
-has an online slot supervisor with a free slot, else `quota:no_eligible_account`. **No supervisor targeting until
-CORCH-09**: the provider returns `supervisor_id: null`.
+has an online slot supervisor with a free slot, else `quota:no_eligible_account`. The claim is serialized per
+`(user_id, account_id)` by a transaction advisory lock. The selection carries `supervisor_id` (the lowest-id online
+supervisor advertising the account) and the corch launch targets exactly that supervisor (`governedLaunch`
+`resolveTarget` -> `launchSessionForUser` `targetSupervisorId`, corch only); with no supervisor for the run's account
+the item is refused `quota:supervisor_unbound` (no attempt). `GET /api/quota/snapshot` evaluates eligibility with the
+same live per-account busy counts as dispatch.
 
 **Wait.** A `quota:` refusal requeues the item with `wait_reason = quota:<reason>`, no attempt consumed, and
 `not_before` = the earliest time any account can become eligible when EVERY ineligible account carries one, else NULL
@@ -222,8 +227,11 @@ CORCH-09**: the provider returns `supervisor_id: null`.
 **Quota death (R2.5).** A run whose end text (`onFinalize` content or `markFailed` error) is, as a whole, the CLI
 usage-limit signal (`hub/src/corch/quota-death.ts`: the legacy `Claude AI usage limit reached|<epoch>` or the
 current `You've hit your session|weekly|Opus|Sonnet limit ...`, at most 500 chars) marks its account
-`blocked_at = now()`, `blocked_until` = the signal's reset, else that window's reset from the reading, else the
-earliest future reset, else NULL; the item is requeued with `end_reason quota_death`, `wait_reason quota:death`, no
+`blocked_at = now()` and `blocked_until = min(candidate reset, now + cap)`, where the candidate is the signal's reset
+when in the future, else that window's reset from the reading, else the earliest future reset, and the cap is 7 days
+for the weekly window and 5 hours otherwise (a far-future or past epoch therefore clamps; text can never block an
+account indefinitely). A later death keeps the later `blocked_until`. If the account cannot be identified or the block
+cannot be written, the item is held 5 hours (`not_before = now + 5h`), never redispatched at once. The item is requeued with `end_reason quota_death`, `wait_reason quota:death`, no
 attempt, and the PR lookup is skipped. A long assistant message that merely mentions a limit is not a death. Known
 limit: the supervisor relays a whole turn's text, so a run that wrote prose and then hit the limit does not match
 the whole-text anchor and follows the CORCH-01 `no_pr` path (fail-safe direction). Details and evidence:
