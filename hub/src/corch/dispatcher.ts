@@ -542,7 +542,11 @@ export function createCorchDispatcher(deps: CorchDeps) {
               try {
                 const accountId = (await deps.store.runContext(run.id))?.run.account_slot ?? null
                 const supervisorId = accountId ? await supervisorFor(userId, accountId) : null
-                return supervisorId ? { ok: true as const, supervisorId } : { ok: false as const, reason: UNBOUND }
+                if (!accountId || !supervisorId) return { ok: false as const, reason: UNBOUND }
+                // QC2 G3: re-read the target's CURRENT advertised account (null = not connected) and require it to be
+                // the run's recorded account, so a reconnect advertising another account is never launched on.
+                const current = await deps.quota.supervisorAccountSlot?.(userId, supervisorId)
+                return current === accountId ? { ok: true as const, supervisorId } : { ok: false as const, reason: UNBOUND }
               } catch (err) {
                 log(`supervisor binding failed run=${run.id}: ${errMsg(err)}`)
                 return { ok: false as const, reason: UNBOUND }

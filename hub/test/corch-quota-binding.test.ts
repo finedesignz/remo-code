@@ -13,7 +13,7 @@ afterEach(() => {
   else process.env.REMO_CORCH_ENABLED = savedFlag
 })
 
-function world(opts: { accountSlot: string | null; supervisorFor?: (u: string, a: string) => Promise<string | null> }) {
+function world(opts: { accountSlot: string | null; supervisorFor?: (u: string, a: string) => Promise<string | null>; supervisorAccountSlot?: (u: string, s: string) => Promise<string | null> }) {
   const ends: any[] = []
   const launches: any[] = []
   const dispatched: any[] = []
@@ -47,6 +47,7 @@ function world(opts: { accountSlot: string | null; supervisorFor?: (u: string, a
     snapshotFor: async () => ({ ok: true, account_slot: opts.accountSlot, supervisor_id: null }),
     earliestEligibleAt: async () => null,
     supervisorFor: opts.supervisorFor,
+    supervisorAccountSlot: opts.supervisorAccountSlot ?? (opts.supervisorFor ? current : undefined),
   }
   const deps: any = {
     store, workspace: { resolve: async () => ({ ok: true, sessionId: 's1', worktreePath: 'C:/wt/app' }) }, launch,
@@ -59,6 +60,8 @@ function world(opts: { accountSlot: string | null; supervisorFor?: (u: string, a
 
 const SUPS: Record<string, string> = { acct_a: 'sup-A', acct_b: 'sup-B' }
 const lookup = async (_u: string, a: string) => SUPS[a] ?? null
+// the registry's CURRENT advertised account for a connected supervisor (the reverse of SUPS); null = not connected
+const current = async (_u: string, s: string) => Object.keys(SUPS).find((k) => SUPS[k] === s) ?? null
 
 describe('CORCH-02 QC F5: account bound to the launch supervisor', () => {
   test('selected account A launches only on A supervisor; selected B only on B (two-supervisor mismatch cannot happen)', async () => {
@@ -91,6 +94,44 @@ describe('CORCH-02 QC F5: account bound to the launch supervisor', () => {
       expect(w.launches.length).toBe(0)
       expect(w.ends[0]).toMatchObject({ endReason: 'quota:supervisor_unbound', consumeAttempt: false })
     }
+  })
+
+  test('QC2 G3: the supervisor reconnects advertising a different account between selection and launch => quota:supervisor_unbound, nothing launches, no attempt', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    // selection resolved acct_a -> sup-A; by launch the registry says sup-A now advertises acct_b
+    const w = world({ accountSlot: 'acct_a', supervisorFor: lookup, supervisorAccountSlot: async () => 'acct_b' })
+    await createCorchDispatcher(w.deps).evaluateUser('u1')
+    expect(w.launches.length).toBe(0)
+    expect(w.dispatched.length).toBe(0)
+    expect(w.ends[0]).toMatchObject({ endReason: 'quota:supervisor_unbound', consumeAttempt: false, waitReason: 'quota:supervisor_unbound' })
+  })
+
+  test('QC2 G3: the target supervisor is no longer connected (no current slot) => the same refusal', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const w = world({ accountSlot: 'acct_a', supervisorFor: lookup, supervisorAccountSlot: async () => null })
+    await createCorchDispatcher(w.deps).evaluateUser('u1')
+    expect(w.launches.length).toBe(0)
+    expect(w.ends[0]).toMatchObject({ endReason: 'quota:supervisor_unbound', consumeAttempt: false })
+  })
+
+  test('QC2 G3: the registry re-read throwing, or a provider that can resolve but not re-read, fails closed', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    for (const w of [
+      world({ accountSlot: 'acct_a', supervisorFor: lookup, supervisorAccountSlot: async () => { throw new Error('boom') } }),
+      (() => { const x = world({ accountSlot: 'acct_a', supervisorFor: lookup }); delete x.deps.quota.supervisorAccountSlot; return x })(),
+    ]) {
+      await createCorchDispatcher(w.deps).evaluateUser('u1')
+      expect(w.launches.length).toBe(0)
+      expect(w.ends[0]).toMatchObject({ endReason: 'quota:supervisor_unbound', consumeAttempt: false })
+    }
+  })
+
+  test('QC2 G3: the target still advertises the run account => launches targeted (the matching case)', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const w = world({ accountSlot: 'acct_b', supervisorFor: lookup, supervisorAccountSlot: async (_u, s) => (s === 'sup-B' ? 'acct_b' : null) })
+    await createCorchDispatcher(w.deps).evaluateUser('u1')
+    expect(w.launches.length).toBe(1)
+    expect(w.launches[0]).toMatchObject({ targetSupervisorId: 'sup-B' })
   })
 
   test('a provider without supervisorFor (the CORCH-01 seam fakes) launches untargeted, unchanged', async () => {

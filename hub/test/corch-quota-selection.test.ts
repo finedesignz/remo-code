@@ -196,6 +196,13 @@ describe('CORCH-R2.7 SC4: createQuotaProvider selection', () => {
     expect(await p.supervisorFor!('u1', 'nobody')).toBeNull()
   })
 
+  test('QC2 G3: supervisorAccountSlot reads the registry at call time: the current account, null when the supervisor is not connected', async () => {
+    const f = fake({ rows: [row('a'), row('b')], supervisors: [sup('a', 1, 'sup-a')] })
+    const p = createQuotaProvider(f.deps)
+    expect(await p.supervisorAccountSlot!('u1', 'sup-a')).toBe('a')
+    expect(await p.supervisorAccountSlot!('u1', 'sup-gone')).toBeNull()
+  })
+
   test('without a runId nothing is claimed but a candidate is still chosen', async () => {
     const f = fake({ rows: [row('a')], supervisors: [sup('a')] })
     const r = await createQuotaProvider(f.deps).snapshotFor({ userId: 'u1', projectId: 'p1', workItemId: 'w1' })

@@ -27,6 +27,11 @@ export interface QuotaProvider {
    */
   supervisorFor?(userId: string, accountId: string): Promise<string | null>
   /**
+   * CORCH-02 QC2 G3: the account `supervisorId` CURRENTLY advertises in the registry, or null when it is not
+   * connected (or advertises none). Re-read at launch so a reconnect under another account is detected.
+   */
+  supervisorAccountSlot?(userId: string, supervisorId: string): Promise<string | null>
+  /**
    * Block an account after a quota death until its reset (CORCH-R2.5). Returns the resulting blocked_until
    * (null when only a newer reading can clear the block).
    */
@@ -122,6 +127,10 @@ export function createQuotaProvider(deps: QuotaProviderDeps): QuotaProvider {
 
     async supervisorFor(userId, accountId) {
       return supervisorIdFor(await deps.onlineSlotSupervisors(userId), accountId)
+    },
+
+    async supervisorAccountSlot(userId, supervisorId) {
+      return (await deps.onlineSlotSupervisors(userId)).find((s) => s.supervisorId === supervisorId)?.accountSlot ?? null
     },
 
     markDeath: deps.markDeath,
