@@ -290,3 +290,24 @@ describe('Telegram /queue (R6.4)', () => {
     expect(text).toContain('Blocked: 300')
   })
 })
+
+describe('publish points outside evaluation (QC R2)', () => {
+  test('a stalled run confirmed alive by fresh inventory publishes the owner queue (reconciler)', async () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    const { reconcilePass } = await import('../src/corch/reconciler.ts')
+    const pubs: string[] = []
+    const run = { id: 'r1', work_item_id: 'i1', user_id: 'u9', session_id: 's1', supervisor_id: 'sup', status: 'stalled', heartbeat_at: new Date(), started_at: new Date() }
+    const deps: any = {
+      store: { liveRunsPage: async () => [run], touchHeartbeat: async () => {} },
+      inventory: { forSupervisor: () => ({ fresh: true, sessionIds: new Set(['s1']) }), forUser: () => ({ fresh: false, sessionIds: new Set() }) },
+      workspace: {},
+      publishQueue: (u: string) => void pubs.push(u),
+    }
+    await reconcilePass(deps, { inFlight: new Set() } as any)
+    expect(pubs).toEqual(['u9'])
+    // a run that was already running does not publish
+    pubs.length = 0
+    await reconcilePass({ ...deps, store: { ...deps.store, liveRunsPage: async () => [{ ...run, status: 'running' }] } }, { inFlight: new Set() } as any)
+    expect(pubs).toEqual([])
+  })
+})

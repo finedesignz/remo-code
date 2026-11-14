@@ -64,6 +64,9 @@ export function startGsdcIngest(): void {
     onCancelled: async (items) => {
       const { releaseWorkItemNow } = await import('./dispatcher.ts')
       for (const i of items) await releaseWorkItemNow({ userId: i.userId, itemId: i.itemId, status: 'cancelled' })
+      // CORCH-11: a cancellation-only update triggers no evaluation, so push the owner's queue explicitly.
+      const { publishCorchQueue } = await import('./queue-view.ts')
+      for (const uid of new Set(items.map((i) => i.userId))) void publishCorchQueue(uid)
     },
   })
   current.start()

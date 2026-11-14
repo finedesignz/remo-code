@@ -62,6 +62,8 @@ export async function reconcilePass(deps: CorchDeps, d: CorchDispatcher): Promis
       else await d.stallRun(run)
     }
     if (alive.length > 0) await deps.store.touchHeartbeat(alive)
+    // CORCH-11: touchHeartbeat turns a stalled run back into running; the owner's panel must see the recovery.
+    for (const uid of new Set(aliveRuns.filter((r) => r.status === 'stalled').map((r) => r.user_id))) deps.publishQueue?.(uid)
     // CORCH-09 (R3.8): the memlog claim is heartbeated from the same liveness signal. Best effort, never throws.
     for (const run of aliveRuns) await deps.workspace.heartbeat?.({ itemId: run.work_item_id, repoIdent: run.repo_ident }).catch(() => {})
     // Items waiting on their PR have no live run but still hold their claim until AAF closes them.

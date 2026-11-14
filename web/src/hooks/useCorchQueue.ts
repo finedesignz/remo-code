@@ -67,7 +67,7 @@ export interface CorchQueueActions {
   cancel(itemId: string): Promise<void>
 }
 
-export function useCorchQueue(token: string, subscribe: Subscribe): {
+export function useCorchQueue(token: string, subscribe: Subscribe, connectionId: number): {
   queue: CorchQueue | null
   error: string | null
   actions: CorchQueueActions
@@ -75,8 +75,9 @@ export function useCorchQueue(token: string, subscribe: Subscribe): {
   const [queue, setQueue] = useState<CorchQueue | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  // One read for the first paint and one after each authenticated (re)connect: events missed while the socket was
-  // down are not replayed. Both are driven by events, never a timer. A fetched snapshot never replaces a newer one.
+  // One read for the first paint and one after each authenticated (re)connect (`connectionId` bumps on every
+  // auth_ok): events missed while the socket was down are not replayed. Both are driven by events, never a timer.
+  // A fetched snapshot never replaces a newer one.
   const load = useCallback(() => {
     hubFetch<CorchQueue>(token, '/api/corch/queue')
       .then((q) => setQueue((cur) => (cur && cur.generated_at > q.generated_at ? cur : q)))
@@ -85,22 +86,18 @@ export function useCorchQueue(token: string, subscribe: Subscribe): {
 
   useEffect(() => {
     load()
-  }, [load])
+  }, [load, connectionId])
 
   useEffect(
     () =>
       subscribe((msg) => {
-        if (msg?.type === 'auth_ok') {
-          load()
-          return
-        }
         const q = reduceCorchQueue(msg)
         if (q) {
           setQueue(q)
           setError(null)
         }
       }),
-    [subscribe, load],
+    [subscribe],
   )
 
   const run = useCallback(
