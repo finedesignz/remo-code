@@ -70,6 +70,7 @@ import { startOnceDueSweep, stopOnceDueSweep } from './scheduler/once-due-sweep.
 import { startRevanoteStallSweep, stopRevanoteStallSweep } from './revanote/stall-alert.ts'
 import { healUnifiedEnabled } from './heal/config.ts'
 import { assertTokenCapConfig } from './dispatch/gates.ts'
+import { assertCorchConfig } from './corch/flag.ts'
 import { assertAutomationControlsEnv, assertAutomationControlsTables } from './dispatch/automation-controls.ts'
 import { registerTokenCapAlarm } from './observability/token-cap-alarm.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
@@ -553,6 +554,7 @@ if (config.titaniumBypass) {
 // REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1 says otherwise on purpose.
 try {
   assertTokenCapConfig()
+  assertCorchConfig() // CORCH-R1.3: refuse boot when both CORCH and the old orchestrator are enabled
 } catch (err: any) {
   console.error(`[startup] FATAL: ${err?.message ?? err}`)
   process.exit(1)
