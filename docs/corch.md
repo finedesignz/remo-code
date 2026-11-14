@@ -257,6 +257,49 @@ upsert: any genuine reading overwrites it, so it cannot reject later readings or
 - Publisher-declared source trust: `source: live` and `fetched_at > blocked_at` are publisher-supplied and clear a
   death block. Only a holder of a `quota:publish` key can do this, and only for that key owner's own user.
 
+## gsd-console ingestion (CORCH-04)
+
+Source: the gsd-console board (`GET /api/board/stream` SSE, `GET /api/board/projects/{id}`), read with a `gsdc_`
+Bearer token that has scope `board:read`. Code: `hub/src/corch/gsdc-derive.ts` (pure derivation),
+`gsdc-ingest.ts` (SSE client, backoff, fail-closed apply), `gsdc-boot.ts` (wiring, started from `startCorch`).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `REMO_CORCH_GSDC_URL` | unset | gsd-console origin. |
+| `REMO_CORCH_GSDC_TOKEN` | unset | `gsdc_` token, `board:read`. Read only to build one `Authorization` header; never logged, stored or put in a notification. Minting it is a browser-only cutover step, not part of this phase. |
+
+Both unset (or `REMO_CORCH_ENABLED` OFF) = source off: no connection, no timer, no store access. Exactly one of the
+two set = misconfiguration: no connection, one owner notification (`token_unset` / `url_unset`), no retry.
+
+**Flow.** On `snapshot` (data `{projects: Summary[]}`) and `project` (data `Summary`) the hub re-reads the board of
+every summary whose console slug `owner/name` equals an ENABLED hub project `github://owner/name` (case-insensitive).
+Other projects are never read. A summary with `active_runs > 0`, `stale` or `divergent` is skipped before any read.
+The stream is closed by the console after 10 minutes: the hub reconnects and takes a fresh snapshot. There is no
+timer polling of the board; the only timers are one reconnect timeout (and one inactivity timeout) per stream,
+re-armed through the injected `CorchTimers` seam, never a loop (`corch-no-polling-guard`).
+
+**Derivation (R1.15).** Candidate = the `current` phase, else the lowest-numbered `pending` phase (numeric dotted
+order); `backlog` (999.x) is never a candidate. Upsert as source `gsd_console`, `source_ref =
+<owner/name>:<milestone>:<phase>` where milestone is `position.milestone.version`, else its heading, else `none`;
+`title` = `Phase <n>: <name>`, `body` = the phase goal, `priority` = the project's priority. The unique index
+`(user_id, source, source_ref)` makes the upsert idempotent. A QUEUED `gsd_console` item whose phase the console now
+reports in `done` is cancelled; the whole event (every enrolled board of it: cancellations then upserts) is written by ONE transaction, `store.applyGsdcBoards`, and `claimNext` now locks its candidate row (`FOR UPDATE OF i`) so a concurrent cancel can never be overwritten back to `running`; running, `pr_open`, done, blocked and manual/other-source
+items are never touched. A board whose snapshot is not `ready` or is stale is skipped (no upsert, no cancel).
+Mirrored text is stored as data and reaches a prompt only through `fenceUntrusted` (`prompt.ts`). No supervisor
+`.planning/` read, no auto-enrollment.
+
+**Fail closed (R1.16).** Unreachable, 5xx, 401/402/403 (and any other non-2xx), a `stream-error` event, a stream
+that ends before a snapshot, an unparseable or schema-failing frame, or a failing board read all yield ZERO upserts
+and ZERO cancellations: a snapshot is applied all-or-nothing (every enrolled board is read first; a single failed
+read discards the whole snapshot). Already-queued items are unaffected. One owner notification per outage
+(`fanOutNotify` over the durable channels email and telegram only, detail = the error signature only, to every user with an enabled project; an owner counts as notified only when email or telegram reported success, the in-app socket broadcast persists nothing and never counts, and an owner not yet reached is retried alone on the next failure of the same outage); one AgentAutofix ticket per distinct error signature per outage through `hub/src/agentautofix/reporter.ts` (`reportTriageFindingToAgentautofix`, immediate and unthrottled, retried on the next failure until a positive result) (fingerprint `corch-gsdc:<signature>`, signature only, no console text or token; sends nothing when AgentAutofix is unconfigured; a ticket failure never affects ingestion); an outage ends at the
+next fully applied event. Reconnect after an error uses bounded exponential backoff, 1s doubling to a 5 minute cap;
+a stream that stayed up at least 30s resets the ladder, and a stream that ends right after its snapshot is backed
+off too, so a console that closes immediately cannot cause a reconnect storm. No fallback source.
+Error signatures: `unreachable`, `http_5xx`, `http_401|402|403|<n>`, `stream_error[:<code>]`, `stream_ended`,
+`bad_payload` (malformed/oversized frame or board, 8 MB board cap), `apply_failed` (the hub database write failed and rolled back), `token_unset`, `url_unset`.
+Every failed or finished connection is aborted; any received bytes (keepalive comments included) re-arm the 3 minute inactivity timeout.
+
 ## Fail-closed defaults (LD-11)
 
 | Seam | Phase-01 default | Replaced by |
@@ -286,3 +329,6 @@ table and the CUG-only import guard), `corch-quota-selection`, `corch-quota-wait
 real-Postgres `e2e/corch-quota.e2e.test.ts`. Guard additions:
 `token-cap-coverage`, `kill-switch-coverage`, `counter-key-assignment-guard`, `launch-callers-guard`,
 `launch-machine-guard`, `session-start-senders-guard`, `reserve-caller-guard`, `mount-order`, `api-keys-scopes`.
+CORCH-04 adds `corch-gsdc-derive` (table-driven board fixtures), `corch-gsdc-ingest` (fake SSE console: enrolled-only
+reads, reconnect, backoff cap, every failure mode, fencing), the real-Postgres `e2e/corch-gsdc.e2e.test.ts`, and extends
+`corch-no-polling-guard` (allows `gsdc-ingest.ts` timeouts only through the injected timers seam).

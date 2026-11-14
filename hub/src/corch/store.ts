@@ -163,6 +163,26 @@ export interface CorchStore {
   touchHeartbeat(runIds: string[]): Promise<void>
   /** Mark a live run stalled; true only when this call changed it (so the owner is told once). */
   markStalled(runId: string): Promise<boolean>
+  /** CORCH-04: every ENABLED project of every user (the gsd-console ingest joins them to console slugs). */
+  listEnabledProjects(): Promise<CorchProject[]>
+  /**
+   * CORCH-04: apply the derived gsd-console boards of ONE stream event in a single transaction (all or
+   * nothing). Per entry: cancel QUEUED `gsd_console` items of that project whose source_ref is in `doneRefs`
+   * (exact match; running, pr_open, done, blocked and already cancelled items are never touched), then upsert
+   * the candidate (ON CONFLICT DO NOTHING on (user_id, source, source_ref)). Returns the user ids that have
+   * a QUEUED candidate item after the call (new or already queued), so the caller re-evaluates them. An entry whose project is no longer enabled (re-checked inside the transaction under a
+   * row lock that conflicts with updateProject) is skipped. `shouldCommit` is re-checked before each entry and
+   * before the commit; false rolls everything back (throws).
+   */
+  applyGsdcBoards(entries: GsdcApplyEntry[], shouldCommit?: () => boolean): Promise<string[]>
+}
+
+export interface GsdcApplyEntry {
+  projectId: string
+  userId: string
+  priority: number
+  doneRefs: string[]
+  candidate: { sourceRef: string; title: string; body: string } | null
 }
 
 export const corchStore: CorchStore = {
@@ -255,7 +275,8 @@ export const corchStore: CorchStore = {
             AND NOT EXISTS (SELECT 1 FROM corch_work_items x WHERE x.project_id = p.id AND x.status = 'pr_open')
             AND i.id <> ALL(${excludeIds}::uuid[])
           ORDER BY p.priority DESC, i.priority DESC, i.created_at ASC, i.id ASC
-          LIMIT 1`
+          LIMIT 1
+          FOR UPDATE OF i`
         const item = cand[0]
         if (!item) return null
 
@@ -438,5 +459,49 @@ export const corchStore: CorchStore = {
       UPDATE corch_runs SET status = 'stalled'
       WHERE id = ${runId} AND ended_at IS NULL AND status <> 'stalled' RETURNING id`
     return r.length > 0
+  },
+
+  async listEnabledProjects() {
+    return sql<CorchProject[]>`
+      SELECT * FROM corch_projects WHERE enabled = true ORDER BY user_id, repo_ident`
+  },
+
+  async applyGsdcBoards(entries, shouldCommit = () => true) {
+    if (entries.length === 0) return []
+    return sql.begin(async (tx) => {
+      const created = new Set<string>()
+      for (const e of entries) {
+        if (!shouldCommit()) throw new Error('gsdc_apply_cancelled')
+        const enrolled = await tx`
+          SELECT 1 FROM corch_projects WHERE id = ${e.projectId} AND user_id = ${e.userId} AND enabled = true FOR SHARE`
+        if (enrolled.length === 0) continue
+        if (e.doneRefs.length > 0) {
+          await tx`
+            UPDATE corch_work_items
+            SET status = 'cancelled', wait_reason = NULL, not_before = NULL, updated_at = now()
+            WHERE project_id = ${e.projectId} AND source = 'gsd_console' AND status = 'queued'
+              AND source_ref = ANY(${e.doneRefs}::text[])`
+        }
+        if (e.candidate) {
+          const id = randomUUID()
+          const r = await tx`
+            INSERT INTO corch_work_items (id, user_id, project_id, source, source_ref, title, body, priority, branch)
+            VALUES (${id}, ${e.userId}, ${e.projectId}, 'gsd_console', ${e.candidate.sourceRef}, ${e.candidate.title}, ${e.candidate.body}, ${e.priority}, ${corchBranch(id)})
+            ON CONFLICT (user_id, source, source_ref) DO NOTHING
+            RETURNING id`
+          if (r.length > 0) created.add(e.userId)
+          else {
+            // Already known: still report the user when that item is waiting in the queue, so a lost evaluation
+            // trigger (a reconnect after a mid-processing abort) is re-fired by the fresh snapshot.
+            const known = await tx`
+              SELECT 1 FROM corch_work_items
+              WHERE user_id = ${e.userId} AND source = 'gsd_console' AND source_ref = ${e.candidate.sourceRef} AND status = 'queued'`
+            if (known.length > 0) created.add(e.userId)
+          }
+        }
+      }
+      if (!shouldCommit()) throw new Error('gsdc_apply_cancelled')
+      return [...created]
+    })
   },
 }
