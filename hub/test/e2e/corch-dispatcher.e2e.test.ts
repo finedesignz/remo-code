@@ -706,6 +706,79 @@ maybe('CORCH-01 e2e - criterion 5: claims, requeue, refusals, reclaim', () => {
     })
   })
 
+  // ── QC round 2 (Codex R2-1): reclaim is serialized with the send ──
+  describe('QC round 2 fixes on real Postgres', () => {
+    // The REAL shared pipeline (dispatch + queue + gates + preSendGuard + finalHaltCheck), the REAL corch
+    // send wiring (realCorchDeps().pipeline.send -> sendUserMessage: channel lookup, real messages insert,
+    // ws.send) and a fake agent socket registered in the real ws registry. Only the pause is injected: it
+    // holds the pipeline right after markDispatched/markRunRunning succeeded, which is the window the
+    // finalHaltCheck / channel lookup / message insert awaits give a concurrent reclaim.
+    async function runRealPipeline(opts: { reclaimDuringPause: boolean }) {
+      const registry = await import('../../src/ws/registry.ts')
+      const pipelineMod = await import('../../src/dispatch/pipeline.ts')
+      const real = await dispMod.realCorchDeps()
+      const userId = await mkUser(1)
+      const projectId = await mkProject(userId, `github://acme/r2-${rand()}`)
+      const { item } = await enq(userId, projectId, `r2-${rand()}`)
+      const sent: string[] = []
+      let sessionId = ''
+      const { d, deps } = mkWorld(userId, {
+        onWorkspace: async (c) => {
+          sessionId = c.sessionId
+          registry.registerChannel(c.sessionId, c.userId, { send: (data: string) => void sent.push(data), close: () => {} } as any)
+        },
+      })
+      deps.dispatch = real.dispatch
+      deps.pipeline = { ...real.pipeline, isOnline: async () => true }
+
+      let armed = opts.reclaimDuringPause
+      let reached!: () => void
+      let resume!: () => void
+      const atPause = new Promise<void>((res) => (reached = res))
+      const gate = new Promise<void>((res) => (resume = res))
+      const origRunning = storeMod.corchStore.markRunRunning
+      storeMod.corchStore.markRunRunning = async (runId: string) => {
+        const ok = await origRunning(runId)
+        if (armed && ok) {
+          armed = false
+          reached()
+          await gate
+        }
+        return ok
+      }
+      try {
+        const evaluation = d.evaluateUser(userId)
+        if (opts.reclaimDuringPause) {
+          await atPause
+          const run = (await runRows(item.id))[0]!
+          const live = (await storeMod.corchStore.liveRunsForSupervisor('sup-1')).find((r) => r.id === run.id)!
+          expect((await d.reclaimRun(live, 'session_absent', true)).changed).toBe(true)
+          resume()
+        }
+        await evaluation
+      } finally {
+        storeMod.corchStore.markRunRunning = origRunning
+        registry.unregisterChannel(sessionId)
+        pipelineMod._reset()
+      }
+      const rows = (await h.sql`SELECT count(*)::int AS n FROM messages WHERE session_id = ${sessionId}`)[0]!.n as number
+      return { sent, rows, item: await itemRow(item.id), run: (await runRows(item.id))[0]! }
+    }
+
+    test('R2-1: a reclaim landing after markRunRunning stops the send (zero ws sends, zero message rows); without one the real send goes out', async () => {
+      const control = await runRealPipeline({ reclaimDuringPause: false })
+      expect(control.sent.length).toBe(1) // the harness really sends when nothing races
+      expect(control.rows).toBe(1)
+      expect(control.run.ended_at).toBeNull()
+
+      const raced = await runRealPipeline({ reclaimDuringPause: true })
+      expect(raced.run.end_reason).toBe('session_absent')
+      expect(raced.item.attempts).toBe(1) // one reclaim, not double-counted by the pipeline's own failure path
+      expect(raced.sent.length).toBe(0)
+      expect(raced.rows).toBe(0)
+    })
+  })
+
   // ── end to end: a pushed PR ends the run and parks the item as pr_open ──
   describe('success path', () => {
     test('PrLookup open on finalize: item pr_open with the url, run ended', async () => {
