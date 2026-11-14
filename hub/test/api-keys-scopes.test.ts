@@ -65,7 +65,9 @@ describe('scopes helper', () => {
 
 describe('apiKeyMiddleware scope enforcement', () => {
   async function appWithKey(scopes: string[] | null) {
+    const realDal = await import('../src/db/dal.ts')
     mock.module(join(SRC, 'db/dal.ts'), () => ({
+      ...realDal,
       verifyApiKeyWithScope: async (_hash: string, scope: string) => {
         if (!hasScope(scopes, scope)) return { error: 'missing_scope' }
         return { userId: 'u1', apiKeyId: 'k1' }
@@ -107,7 +109,9 @@ describe('apiKeyMiddleware scope enforcement', () => {
 
 describe('/api/ext scope enforcement (milestone ASK middleware × SKEY scopes)', () => {
   async function extApp(scopes: string[] | null) {
+    const realAskDal = await import('../src/db/ask-dal.ts')
     mock.module(join(SRC, 'db/ask-dal.ts'), () => ({
+      ...realAskDal,
       verifyApiKeyForExt: async () => ({ id: 'k1', user_id: 'u1', scopes }),
       hasScope: (s: string[] | null | undefined, scope: string) => hasScope(s, scope),
     }))
@@ -188,7 +192,9 @@ describe('/api/ext scope enforcement (milestone ASK middleware × SKEY scopes)',
 
 describe('/api/ext launch + stop need EXPLICIT ext:launch', () => {
   async function extApp(scopes: string[] | null) {
+    const realAskDal = await import('../src/db/ask-dal.ts')
     mock.module(join(SRC, 'db/ask-dal.ts'), () => ({
+      ...realAskDal,
       verifyApiKeyForExt: async () => ({ id: 'k1', user_id: 'u1', scopes }),
       hasScope: (s: string[] | null | undefined, scope: string) => hasScope(s, scope),
     }))
