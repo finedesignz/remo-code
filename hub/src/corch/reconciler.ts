@@ -10,6 +10,7 @@
 import { corchEnabled, corchLeaseMs, corchReconcileIntervalMs } from './flag.ts'
 import { getCorch, type CorchDeps, type CorchDispatcher } from './dispatcher.ts'
 import type { LiveRun } from './store.ts'
+import { startGsdcIngest } from './gsdc-boot.ts'
 
 const PASS_LIMIT = 100
 
@@ -94,4 +95,6 @@ export async function startCorch(): Promise<void> {
   if (started) return
   started = true
   await startCorchWith(await getCorch())
+  // CORCH-04: gsd-console SSE ingest (event-driven; a no-op unless REMO_CORCH_GSDC_URL and _TOKEN are set).
+  startGsdcIngest()
 }

@@ -163,6 +163,13 @@ export interface CorchStore {
   touchHeartbeat(runIds: string[]): Promise<void>
   /** Mark a live run stalled; true only when this call changed it (so the owner is told once). */
   markStalled(runId: string): Promise<boolean>
+  /** CORCH-04: every ENABLED project of every user (the gsd-console ingest joins them to console slugs). */
+  listEnabledProjects(): Promise<CorchProject[]>
+  /**
+   * CORCH-04: cancel QUEUED items of one project and source whose source_ref is in `refs` (exact match).
+   * Running, pr_open, done, blocked and already cancelled items are never touched. Returns the count.
+   */
+  cancelQueuedBySourceRefs(projectId: string, source: WorkSource, refs: string[]): Promise<number>
 }
 
 export const corchStore: CorchStore = {
@@ -438,5 +445,21 @@ export const corchStore: CorchStore = {
       UPDATE corch_runs SET status = 'stalled'
       WHERE id = ${runId} AND ended_at IS NULL AND status <> 'stalled' RETURNING id`
     return r.length > 0
+  },
+
+  async listEnabledProjects() {
+    return sql<CorchProject[]>`
+      SELECT * FROM corch_projects WHERE enabled = true ORDER BY user_id, repo_ident`
+  },
+
+  async cancelQueuedBySourceRefs(projectId, source, refs) {
+    if (refs.length === 0) return 0
+    const r = await sql`
+      UPDATE corch_work_items
+      SET status = 'cancelled', wait_reason = NULL, not_before = NULL, updated_at = now()
+      WHERE project_id = ${projectId} AND source = ${source} AND status = 'queued'
+        AND source_ref = ANY(${refs}::text[])
+      RETURNING id`
+    return r.length
   },
 }
