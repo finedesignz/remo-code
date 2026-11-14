@@ -228,9 +228,10 @@ export async function runCorchPrLookup(args: string[]): Promise<CommandResult> {
   const bad = await sandboxCheck(path, true)
   if (bad) return { exit_code: 1, error: bad }
   const env = childEnv()
-  delete env.GH_REPO // an inherited override must never redirect the lookup; the repository is passed explicitly
+  delete env.GH_REPO // inherited overrides must never redirect the lookup; host and repository are passed explicitly
+  delete env.GH_HOST
   const r = await execImpl(
-    ['gh', 'pr', 'list', '--repo', `${m[1]}/${m[2]}`, '--head', branch!, '--state', 'open', '--json', 'url,headRefName,isCrossRepository', '--limit', '5'],
+    ['gh', 'pr', 'list', '--repo', `github.com/${m[1]}/${m[2]}`, '--head', branch!, '--state', 'open', '--json', 'url,headRefName,isCrossRepository', '--limit', '100'],
     { cwd: path, env },
   )
   if (r.code !== 0) return { exit_code: 1, error: 'gh_pr_list_failed' }

@@ -393,8 +393,12 @@ export function createCorchDispatcher(deps: CorchDeps) {
   /** CORCH-09: item terminal -> the Workspace's removal/claim release. Best effort, never throws (LD-10). */
   async function releaseItem(userId: string, itemId: string, status: 'done' | 'blocked' | 'cancelled' | 'requeued'): Promise<void> {
     await withItemLock(itemId, async () => {
-      // A worktree command that timed out may still be mutating the worktree: never release (or remove) under it.
-      if (unconfirmed.has(itemId) && status !== 'done' && status !== 'cancelled') return
+      // A worktree command that timed out may still be mutating the worktree: never release OR remove under it, for any
+      // status (a done/cancelled item's worktree is then left for manual cleanup; the claim lapses).
+      if (unconfirmed.has(itemId)) {
+        log(`release skipped item=${itemId} status=${status}: worktree command unconfirmed`)
+        return
+      }
       claimOwner.delete(itemId)
       try {
         await deps.workspace.release?.({ userId, itemId, status })

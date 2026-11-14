@@ -20,7 +20,7 @@ function world(o: { claim?: MemlogClaimResult; halted?: string | null; ensure?: 
     release: async (i) => (log.push(`release:${i.session}:${i.status}:${i.note}`), true),
   }
   const deps: WorkspaceDeps = {
-    quota: o.quota ?? { snapshotFor: async () => ({ ok: true, account_slot: 'acct-1', supervisor_id: 'sup-1' }) },
+    quota: o.quota ?? { snapshotFor: async () => ({ ok: true, account_slot: 'acct-1', supervisor_id: 'sup-1' }), supervisorFor: async () => 'sup-1' },
     memlog,
     store: {
       latestRunForItem: async () => o.run ?? { supervisor_id: 'sup-1', worktree_path: `${ROOT}/corch/app-item-1`, repo_ident: 'github://acme/app' } as any,
@@ -107,6 +107,15 @@ describe('R3.8 memlog claim', () => {
     await b.ws.release({ userId: 'u1', itemId: 'item-1', status: 'blocked' })
     expect(b.frames.length).toBe(0)
     expect(b.log.at(-1)).toBe('release:corch:item-1:DONE:corch: item blocked')
+  })
+
+  test('QC3: removal finds the host through the bound account when the run never recorded a supervisor (launch refused after ensure)', async () => {
+    const w = world({ run: { supervisor_id: null, worktree_path: null, account_slot: 'acct-1', repo_ident: 'github://acme/app' } })
+    await w.ws.release({ userId: 'u1', itemId: 'item-1', status: 'cancelled' })
+    expect(w.frames).toEqual([{ command: 'corch.worktree_remove', args: ['github://acme/app', 'item-1'], supervisorId: 'sup-1' }])
+    const none = world({ run: { supervisor_id: null, worktree_path: null, account_slot: null, repo_ident: 'github://acme/app' } })
+    await none.ws.release({ userId: 'u1', itemId: 'item-1', status: 'cancelled' })
+    expect(none.frames.length).toBe(0)
   })
 
   test('heartbeat reaches memlog for the item session; never throws', async () => {
