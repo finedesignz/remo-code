@@ -85,7 +85,7 @@ describe('image import closure', () => {
 describe('slot entrypoint', () => {
   const ep = read('tools/slot-image/entrypoint.sh')
   test('requires every runtime secret and never echoes a value', () => {
-    for (const n of ['REMO_ACCOUNT_SLOT', 'REMO_HUB_URL', 'REMO_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']) expect(ep).toContain(`need ${n}`)
+    for (const n of ['REMO_ACCOUNT_SLOT', 'REMO_HUB_URL', 'REMO_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'GH_TOKEN']) expect(ep).toContain(`need ${n}`)
     expect(ep).not.toMatch(/echo[^\n]*\$\{?(CLAUDE_CODE_OAUTH_TOKEN|REMO_API_KEY)/)
     expect(ep).not.toMatch(/ANTHROPIC_API_KEY/)
   })
