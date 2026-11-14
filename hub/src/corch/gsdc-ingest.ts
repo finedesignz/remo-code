@@ -27,6 +27,8 @@ export const GSDC_HEALTHY_STREAM_MS = 30000
 export const GSDC_IDLE_TIMEOUT_MS = 3 * 60 * 1000
 const MAX_FRAME_BYTES = 2 * 1024 * 1024
 const MAX_BOARD_BYTES = 8 * 1024 * 1024
+/** stream-error codes the console is known to send (hosted/runs/hub.js); anything else collapses to plain stream_error. */
+const KNOWN_STREAM_ERROR_CODES = new Set(['listener_unavailable'])
 
 export interface GsdcOutage {
   /** Enabled-project owners; the real notifier fans out to each. Never includes console text. */
@@ -181,7 +183,9 @@ export function createGsdcIngest(deps: GsdcDeps) {
     const byIdent = new Map<string, CorchProject[]>()
     for (const p of enabled) byIdent.set(p.repo_ident, [...(byIdent.get(p.repo_ident) ?? []), p])
 
-    const reads: Array<{ summary: BoardSummary; projects: CorchProject[]; board: BoardDetail }> = []
+    // Each board is derived the moment it is read and then dropped: memory stays bounded by the compact entries
+    // (title <= 200, body <= 4000 chars per enrolled project), not by the size of every board in the snapshot.
+    const entries: GsdcApplyEntry[] = []
     for (const summary of summaries) {
       const projects = byIdent.get(`github://${summary.slug.toLowerCase()}`)
       if (!projects || projects.length === 0) continue
@@ -190,28 +194,26 @@ export function createGsdcIngest(deps: GsdcDeps) {
       const raw = await fetchJson(base, token, `/api/board/projects/${encodeURIComponent(summary.id)}`, signal)
       const parsed = BoardDetail.safeParse(raw)
       if (!parsed.success) throw new GsdcFailure('bad_payload')
-      reads.push({ summary, projects, board: parsed.data })
-    }
-
-    // Every read succeeded: derive, then apply the whole event in ONE transaction. Nothing is written once the
-    // ingest was stopped or superseded while the reads were in flight.
-    const entries: GsdcApplyEntry[] = []
-    for (const { summary, projects, board } of reads) {
       // Canonical (lowercase) slug, like the hub repo_ident: a case change in the console must not fork the identity.
-      const d = deriveCandidate(summary.slug.toLowerCase(), summary, board)
+      const d = deriveCandidate(summary.slug.toLowerCase(), summary, parsed.data)
       if (d.kind === 'skip') continue
       for (const project of projects) {
         entries.push({ projectId: project.id, userId: project.user_id, priority: project.priority, doneRefs: d.doneRefs, candidate: d.candidate })
       }
     }
+
+    // Every read succeeded: apply the whole event in ONE transaction. Nothing is written once the ingest was
+    // stopped or superseded: the store re-checks `alive` inside the transaction and rolls back.
     if (!alive()) return
     let touched: string[]
     try {
-      touched = await deps.store.applyGsdcBoards(entries)
+      touched = await deps.store.applyGsdcBoards(entries, alive)
     } catch (err: any) {
+      if (!alive()) return // stopped mid-transaction: rolled back, not a failure
       console.error(`[corch.gsdc] apply failed: ${err?.message ?? err}`)
       throw new GsdcFailure('apply_failed')
     }
+    if (!alive()) return // no evaluation (launch) after stop
     for (const userId of touched) {
       try {
         await deps.onEnqueued(userId)
@@ -263,7 +265,8 @@ export function createGsdcIngest(deps: GsdcDeps) {
             } catch {
               /* signature falls back to plain stream_error */
             }
-            throw new GsdcFailure(/^[a-z0-9_.-]{1,40}$/i.test(code) ? `stream_error:${code}` : 'stream_error')
+            // Only recognized codes become part of the signature: console text never reaches logs or notifications.
+            throw new GsdcFailure(KNOWN_STREAM_ERROR_CODES.has(code) ? `stream_error:${code}` : 'stream_error')
           }
           if (ev.event !== 'snapshot' && ev.event !== 'project') continue
           let payload: unknown

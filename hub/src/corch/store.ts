@@ -170,9 +170,11 @@ export interface CorchStore {
    * nothing). Per entry: cancel QUEUED `gsd_console` items of that project whose source_ref is in `doneRefs`
    * (exact match; running, pr_open, done, blocked and already cancelled items are never touched), then upsert
    * the candidate (ON CONFLICT DO NOTHING on (user_id, source, source_ref)). Returns the user ids that got
-   * a NEWLY created item.
+   * a NEWLY created item. An entry whose project is no longer enabled (re-checked inside the transaction under a
+   * row lock that conflicts with updateProject) is skipped. `shouldCommit` is re-checked before each entry and
+   * before the commit; false rolls everything back (throws).
    */
-  applyGsdcBoards(entries: GsdcApplyEntry[]): Promise<string[]>
+  applyGsdcBoards(entries: GsdcApplyEntry[], shouldCommit?: () => boolean): Promise<string[]>
 }
 
 export interface GsdcApplyEntry {
@@ -464,11 +466,15 @@ export const corchStore: CorchStore = {
       SELECT * FROM corch_projects WHERE enabled = true ORDER BY user_id, repo_ident`
   },
 
-  async applyGsdcBoards(entries) {
+  async applyGsdcBoards(entries, shouldCommit = () => true) {
     if (entries.length === 0) return []
     return sql.begin(async (tx) => {
       const created = new Set<string>()
       for (const e of entries) {
+        if (!shouldCommit()) throw new Error('gsdc_apply_cancelled')
+        const enrolled = await tx`
+          SELECT 1 FROM corch_projects WHERE id = ${e.projectId} AND user_id = ${e.userId} AND enabled = true FOR SHARE`
+        if (enrolled.length === 0) continue
         if (e.doneRefs.length > 0) {
           await tx`
             UPDATE corch_work_items
@@ -486,6 +492,7 @@ export const corchStore: CorchStore = {
           if (r.length > 0) created.add(e.userId)
         }
       }
+      if (!shouldCommit()) throw new Error('gsdc_apply_cancelled')
       return [...created]
     })
   },
