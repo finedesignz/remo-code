@@ -383,7 +383,14 @@ closed PR stays blocked across reconciler passes.
 **Notification durability.** The `pr.failed` notification intent is stored with the transition (`corch_events.notify_state`
 `pending`), claimed atomically (`sending`, reclaimable after 5 minutes) and marked `sent` only after a durable delivery.
 An undelivered notification releases the claim and the receiver answers `503 notification_pending` so AgentAutofix retries
-the SAME `event_id`; that retry is a duplicate for the transition (never applied twice) but re-attempts the notification. Each applied transition triggers one dispatch evaluation (a no-op while
+the SAME `event_id`; that retry is a duplicate for the transition (never applied twice) but re-attempts the notification.
+A fresh claim held by another in-flight delivery also answers 503 (not delivered yet is never reported as success), and a
+claim carries a token so a superseded slow delivery cannot overwrite the new owner's state. An owner who opted out of both
+durable channels (`notify_channels`) is treated as handled, so a preference never becomes a permanent retry loop.
+
+Closure also cancels the in-process send guard of the runs it ended (`cancelRunSendsNow`), covering a send that already
+passed its database liveness check. Lock order on every path that writes an item and its runs (`claimNext`, both run-end
+transitions, the closure) is item row first, then run rows, so a closure racing a claim or a run end cannot deadlock. Each applied transition triggers one dispatch evaluation (a no-op while
 `REMO_CORCH_ENABLED` is OFF).
 
 Tests: `corch-aaf-events` (auth envelope, vector, skew, replay, non-leaky errors), `corch-aaf-provision` (fake AAF, env
