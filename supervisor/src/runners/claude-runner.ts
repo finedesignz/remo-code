@@ -3,6 +3,7 @@ import { writeFileSync } from 'fs'
 import { join } from 'path'
 import type { CliEvent, CliRunner, RunnerEvent } from './types'
 import { sanitizeSpawnEnv } from './env-sanitize'
+import { slotRequested, slotSpawnEnv } from '../slot'
 
 export type OrchestratorRunnerOpts = {
   systemPrompt: string
@@ -159,11 +160,23 @@ export class ClaudeRunner implements CliRunner {
     // credential manager / SSH agent / creds-in-remote-URL can still authenticate. The
     // enforceable backstop is branch protection on the client repo's default branch.
     const isOrchestratorSession = !!this.orchestrator
-    const env = sanitizeSpawnEnv(
+    // CORCH-09 (R4.2): a headless slot supervisor (REMO_ACCOUNT_SLOT set) runs the CORCH worker, which must push
+    // `corch/<id>` and open its PR with the slot's git credential, so GIT-PUSH env is kept for it; deploy
+    // credentials stay scrubbed. Without the slot env this is byte-for-byte the previous behavior.
+    const slot = slotRequested()
+    let env = sanitizeSpawnEnv(
       { ...process.env },
-      { scrubDeployCredentials: true, scrubGitPush: !isOrchestratorSession },
+      { scrubDeployCredentials: true, scrubGitPush: !isOrchestratorSession && !slot },
     )
     delete (env as any).ANTHROPIC_API_KEY
+    try {
+      env = slotSpawnEnv(env)
+    } catch (err: any) {
+      // Fail closed with the error CODE only (never a value): no spawn that falls back to another login.
+      this.listener?.({ type: 'error', message: `slot spawn refused: ${err?.code ?? 'slot_error'}` })
+      this.listener?.({ type: 'exited', code: null })
+      return
+    }
 
     if (this.orchestrator) {
       // Plumb the hub creds the orchestrator's system prompt teaches Claude

@@ -27,6 +27,7 @@ export async function reconcilePass(deps: CorchDeps, d: CorchDispatcher): Promis
     const now = Date.now()
     const lease = corchLeaseMs()
     const alive: string[] = []
+    const aliveRuns: LiveRun[] = []
     const runs: LiveRun[] = await deps.store.liveRunsPage(cursor, PASS_LIMIT)
     // A full page continues after its last run next pass; a short page means the walk is complete.
     cursor = runs.length >= PASS_LIMIT ? runs[runs.length - 1]!.id : null
@@ -50,6 +51,7 @@ export async function reconcilePass(deps: CorchDeps, d: CorchDispatcher): Promis
       const known = owner ?? deps.inventory.forUser(run.user_id)
       if (known.fresh && known.sessionIds.has(run.session_id)) {
         alive.push(run.id)
+        aliveRuns.push(run)
         continue
       }
       if (now - new Date(run.heartbeat_at).getTime() <= lease) continue
@@ -57,6 +59,8 @@ export async function reconcilePass(deps: CorchDeps, d: CorchDispatcher): Promis
       else await d.stallRun(run)
     }
     if (alive.length > 0) await deps.store.touchHeartbeat(alive)
+    // CORCH-09 (R3.8): the memlog claim is heartbeated from the same liveness signal. Best effort, never throws.
+    for (const run of aliveRuns) await deps.workspace.heartbeat?.({ itemId: run.work_item_id, repoIdent: run.repo_ident }).catch(() => {})
   } finally {
     passRunning = false
   }
