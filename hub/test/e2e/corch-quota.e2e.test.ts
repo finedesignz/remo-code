@@ -450,6 +450,20 @@ maybe('CORCH-02 e2e - quota ingest on real Postgres', () => {
     expect((await corchStore.claimNext(u.userId, []))?.item.id).toBe(item.item.id)
   })
 
+  test('QC3 H2: an already-poisoned stored fetched_at (2099) is overwritten by a genuine reading; block-clear rules still apply', async () => {
+    const u = await newUser()
+    await h.sql`
+      INSERT INTO corch_quota_accounts (user_id, account_id, slot, five_h_pct, seven_d_pct, fetched_at, source, enabled, cug_blocked, received_at, blocked_at, blocked_until)
+      VALUES (${u.userId}, 'poisoned', 'poisoned', 99, 99, '2099-01-01T00:00:00Z', 'live', true, false, now(), now() - interval '1 hour', now() + interval '2 hours')`
+    const res = await post(snapshot([acct('poisoned', { five_h_pct: 7, seven_d_pct: 8 })]), u.publish)
+    expect(res.status).toBe(200)
+    const row = (await h.sql`SELECT five_h_pct, fetched_at, blocked_at, blocked_until FROM corch_quota_accounts WHERE user_id = ${u.userId} AND account_id = 'poisoned'`)[0]!
+    expect(Number(row.five_h_pct)).toBe(7)
+    expect(row.fetched_at.getFullYear()).toBeLessThan(2030)
+    expect(row.blocked_at).toBeNull() // the live reading after the death cleared the block
+    expect(row.blocked_until).toBeNull()
+  })
+
   const blockRow = async (userId: string, id: string) =>
     (await h.sql`SELECT blocked_at, blocked_until FROM corch_quota_accounts WHERE user_id = ${userId} AND account_id = ${id}`)[0]!
   const approx = (d: Date, ms: number) => Math.abs(d.getTime() - (Date.now() + ms)) < 60_000

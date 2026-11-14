@@ -58,9 +58,12 @@ export const quotaStore = {
                    AND EXCLUDED.fetched_at > corch_quota_accounts.blocked_at
                 THEN NULL ELSE corch_quota_accounts.blocked_at END
           -- F7: a replayed / out-of-order POST never overwrites a newer stored reading (nor refreshes received_at).
+          -- QC3 H2: a stored fetched_at more than 120s ahead of server time is invalid (poisoned before the ingest
+          -- bound existed) and is overwritten by any genuine reading.
           WHERE corch_quota_accounts.fetched_at IS NULL
              OR EXCLUDED.fetched_at IS NULL
-             OR EXCLUDED.fetched_at >= corch_quota_accounts.fetched_at`
+             OR EXCLUDED.fetched_at >= corch_quota_accounts.fetched_at
+             OR corch_quota_accounts.fetched_at > now() + interval '120 seconds'`
       }
       return accounts.length
     })
