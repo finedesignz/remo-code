@@ -140,13 +140,6 @@ export function createAafEventRoutes(deps: AafEventDeps = REAL_DEPS): Hono {
         await deps.cancelRunSends(result.endedRunIds).catch((err) => console.warn(`[corch] aaf cancel sends failed: ${err?.name ?? 'error'}`))
       }
 
-      // CORCH-09: the item is terminal (done: PR merged; blocked: PR closed or failed). Remove the worktree (never on
-      // blocked) and release the memlog claim. Best effort and AFTER the cancel above; a failure never changes the answer.
-      if (result.kind === 'transitioned') {
-        await Promise.resolve(deps.releaseItem?.({ userId: result.userId, itemId: result.workItemId, status: result.to }))
-          .catch((err) => console.warn(`[corch] aaf release failed item=${result.workItemId}: ${err?.name ?? 'error'}`))
-      }
-
       // pr.failed owner notification: durable intent in corch_events, claimed atomically so exactly one delivery
       // owns it. A delivery failure releases the claim and answers 503 so the sender retries the SAME event_id;
       // that retry is a "duplicate" which still reaches this claim and re-attempts the notification.
@@ -176,6 +169,15 @@ export function createAafEventRoutes(deps: AafEventDeps = REAL_DEPS): Hono {
       } catch (err: any) {
         console.warn(`[corch] aaf notify claim failed: ${err?.name ?? 'error'}`)
         notifyFailed = true
+      }
+
+      // CORCH-09: the item is terminal (done: PR merged; blocked: PR closed or failed). Remove the worktree (never on
+      // blocked) and release the memlog claim. Best effort; a failure never changes the answer. AFTER the notification
+      // claim: an await here before the claim lets a concurrent duplicate delivery take the claim first, so the
+      // delivery that applied the transition would answer 503, and the owner notification would wait on cleanup.
+      if (result.kind === 'transitioned') {
+        await Promise.resolve(deps.releaseItem?.({ userId: result.userId, itemId: result.workItemId, status: result.to }))
+          .catch((err) => console.warn(`[corch] aaf release failed item=${result.workItemId}: ${err?.name ?? 'error'}`))
       }
 
       if (result.kind === 'transitioned' && corchEnabled()) {
