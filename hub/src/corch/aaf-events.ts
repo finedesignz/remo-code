@@ -53,6 +53,8 @@ export interface AafEventDeps {
   notifyFailed: (userId: string, workItemId: string) => Promise<boolean>
   /** One dispatch evaluation for the owner (a no-op while the CORCH flag is OFF). */
   evaluate: (userId: string) => Promise<void>
+  /** CORCH-11: push the owner's queue over WS after a transition (optional; never throws). */
+  publishQueue?: (userId: string) => void
 }
 
 const REAL_DEPS: AafEventDeps = {
@@ -83,6 +85,7 @@ const REAL_DEPS: AafEventDeps = {
   evaluate: async (userId) => (await import('./dispatcher.ts')).evaluateUserNow(userId),
   cancelRunSends: async (runIds) => (await import('./dispatcher.ts')).cancelRunSendsNow(runIds),
   releaseItem: async (a) => (await import('./dispatcher.ts')).releaseWorkItemNow(a),
+  publishQueue: (userId) => void import('./queue-view.ts').then((m) => m.publishCorchQueue(userId)).catch(() => {}),
 }
 
 export function createAafEventRoutes(deps: AafEventDeps = REAL_DEPS): Hono {
@@ -139,6 +142,8 @@ export function createAafEventRoutes(deps: AafEventDeps = REAL_DEPS): Hono {
       if (result.kind === 'transitioned' && result.endedRunIds.length > 0) {
         await deps.cancelRunSends(result.endedRunIds).catch((err) => console.warn(`[corch] aaf cancel sends failed: ${err?.name ?? 'error'}`))
       }
+
+      if (result.kind === 'transitioned') deps.publishQueue?.(result.userId)
 
       // pr.failed owner notification: durable intent in corch_events, claimed atomically so exactly one delivery
       // owns it. A delivery failure releases the claim and answers 503 so the sender retries the SAME event_id;

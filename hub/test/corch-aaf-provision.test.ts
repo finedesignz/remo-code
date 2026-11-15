@@ -132,7 +132,7 @@ describe('enrollment hook (routes) and the backfill', () => {
     const mk = (provisionImpl: (p: any) => Promise<any>) => {
       const app = new Hono<{ Variables: { userId: string } }>()
       app.use('*', async (c, next) => { c.set('userId', 'u1'); await next() })
-      app.route('/api/corch', createCorchRoutes({ store, evaluate: async () => {}, provision: provisionImpl } as any))
+      app.route('/api/corch', createCorchRoutes({ store, evaluate: async () => {}, provision: provisionImpl, queue: async () => ({}), publish: () => {} } as any))
       return app
     }
     const req = (ident: string) => ({ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repo_ident: ident }) })

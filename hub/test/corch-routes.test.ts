@@ -72,6 +72,9 @@ const fakeDeps = {
   },
   // CORCH-08: provisioning is exercised in corch-aaf-provision.test.ts; here it is an identity pass-through.
   provision: async (p: P) => p as any,
+  // CORCH-11: queue view + WS publish are exercised in corch-queue.test.ts; inert here.
+  queue: async () => ({}) as any,
+  publish: () => {},
 }
 
 const savedFlag = process.env.REMO_CORCH_ENABLED

@@ -1449,6 +1449,61 @@ openapi.openapi(taskTemplatesRoute, (c) => {
       ...common,
     },
   });
+  // CORCH-11: status view, pause/resume, item priority and cancel (cookie only).
+  const idParam = z.object({ id: z.string().openapi({ param: { name: "id", in: "path" } }) });
+  reg.registerPath({
+    method: "get", path: "/api/corch/queue", summary: "Queue view: projects, items, live runs, quota accounts, pause flag", ...cookie,
+    description:
+      "Read model shared with the `corch_queue` WebSocket event and the Telegram `/queue` summary. Works with REMO_CORCH_ENABLED off (it only reads). Items omit `body`.",
+    responses: {
+      200: {
+        description: "Snapshot",
+        ...json(z.object({
+          paused: z.boolean(),
+          max_concurrent_runs: z.number().int(),
+          counts: z.record(z.string(), z.number().int()),
+          projects: z.array(z.object({ id: z.string(), repo_ident: z.string(), priority: z.number().int(), enabled: z.boolean(), aaf_provision_status: z.string() })),
+          items: z.array(z.object({ id: z.string(), project_id: z.string(), repo_ident: z.string(), title: z.string(), source: z.string(), priority: z.number().int(), status: z.string(), wait_reason: z.string().nullable(), not_before: z.string().nullable(), attempts: z.number().int(), pr_url: z.string().nullable(), created_at: z.string() })),
+          live_runs: z.array(z.object({ id: z.string(), work_item_id: z.string(), repo_ident: z.string(), status: z.string(), account_slot: z.string().nullable(), supervisor_id: z.string().nullable(), started_at: z.string(), heartbeat_at: z.string(), age_seconds: z.number().int() })),
+          quota_accounts: z.array(z.object({ account_id: z.string(), slot: z.string().nullable(), eligible: z.boolean(), reason: z.string().nullable(), not_before: z.string().nullable(), five_h_pct: z.number().nullable(), seven_d_pct: z.number().nullable() })),
+          generated_at: z.string(),
+        })),
+      },
+      500: { description: "queue_unavailable", ...json(Err) },
+      ...common,
+    },
+  });
+  reg.registerPath({
+    method: "patch", path: "/api/corch/settings", summary: "Pause or resume dispatch; set the concurrent-run cap", ...cookie,
+    description:
+      "`paused: true` stops NEW dispatch (live runs continue); it is distinct from the automation kill switch. `paused: false` triggers one evaluation (a no-op with the flag off).",
+    request: body(z.object({ paused: z.boolean().optional(), max_concurrent_runs: z.number().int().min(1).max(32).optional() })),
+    responses: {
+      200: { description: "Updated", ...json(z.object({ settings: z.object({ corch_paused: z.boolean(), corch_max_concurrent_runs: z.number().int() }) })) },
+      400: { description: "Invalid or empty body", ...json(Err) },
+      ...common,
+    },
+  });
+  reg.registerPath({
+    method: "patch", path: "/api/corch/work-items/{id}", summary: "Change a work item's priority", ...cookie,
+    request: { params: idParam, ...body(z.object({ priority: z.number().int() })) },
+    responses: {
+      200: { description: "Updated", ...json(z.object({ item: Item })) },
+      400: { description: "Invalid body", ...json(Err) },
+      404: { description: "No such item for this user", ...json(Err) },
+      ...common,
+    },
+  });
+  reg.registerPath({
+    method: "post", path: "/api/corch/work-items/{id}/cancel", summary: "Cancel a queued work item (any other state is 409)", ...cookie,
+    request: { params: idParam },
+    responses: {
+      200: { description: "Cancelled (terminal)", ...json(z.object({ item: Item })) },
+      404: { description: "No such item for this user", ...json(Err) },
+      409: { description: "not_cancellable: the item is not queued", ...json(Err) },
+      ...common,
+    },
+  });
   reg.registerPath({
     method: "post", path: "/api/ext/corch/work-items", summary: "External enqueue of a work item (EXPLICIT ext:corch scope)", ...extBase,
     description:
