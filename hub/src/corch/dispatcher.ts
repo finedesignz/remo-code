@@ -15,10 +15,11 @@ import type { DispatchOutcome, DispatchRequest, PipelineDeps, RunStore } from '.
 import { governedLaunch } from '../dispatch/governed-launch.ts'
 import { automationKillSwitchGate, automationLifetimeCounterGate } from '../dispatch/automation-controls.ts'
 import { dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate } from '../dispatch/gates.ts'
-import { corchEnabled, corchLeaseMs } from './flag.ts'
+import { corchEnabled, corchLeaseMs, corchQuotaCeilingPct } from './flag.ts'
 import { buildCorchKey, buildCorchRunToken, CORCH_ACTOR } from './keys.ts'
 import { corchProjectBudgetGate, corchConcurrencyGate, corchQuotaGate } from './gates.ts'
-import { DEFAULT_QUOTA_PROVIDER, type QuotaProvider } from './quota-provider.ts'
+import { DEFAULT_QUOTA_PROVIDER, createQuotaProvider, type QuotaProvider } from './quota-provider.ts'
+import { classifyQuotaDeath, type QuotaDeath } from './quota-death.ts'
 import { buildCorchPrompt } from './prompt.ts'
 import type { CorchStore, CorchWorkItem, CorchProject, EndRequeueInput, EndResult, LiveRun, NotBefore } from './store.ts'
 
@@ -72,6 +73,11 @@ export interface SendGuard {
   assertLive(): void
 }
 
+/** F3: hold applied when a quota death could not be recorded on its account (the 5h window cap). */
+const QUOTA_DEATH_FALLBACK_HOLD_MS = 5 * 3600_000
+/** QC2 G1 / QC3 H1: max item backoff after a quota death or quota refusal (account state alone governs quota). */
+const QUOTA_DEATH_BACKOFF_MS = 600_000
+
 const ALWAYS_LIVE: SendGuard = { assertLive: () => {} }
 
 /** What this hub process positively knows about one supervisor's (or one user's) live sessions. */
@@ -119,6 +125,8 @@ export interface CorchDeps {
   notify: (n: CorchNotification) => Promise<void>
   inventory: CorchInventory
   timers: CorchTimers
+  /** Injectable clock for the quota-death backoff (default: the system clock). */
+  now?: () => Date
 }
 
 /** Hooks the dispatcher wires into the pipeline for one run (filled by the launch path). */
@@ -185,7 +193,7 @@ export function buildCorchRequest(a: {
 
 // ── Refusal schedule (LD-7) ──────────────────────────────────────────────────
 
-export type NotBeforeKind = 'midnight' | 'plus_60m' | 'plus_lease' | null
+export type NotBeforeKind = 'midnight' | 'plus_60m' | 'plus_lease' | 'quota' | null
 
 const MIDNIGHT_PREFIXES = [
   'project_budget',
@@ -203,6 +211,7 @@ export function refusalSchedule(reason: string): { endReason: string; waitReason
   if (MIDNIGHT_PREFIXES.some((p) => reason === p || reason.startsWith(p))) notBefore = 'midnight'
   else if (reason.startsWith(INJECT_RATE_PREFIX)) notBefore = 'plus_60m'
   else if (reason.startsWith('autospawn_launch_')) notBefore = 'plus_lease'
+  else if (reason.startsWith('quota:')) notBefore = 'quota' // resolved in refuseRun via deps.quota.earliestEligibleAt (CORCH-02)
   return { endReason, waitReason: reason, notBefore }
 }
 
@@ -304,11 +313,25 @@ export function createCorchDispatcher(deps: CorchDeps) {
     sendable.delete(runId) // before the first await
     const s = refusalSchedule(reason)
     const tz = s.notBefore === 'midnight' ? await deps.launch.tzForUser(userId) : 'UTC'
+    let notBefore = toNotBefore(s.notBefore, tz)
+    if (s.notBefore === 'quota') {
+      // CORCH-R2.6: the earliest instant an account can become eligible, or NULL when only an event can change it.
+      let at: Date | null = null
+      try {
+        at = (await deps.quota.earliestEligibleAt?.(userId)) ?? null
+      } catch (err) {
+        log(`earliestEligibleAt failed user=${userId}: ${errMsg(err)}`)
+      }
+      // QC3 H1: never hold the item to a far-future reset. The account state governs eligibility, so the item waits at
+      // most one backoff window and a healthy snapshot arriving before the reset releases it within that window.
+      const cap = (deps.now ?? (() => new Date()))().getTime() + QUOTA_DEATH_BACKOFF_MS
+      notBefore = at ? { at: new Date(Math.min(at.getTime(), cap)).toISOString() } : null
+    }
     const input: EndRequeueInput = {
       endReason: s.endReason,
       consumeAttempt: false,
       waitReason: s.waitReason,
-      notBefore: toNotBefore(s.notBefore, tz),
+      notBefore,
     }
     return deps.store.endRunAndRequeue(runId, input)
   }
@@ -341,9 +364,52 @@ export function createCorchDispatcher(deps: CorchDeps) {
     await evaluateUser(c.userId)
   }
 
-  /** Run end signal from the shared pipeline (the agent's next assistant_message). */
-  async function handleRunEnd(c: RunCtx): Promise<void> {
+  /**
+   * CORCH-R2.5: the run ended on the CLI usage-limit signal. Block its account until the reset (when the run holds
+   * one), then requeue with no attempt consumed. The PR lookup is skipped: the run did not fail on its own merits.
+   */
+  async function endQuotaDeath(c: RunCtx, death: QuotaDeath): Promise<void> {
     sendable.delete(c.runId) // before the first await
+    let accountId: string | null = null
+    // F3: if the account cannot be identified or blocked, the run must not be immediately redispatchable onto the
+    // same (unblocked) account. Fail closed: hold the item for the 5h window cap and log without any content.
+    let blockFailed = false
+    try {
+      accountId = (await deps.store.runContext(c.runId))?.run.account_slot ?? null
+    } catch (err) {
+      blockFailed = true
+      log(`run context failed run=${c.runId}: ${errMsg(err)}`)
+    }
+    const now = (deps.now ?? (() => new Date()))().getTime()
+    let notBeforeAt: number | null = null
+    if (accountId && deps.quota.markDeath) {
+      try {
+        const blockedUntil = await deps.quota.markDeath({ userId: c.userId, accountId, resetAt: death.resetAt, window: death.window })
+        // QC2 G1: a recorded block governs quota on its own (dispatch refuses a blocked account; a clearing snapshot
+        // triggers evaluation), so the item only backs off briefly. A null/undefined result means no block was recorded.
+        if (blockedUntil) notBeforeAt = now + QUOTA_DEATH_BACKOFF_MS
+        else blockFailed = true
+      } catch (err) {
+        blockFailed = true
+        log(`markDeath failed run=${c.runId}: ${errMsg(err)}`)
+      }
+    }
+    if (blockFailed && notBeforeAt === null) notBeforeAt = now + QUOTA_DEATH_FALLBACK_HOLD_MS
+    const r = await deps.store.endRunAndRequeue(c.runId, {
+      endReason: 'quota_death',
+      consumeAttempt: false,
+      waitReason: 'quota:death',
+      notBefore: notBeforeAt === null ? null : { at: new Date(notBeforeAt).toISOString() },
+    })
+    if (!r.changed) return
+    await afterRunEnd(c)
+  }
+
+  /** Run end signal from the shared pipeline (the agent's next assistant_message). */
+  async function handleRunEnd(c: RunCtx, text?: string): Promise<void> {
+    sendable.delete(c.runId) // before the first await
+    const death = classifyQuotaDeath(text)
+    if (death) return endQuotaDeath(c, death)
     let pr: Awaited<ReturnType<PrLookup['lookup']>>
     try {
       pr = await deps.prLookup.lookup({ userId: c.userId, repoIdent: c.repoIdent, branch: c.branch, workItemId: c.itemId })
@@ -390,8 +456,11 @@ export function createCorchDispatcher(deps: CorchDeps) {
       // dropped_busy. It is a dispatch failure (attempt + backoff, LD-8), not a no-deadline refusal.
       markSkipped: async (_token, reason) =>
         reason === 'session_busy' ? endFailure(c, 'dropped_busy', true) : endRefusal(c, reason, true),
-      markFailed: async () => endFailure(c, 'dispatch_failed', false),
-      onFinalize: async () => handleRunEnd(c),
+      markFailed: async (_token, error) => {
+        const death = classifyQuotaDeath(error)
+        return death ? endQuotaDeath(c, death) : endFailure(c, 'dispatch_failed', false)
+      },
+      onFinalize: async (_token, content) => handleRunEnd(c, content),
     }
   }
 
@@ -449,6 +518,8 @@ export function createCorchDispatcher(deps: CorchDeps) {
     })
 
     const a = deps.launch
+    const supervisorFor = deps.quota.supervisorFor?.bind(deps.quota)
+    const UNBOUND = 'quota:supervisor_unbound'
     const launched = await governedLaunch(
       {
         userId,
@@ -467,6 +538,24 @@ export function createCorchDispatcher(deps: CorchDeps) {
             a.reserve({ userId, sessionId: ws.sessionId, ...lifetime, actor: CORCH_ACTOR, enforceRate: true }),
           release: () => releaseReservation(c),
         },
+        // F5: the quota gate recorded the run's account; launch on exactly the supervisor advertising it, or refuse
+        // (fail closed, no attempt). A provider without supervisorFor is the CORCH-01 seam (it cannot launch in prod).
+        resolveTarget: supervisorFor
+          ? async () => {
+              try {
+                const accountId = (await deps.store.runContext(run.id))?.run.account_slot ?? null
+                const supervisorId = accountId ? await supervisorFor(userId, accountId) : null
+                if (!accountId || !supervisorId) return { ok: false as const, reason: UNBOUND }
+                // QC2 G3: re-read the target's CURRENT advertised account (null = not connected) and require it to be
+                // the run's recorded account, so a reconnect advertising another account is never launched on.
+                const current = await deps.quota.supervisorAccountSlot?.(userId, supervisorId)
+                return current === accountId ? { ok: true as const, supervisorId } : { ok: false as const, reason: UNBOUND }
+              } catch (err) {
+                log(`supervisor binding failed run=${run.id}: ${errMsg(err)}`)
+                return { ok: false as const, reason: UNBOUND }
+              }
+            }
+          : undefined,
       },
       a,
     )
@@ -701,6 +790,7 @@ export async function corchSend(
 
 export async function realCorchDeps(): Promise<CorchDeps> {
   const { corchStore } = await import('./store.ts')
+  const { quotaStore } = await import('./quota-store.ts')
   const { REAL_AUTOSPAWN } = await import('../heal/autospawn-deps.ts')
   const { AUTOSPAWN_LAUNCH_COMMAND } = await import('../db/orchestrator-rows-dal.ts')
   const { dispatch } = await import('../dispatch/pipeline.ts')
@@ -723,7 +813,15 @@ export async function realCorchDeps(): Promise<CorchDeps> {
     // LD-1: the heal/orchestrator launch deps with ONE override: CORCH enrollment replaces the allowlist.
     launch: { ...REAL_AUTOSPAWN, isRepoAutospawnAllowed: (u, r) => corchStore.isEnrolledEnabled(u, r) },
     launchCommand: AUTOSPAWN_LAUNCH_COMMAND,
-    quota: DEFAULT_QUOTA_PROVIDER,
+    quota: createQuotaProvider({
+      accountsFor: (u) => quotaStore.accountsFor(u),
+      liveRunsByAccount: (u, ex) => quotaStore.liveRunsByAccount(u, ex),
+      onlineSlotSupervisors: (u) => registry.listOnlineSlotSupervisorsForUser(u),
+      claimAccountSlot: (r, u, a, c) => quotaStore.claimAccountSlot(r, u, a, c),
+      now: () => new Date(),
+      ceilingPct: corchQuotaCeilingPct,
+      markDeath: (a) => quotaStore.markDeath(a),
+    }),
     pipeline: {
       isOnline: (req) => getChannel(req.sessionId) != null,
       send: (req, guard) => corchSend(req, guard),

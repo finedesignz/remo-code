@@ -104,6 +104,7 @@ const WEBHOOK_PATHS: Array<{ path: string; note: string }> = [
   { path: '/api/feedback/fb_disabled_token', note: 'feedback intake URL-token (disabled key → 403)' },
   { path: '/api/telegram/webhook/wrong-secret', note: 'telegram URL-secret' },
   { path: '/api/cloud-hook/reply', note: 'cloud-session Stop hook (Bearer cloud:hook key; none → 401)' },
+  { path: '/api/quota/snapshot', note: 'CORCH-02 quota ingest (Bearer quota:publish key; none → 401)' },
   { path: '/webhooks/titanium/license-changed', note: 'titanium license-changed HMAC' },
 ];
 
@@ -143,6 +144,32 @@ describe('mount-order: public webhooks are reachable BEFORE the JWT catch-all (I
       ).toBe(true);
     });
   }
+});
+
+describe('mount-order: CORCH-02 /api/quota/snapshot is api-key-authed and mounted BEFORE the cookie catch-all', () => {
+  test('unauthenticated POST and GET return the route 401 JSON (not 404, not a CSRF 403, not the cookie 401 shape)', async () => {
+    for (const method of ['POST', 'GET'] as const) {
+      const res = await app.request('/api/quota/snapshot', {
+        method,
+        headers: { 'content-type': 'application/json' },
+        ...(method === 'POST' ? { body: '{}' } : {}),
+      });
+      expect(res.status, `${method} /api/quota/snapshot returned ${res.status}; expected the route 401`).toBe(401);
+      expect(await res.json()).toEqual({ error: 'unauthorized' });
+    }
+  });
+
+  test('a POST without Origin or CSRF token is not rejected by csrfGuard (api-key authed)', async () => {
+    const res = await app.request('/api/quota/snapshot', { method: 'POST', body: '{}' });
+    const body: any = await res.clone().json();
+    expect(body.error).not.toBe('csrf_failed');
+    expect(res.status).toBe(401);
+  });
+
+  test('a cookie-style request (no Bearer) is never authenticated', async () => {
+    const res = await app.request('/api/quota/snapshot', { method: 'GET', headers: { cookie: 'remo_session=abc; csrf_token=x' } });
+    expect(res.status).toBe(401);
+  });
 });
 
 describe('mount-order: protected /api/* routes are behind the JWT catch-all', () => {

@@ -53,6 +53,11 @@ describe('isCsrfAllowlisted', () => {
   test('allows coolify webhook', () => {
     expect(isCsrfAllowlisted('/api/coolify/webhook/user-123')).toBe(true);
   });
+  test('allows the CORCH-02 quota route (api-key authed); near-miss paths are not allowlisted', () => {
+    expect(isCsrfAllowlisted('/api/quota/snapshot')).toBe(true);
+    expect(isCsrfAllowlisted('/api/quotas/x')).toBe(false);
+    expect(isCsrfAllowlisted('/api/quota')).toBe(false);
+  });
   test('allows logout only; the removed /api/auth/login/* routes are not allowlisted', () => {
     expect(isCsrfAllowlisted('/api/auth/login/request-link')).toBe(false);
     expect(isCsrfAllowlisted('/api/auth/login/callback')).toBe(false);

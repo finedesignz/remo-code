@@ -911,7 +911,7 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
       roots: msg.roots,
     })
     ws.data.supervisorId = row.id
-    registerSupervisor({ ws, supervisorId: row.id, userId, apiKeyId, roots: msg.roots, hostname: msg.hostname })
+    registerSupervisor({ ws, supervisorId: row.id, userId, apiKeyId, roots: msg.roots, hostname: msg.hostname, accountSlot: msg.account_slot, maxConcurrent: msg.max_concurrent })
     if (corchEnabled()) void import('../corch/dispatcher.ts').then((m) => m.onSupervisorHello(userId)).catch((err) => console.warn(`[corch] supervisor hello hook failed: ${err?.message ?? err}`))
     // Reset state to idle on (re)connect — any previously running session was
     // owned by the supervisor process which has since restarted.

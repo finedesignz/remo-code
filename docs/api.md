@@ -6194,6 +6194,322 @@ To perform this operation, you must be authenticated by means of one of the foll
 apiKeyAuth
 </aside>
 
+## Publish a CUG usage-snapshot v1 (EXPLICIT quota:publish scope)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/quota/snapshot \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "schema": 1,
+  "publisher": "cug",
+  "generated_at": "2019-08-24T14:15:22Z",
+  "poll_interval_secs": 1,
+  "accounts": [
+    {
+      "account_id": "string",
+      "slot": "string",
+      "five_h_pct": 0,
+      "seven_d_pct": 0,
+      "resets_5h": "2019-08-24T14:15:22Z",
+      "resets_7d": "2019-08-24T14:15:22Z",
+      "fetched_at": "2019-08-24T14:15:22Z",
+      "source": "string",
+      "enabled": true,
+      "blocked": true,
+      "current": true
+    }
+  ]
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/quota/snapshot',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/quota/snapshot`
+
+Upserts one row per `(key owner, account_id)` into `corch_quota_accounts`. The body is strict at both levels: `email`, `label` and any unknown key are a 400 and write nothing. Body cap 64 KiB (413), at most 32 accounts. The user is always the key owner. A successful POST triggers one dispatcher evaluation when REMO_CORCH_ENABLED is on (none when off).
+
+> Body parameter
+
+```json
+{
+  "schema": 1,
+  "publisher": "cug",
+  "generated_at": "2019-08-24T14:15:22Z",
+  "poll_interval_secs": 1,
+  "accounts": [
+    {
+      "account_id": "string",
+      "slot": "string",
+      "five_h_pct": 0,
+      "seven_d_pct": 0,
+      "resets_5h": "2019-08-24T14:15:22Z",
+      "resets_7d": "2019-08-24T14:15:22Z",
+      "fetched_at": "2019-08-24T14:15:22Z",
+      "source": "string",
+      "enabled": true,
+      "blocked": true,
+      "current": true
+    }
+  ]
+}
+```
+
+<h3 id="publish-a-cug-usage-snapshot-v1-(explicit-quota:publish-scope)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|body|body|object|false|none|
+|» schema|body|number|true|none|
+|» publisher|body|string|true|none|
+|» generated_at|body|string(date-time)|true|none|
+|» poll_interval_secs|body|integer|true|none|
+|» accounts|body|[[QuotaSnapshotAccount](#schemaquotasnapshotaccount)]|true|none|
+|»» account_id|body|string|true|none|
+|»» slot|body|any|true|none|
+|»»» *anonymous*|body|string|false|none|
+|»»» *anonymous*|body|integer|false|none|
+|»»» *anonymous*|body|any|false|none|
+|»» five_h_pct|body|number¦null|true|none|
+|»» seven_d_pct|body|number¦null|true|none|
+|»» resets_5h|body|string(date-time)¦null|true|none|
+|»» resets_7d|body|string(date-time)¦null|true|none|
+|»» fetched_at|body|string(date-time)¦null|true|none|
+|»» source|body|string|true|none|
+|»» enabled|body|boolean|true|none|
+|»» blocked|body|boolean|true|none|
+|»» current|body|boolean|true|none|
+
+#### Enumerated Values
+
+|Parameter|Value|
+|---|---|
+|» schema|1|
+|» publisher|cug|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "ok": true,
+  "accepted": 0
+}
+```
+
+<h3 id="publish-a-cug-usage-snapshot-v1-(explicit-quota:publish-scope)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Stored|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|invalid_snapshot (no value echoed)|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/unknown api key|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks the explicit quota:publish scope|Inline|
+|413|[Payload Too Large](https://tools.ietf.org/html/rfc7231#section-6.5.11)|Body over 64 KiB|Inline|
+|429|[Too Many Requests](https://tools.ietf.org/html/rfc6585#section-4)|Rate limited|Inline|
+
+<h3 id="publish-a-cug-usage-snapshot-v1-(explicit-quota:publish-scope)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» ok|boolean|true|none|none|
+|» accepted|integer|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|ok|true|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» required|string|true|none|none|
+
+Status Code **413**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **429**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## Per-account quota eligibility for the key owner (EXPLICIT quota:read scope)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/quota/snapshot \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/quota/snapshot',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/quota/snapshot`
+
+Returns the owner's stored readings with the fail-closed eligibility verdict (`eligible`, `reason` = `quota:<reason>`, `not_before`) computed by the same rules the dispatcher uses. No email or label field exists.
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "ceiling_pct": 0,
+  "accounts": [
+    {
+      "account_id": "string",
+      "slot": "string",
+      "eligible": true,
+      "reason": "string",
+      "not_before": "string",
+      "five_h_pct": 0,
+      "seven_d_pct": 0,
+      "resets_5h": "string",
+      "resets_7d": "string",
+      "fetched_at": "string",
+      "source": "string",
+      "received_at": "string",
+      "blocked_until": "string"
+    }
+  ]
+}
+```
+
+<h3 id="per-account-quota-eligibility-for-the-key-owner-(explicit-quota:read-scope)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Accounts|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/unknown api key|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks the explicit quota:read scope|Inline|
+|429|[Too Many Requests](https://tools.ietf.org/html/rfc6585#section-4)|Rate limited|Inline|
+|500|[Internal Server Error](https://tools.ietf.org/html/rfc7231#section-6.6.1)|quota_ceiling_invalid|Inline|
+
+<h3 id="per-account-quota-eligibility-for-the-key-owner-(explicit-quota:read-scope)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» ceiling_pct|number|true|none|none|
+|» accounts|[object]|true|none|none|
+|»» account_id|string|true|none|none|
+|»» slot|string¦null|true|none|none|
+|»» eligible|boolean|true|none|none|
+|»» reason|string¦null|true|none|none|
+|»» not_before|string¦null|true|none|none|
+|»» five_h_pct|number¦null|true|none|none|
+|»» seven_d_pct|number¦null|true|none|none|
+|»» resets_5h|string¦null|true|none|none|
+|»» resets_7d|string¦null|true|none|none|
+|»» fetched_at|string¦null|true|none|none|
+|»» source|string|true|none|none|
+|»» received_at|string|true|none|none|
+|»» blocked_until|string¦null|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» required|string|true|none|none|
+
+Status Code **429**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **500**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
 <h1 id="remo-code-hub-chat">chat</h1>
 
 ## List the owner's sessions (optionally by project_dir)
@@ -7217,4 +7533,67 @@ continued
 |status|done|
 |status|blocked|
 |status|cancelled|
+
+<h2 id="tocS_QuotaSnapshotAccount">QuotaSnapshotAccount</h2>
+<!-- backwards compatibility -->
+<a id="schemaquotasnapshotaccount"></a>
+<a id="schema_QuotaSnapshotAccount"></a>
+<a id="tocSquotasnapshotaccount"></a>
+<a id="tocsquotasnapshotaccount"></a>
+
+```json
+{
+  "account_id": "string",
+  "slot": "string",
+  "five_h_pct": 0,
+  "seven_d_pct": 0,
+  "resets_5h": "2019-08-24T14:15:22Z",
+  "resets_7d": "2019-08-24T14:15:22Z",
+  "fetched_at": "2019-08-24T14:15:22Z",
+  "source": "string",
+  "enabled": true,
+  "blocked": true,
+  "current": true
+}
+
+```
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|account_id|string|true|none|none|
+|slot|any|true|none|none|
+
+anyOf
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» *anonymous*|string|false|none|none|
+
+or
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» *anonymous*|integer|false|none|none|
+
+or
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» *anonymous*|any|false|none|none|
+
+continued
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|five_h_pct|number¦null|true|none|none|
+|seven_d_pct|number¦null|true|none|none|
+|resets_5h|string(date-time)¦null|true|none|none|
+|resets_7d|string(date-time)¦null|true|none|none|
+|fetched_at|string(date-time)¦null|true|none|none|
+|source|string|true|none|none|
+|enabled|boolean|true|none|none|
+|blocked|boolean|true|none|none|
+|current|boolean|true|none|none|
 

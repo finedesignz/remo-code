@@ -8,9 +8,10 @@ import {
   corchLeaseMs,
   corchReconcileIntervalMs,
   assertCorchConfig,
+  corchQuotaCeilingPct,
 } from '../src/corch/flag.ts'
 
-const KEYS = ['REMO_CORCH_ENABLED', 'REMO_ORCHESTRATOR_ENABLED', 'REMO_CORCH_LEASE_MS', 'REMO_CORCH_RECONCILE_INTERVAL_MS']
+const KEYS = ['REMO_CORCH_ENABLED', 'REMO_CORCH_QUOTA_CEILING_PCT', 'REMO_ORCHESTRATOR_ENABLED', 'REMO_CORCH_LEASE_MS', 'REMO_CORCH_RECONCILE_INTERVAL_MS']
 const saved: Record<string, string | undefined> = {}
 for (const k of KEYS) saved[k] = process.env[k]
 afterEach(() => {
@@ -101,5 +102,59 @@ describe('index.ts wiring pin', () => {
     expect(at).toBeGreaterThan(-1)
     const window = lines.slice(at + 1, at + 6).join('\n')
     expect(window).toContain('assertCorchConfig()')
+  })
+})
+
+describe('REMO_CORCH_QUOTA_CEILING_PCT (CORCH-R2.3, LD-Q7)', () => {
+  const K = 'REMO_CORCH_QUOTA_CEILING_PCT'
+  const savedCeil = process.env[K]
+  afterEach(() => {
+    if (savedCeil === undefined) delete process.env[K]
+    else process.env[K] = savedCeil
+  })
+
+  test('unset and empty default to 55; a valid value is used', () => {
+    delete process.env[K]
+    expect(corchQuotaCeilingPct()).toBe(55)
+    process.env[K] = ''
+    expect(corchQuotaCeilingPct()).toBe(55)
+    process.env[K] = '70'
+    expect(corchQuotaCeilingPct()).toBe(70)
+    process.env[K] = '100'
+    expect(corchQuotaCeilingPct()).toBe(100)
+    process.env[K] = '0.5'
+    expect(corchQuotaCeilingPct()).toBe(0.5)
+  })
+
+  test("'abc', '0', '-5', '101' throw naming the variable", () => {
+    for (const v of ['abc', '0', '-5', '101', 'NaN', 'Infinity']) {
+      process.env[K] = v
+      expect(() => corchQuotaCeilingPct()).toThrow(/REMO_CORCH_QUOTA_CEILING_PCT/)
+    }
+  })
+
+  test('CORCH on + unset => assertCorchConfig ok; CORCH on + 70 => ok', () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    delete process.env.REMO_ORCHESTRATOR_ENABLED
+    delete process.env[K]
+    expect(() => assertCorchConfig()).not.toThrow()
+    process.env[K] = '70'
+    expect(() => assertCorchConfig()).not.toThrow()
+  })
+
+  test("CORCH on + bad ceiling => assertCorchConfig throws naming REMO_CORCH_QUOTA_CEILING_PCT", () => {
+    process.env.REMO_CORCH_ENABLED = '1'
+    delete process.env.REMO_ORCHESTRATOR_ENABLED
+    for (const v of ['abc', '0', '-5', '101']) {
+      process.env[K] = v
+      expect(() => assertCorchConfig()).toThrow(/REMO_CORCH_QUOTA_CEILING_PCT/)
+    }
+  })
+
+  test('CORCH off + bad ceiling => assertCorchConfig does not throw', () => {
+    delete process.env.REMO_CORCH_ENABLED
+    delete process.env.REMO_ORCHESTRATOR_ENABLED
+    process.env[K] = 'abc'
+    expect(() => assertCorchConfig()).not.toThrow()
   })
 })

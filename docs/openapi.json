@@ -242,6 +242,84 @@
           "attempts",
           "branch"
         ]
+      },
+      "QuotaSnapshotAccount": {
+        "type": "object",
+        "properties": {
+          "account_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,64}$"
+          },
+          "slot": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "nullable": true
+              }
+            ]
+          },
+          "five_h_pct": {
+            "type": "number",
+            "nullable": true,
+            "minimum": 0,
+            "maximum": 1000
+          },
+          "seven_d_pct": {
+            "type": "number",
+            "nullable": true,
+            "minimum": 0,
+            "maximum": 1000
+          },
+          "resets_5h": {
+            "type": "string",
+            "nullable": true,
+            "format": "date-time"
+          },
+          "resets_7d": {
+            "type": "string",
+            "nullable": true,
+            "format": "date-time"
+          },
+          "fetched_at": {
+            "type": "string",
+            "nullable": true,
+            "format": "date-time"
+          },
+          "source": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "blocked": {
+            "type": "boolean"
+          },
+          "current": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "account_id",
+          "slot",
+          "five_h_pct",
+          "seven_d_pct",
+          "resets_5h",
+          "resets_7d",
+          "fetched_at",
+          "source",
+          "enabled",
+          "blocked",
+          "current"
+        ],
+        "additionalProperties": false
       }
     },
     "parameters": {}
@@ -7086,6 +7164,368 @@
                       "type": "string"
                     },
                     "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/quota/snapshot": {
+      "post": {
+        "summary": "Publish a CUG usage-snapshot v1 (EXPLICIT quota:publish scope)",
+        "tags": [
+          "corch"
+        ],
+        "security": [
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "description": "Upserts one row per `(key owner, account_id)` into `corch_quota_accounts`. The body is strict at both levels: `email`, `label` and any unknown key are a 400 and write nothing. Body cap 64 KiB (413), at most 32 accounts. The user is always the key owner. A successful POST triggers one dispatcher evaluation when REMO_CORCH_ENABLED is on (none when off).",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "type": "number",
+                    "enum": [
+                      1
+                    ]
+                  },
+                  "publisher": {
+                    "type": "string",
+                    "enum": [
+                      "cug"
+                    ]
+                  },
+                  "generated_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "poll_interval_secs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 86400
+                  },
+                  "accounts": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/QuotaSnapshotAccount"
+                    },
+                    "maxItems": 32
+                  }
+                },
+                "required": [
+                  "schema",
+                  "publisher",
+                  "generated_at",
+                  "poll_interval_secs",
+                  "accounts"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "accepted": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "accepted"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_snapshot (no value echoed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/unknown api key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the explicit quota:publish scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "required": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "required"
+                  ]
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body over 64 KiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "Per-account quota eligibility for the key owner (EXPLICIT quota:read scope)",
+        "tags": [
+          "corch"
+        ],
+        "security": [
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "description": "Returns the owner's stored readings with the fail-closed eligibility verdict (`eligible`, `reason` = `quota:<reason>`, `not_before`) computed by the same rules the dispatcher uses. No email or label field exists.",
+        "responses": {
+          "200": {
+            "description": "Accounts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ceiling_pct": {
+                      "type": "number"
+                    },
+                    "accounts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "account_id": {
+                            "type": "string"
+                          },
+                          "slot": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "eligible": {
+                            "type": "boolean"
+                          },
+                          "reason": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "not_before": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "five_h_pct": {
+                            "type": "number",
+                            "nullable": true
+                          },
+                          "seven_d_pct": {
+                            "type": "number",
+                            "nullable": true
+                          },
+                          "resets_5h": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "resets_7d": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "fetched_at": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "source": {
+                            "type": "string"
+                          },
+                          "received_at": {
+                            "type": "string"
+                          },
+                          "blocked_until": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        },
+                        "required": [
+                          "account_id",
+                          "slot",
+                          "eligible",
+                          "reason",
+                          "not_before",
+                          "five_h_pct",
+                          "seven_d_pct",
+                          "resets_5h",
+                          "resets_7d",
+                          "fetched_at",
+                          "source",
+                          "received_at",
+                          "blocked_until"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "ceiling_pct",
+                    "accounts"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/unknown api key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the explicit quota:read scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "required": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "required"
+                  ]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "quota_ceiling_invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
                       "type": "string"
                     }
                   },

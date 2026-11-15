@@ -1831,3 +1831,23 @@ DO $$ BEGIN
   ALTER TABLE users ADD CONSTRAINT users_corch_max_concurrent_runs_positive
     CHECK (corch_max_concurrent_runs > 0);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- CORCH-02 quota ingest: latest CUG usage reading per account slot; no email column.
+-- One row per (user_id, account_id); blocked_until / blocked_at are hub-owned (quota death).
+CREATE TABLE IF NOT EXISTS corch_quota_accounts (
+  user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  account_id    TEXT NOT NULL,
+  slot          TEXT NULL,
+  five_h_pct    NUMERIC NULL,
+  seven_d_pct   NUMERIC NULL,
+  resets_5h     TIMESTAMPTZ NULL,
+  resets_7d     TIMESTAMPTZ NULL,
+  fetched_at    TIMESTAMPTZ NULL,
+  source        TEXT NOT NULL,
+  enabled       BOOLEAN NOT NULL,
+  cug_blocked   BOOLEAN NOT NULL,
+  received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  blocked_until TIMESTAMPTZ NULL,
+  blocked_at    TIMESTAMPTZ NULL,
+  PRIMARY KEY (user_id, account_id)
+);
