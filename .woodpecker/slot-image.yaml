@@ -20,10 +20,16 @@ steps:
       - bun test supervisor/test/corch-slot-image.test.ts
 
   - name: build-slot-image
-    image: woodpeckerci/plugin-docker-buildx
-    settings:
-      dry_run: true
-      repo: remo-slot-ci/never-pushed
-      dockerfile: Dockerfile.slot
-      context: .
-      platforms: linux/amd64
+    # docker CLI against the host daemon (fleet pattern, see mcp-servers image-smoke.yaml).
+    # The buildx plugin needs WOODPECKER_PLUGINS_PRIVILEGED and fails the linter here,
+    # which errors the WHOLE pipeline config (qc included). Needs repo trusted.volumes=true
+    # (already granted for mobile-shell-typecheck). Build only: no push, image removed after.
+    image: docker:27-cli
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    commands:
+      - |
+        set -eu
+        IMG=remo-slot-ci:ci-$CI_PIPELINE_NUMBER
+        trap 'docker rmi -f "$IMG" >/dev/null 2>&1 || true' EXIT
+        docker build --platform linux/amd64 -f Dockerfile.slot -t "$IMG" .
