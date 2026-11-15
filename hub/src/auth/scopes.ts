@@ -38,6 +38,12 @@ export const SCOPE_CLOUD_HOOK = 'cloud:hook'
 export const SCOPE_EXT_LAUNCH = 'ext:launch'
 
 /**
+ * EXPLICIT-only: enqueue CORCH work items via POST /api/ext/corch/work-items. A legacy/NULL key never
+ * acquires it implicitly (an enqueue can eventually spend subscription tokens on an enrolled repo).
+ */
+export const SCOPE_EXT_CORCH = 'ext:corch'
+
+/**
  * Read / change the user's Settings (profile, usage + cost controls, notify prefs,
  * supervisor roots, orchestrator prefs) through the normal /api routes with a Bearer key.
  * EXPLICIT-only, and limited to the route allowlist in `settings-api-key.ts`.
@@ -60,6 +66,7 @@ export const ALL_SCOPES = [
   SCOPE_EXT_ASK,
   SCOPE_EXT_WORK,
   SCOPE_EXT_LAUNCH,
+  SCOPE_EXT_CORCH,
   SCOPE_CLOUD_HOOK,
   SCOPE_SETTINGS_READ,
   SCOPE_SETTINGS_WRITE,

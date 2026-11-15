@@ -70,6 +70,9 @@ import { startOnceDueSweep, stopOnceDueSweep } from './scheduler/once-due-sweep.
 import { startRevanoteStallSweep, stopRevanoteStallSweep } from './revanote/stall-alert.ts'
 import { healUnifiedEnabled } from './heal/config.ts'
 import { assertTokenCapConfig } from './dispatch/gates.ts'
+import { assertCorchConfig } from './corch/flag.ts'
+import { corchRoutes } from './corch/routes.ts'
+import { startCorch } from './corch/reconciler.ts'
 import { assertAutomationControlsEnv, assertAutomationControlsTables } from './dispatch/automation-controls.ts'
 import { registerTokenCapAlarm } from './observability/token-cap-alarm.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
@@ -466,6 +469,8 @@ app.route('/api/error-setup', errorSetupApi)
 // The public webhook route lives at /api/revanote/webhook/* (mounted above).
 app.route('/api/orchestrator', orchestratorApi)
 app.route('/api/automation', automationApi)
+// CORCH-01: cookie enrollment + enqueue routes (flag OFF = store/list only). API keys get 403 from authMiddleware.
+app.route('/api/corch', corchRoutes)
 // Phase 31 (auto-dev-orchestrator): authed config REST for the one-per-session
 // orchestrator task + its rows. Data-only (controller path is flag-OFF). Mounted
 // alongside the other authed user routes (post-auth catch-all).
@@ -553,6 +558,7 @@ if (config.titaniumBypass) {
 // REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1 says otherwise on purpose.
 try {
   assertTokenCapConfig()
+  assertCorchConfig() // CORCH-R1.3: refuse boot when both CORCH and the old orchestrator are enabled
 } catch (err: any) {
   console.error(`[startup] FATAL: ${err?.message ?? err}`)
   process.exit(1)
@@ -759,6 +765,9 @@ runMigrations()
     // session's queue slot was held forever and every later annotation for that
     // repo came back `session_busy`.
     startHookReaper()
+    // CORCH-01 — central orchestrator: reconciler interval + not_before timer. True no-op unless
+    // REMO_CORCH_ENABLED (default OFF); never started alongside the old orchestrator (assertCorchConfig).
+    void startCorch().catch((err) => console.error(`[corch] boot start failed: ${err?.message ?? err}`))
     // Milestone ASK — periodic sweep that finalizes `session_asks` stuck
     // queued/dispatched past REMO_ASK_MAX_MS (default 15min) as `timeout`, so an
     // external caller never polls a dead ask forever. Conditional finalize, so a

@@ -422,6 +422,17 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   notification ownership by conditional update) is the dedupe and audit store; a boot sweep
   (`hub/src/heal/sweep.ts`, only when the flag is ON) terminalizes launches stranded by a restart. Arming is an
   owner action: [docs/orchestrator-autospawn-runbook.md](docs/orchestrator-autospawn-runbook.md).
+- **`REMO_CORCH_ENABLED`** (default **OFF**; accepts `1|true|yes|on` only; read at call time): the **central
+  orchestrator** backlog and dispatcher (milestone CORCH phase 01; [docs/corch.md](docs/corch.md)). OFF is a true
+  no-op: the `/api/corch/*` and `/api/ext/corch/work-items` routes only store and list rows; no dispatcher
+  evaluation, no reconciler interval, no `not_before` timer, no launch, no send. **Mutually exclusive with
+  `REMO_ORCHESTRATOR_ENABLED`**: `assertCorchConfig()` in `hub/src/index.ts` refuses boot when both are truthy.
+  ON launches only through `governedLaunch` (HEAL policy, shared autospawn daily launch cap) and sends the prompt
+  only through shared `dispatch()` with the 8-gate list (kill switch first, lifetime counter `corch:<work_item_id>`
+  last). The CORCH-01 default `QuotaProvider`, `Workspace` and `PrLookup` all fail closed, so nothing can launch in
+  production until CORCH-02 and CORCH-09 replace them. Companion knobs (non-positive/non-numeric => the default):
+  **`REMO_CORCH_LEASE_MS`** (120000, how long a live run may lack positive liveness knowledge before it is
+  reclaimed or marked stalled) and **`REMO_CORCH_RECONCILE_INTERVAL_MS`** (60000, the reconciler's single interval).
 
 ## Docs map — subsystems & phases
 
@@ -456,6 +467,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 | Cloud-session host | [cloud-session-supervisor.md](docs/cloud-session-supervisor.md) | Headless supervisor inside a Claude Code cloud session: `tools/cloud-session/setup.sh` (env Setup script) clones + starts the Bun source, SessionStart hook restarts it; hub WebSockets honour `HTTPS_PROXY` (`supervisor/src/ws-proxy.ts`); authenticates with an **additional host key** (`purpose='host'`, `POST /api/api-keys {host:true}`) so it never evicts the tray app's key. |
 | TEAB tasks | [teab-tasks.md](docs/teab-tasks.md) · [.planning/TEAB-MILESTONE.md](.planning/TEAB-MILESTONE.md) | Milestone TEAB — `task_type:'teab'` scheduled task runs `teab run --repo <X>` on the supervisor host (allowlisted `teab_run`/`teab_status` commands; preflight fails closed; NO bypassPermissions / NO programmatic claude flags). Hub-driven background poll-to-terminal (idle-teardown-safe) → `finalizeRun` → post-run actions; cost/token cap unchanged. Columns `teab_repo_ident`/`teab_last_status`. **A new signed supervisor MSI is REQUIRED** for `teab_run` to exist on installed hosts. |
 | Unified self-heal routing | [self-heal-routing.md](docs/self-heal-routing.md) | PTYCAP Phase 7 - one seam, `hub/src/heal/route.ts::routeHeal`, for the four failure sources (Coolify deploy, scheduled-task failure, error-capture, feedback), behind `REMO_HEAL_UNIFIED` (default OFF). Live repo-bound session -> shared `dispatch()` six-gate chain; allowlisted offline repo -> `governedLaunch` (gates + lifetime reservation BEFORE the spawn); else fail fast `no_routable_session` + one notification. `heal_events` ledger (dedupe, provenance, notification owner), key `heal:<userId>:<canonical repo_ident>`, boot sweep. `POST /api/sessions/heal` is unchanged (prefix-compatible key only). |
+| Central orchestrator (CORCH) | [corch.md](docs/corch.md) | Milestone CORCH phase 01 - `hub/src/corch/`: per-user backlog (`corch_projects` / `corch_work_items` / `corch_runs`), cookie enrollment + enqueue routes and explicit-scope `POST /api/ext/corch/work-items`, an 8-gate chain (kill switch first, lifetime counter `corch:<work_item_id>` last), claim transaction (per-user advisory lock + partial unique indexes), launch only via `governedLaunch` HEAL policy, bounded requeue (60s, 300s, then blocked + one notification), positive-knowledge reclaim, one reconciler interval + one `not_before` timer, behind `REMO_CORCH_ENABLED` (default OFF, mutually exclusive with `REMO_ORCHESTRATOR_ENABLED`). Fail-closed default quota / workspace / PR lookup: cannot launch in prod yet. |
 
 ## Cross-cutting invariants (do not violate)
 
@@ -595,7 +607,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   `ext:*`-only key and can never spawn a CLI on a host. **`ext:work` (live-site publish via
   `POST /api/ext/work`) is EXPLICIT-only** — the gate uses `hasExplicitScope`, so a legacy/NULL
   key (incl. the supervisor's own `purpose='supervisor'` spawn key) does NOT satisfy it and can
-  no longer publish to a client site; `ext:read`/`ext:ask` stay NULL-permissive by design. **`settings:read`/`settings:write`** are also EXPLICIT-only and reach ONLY the
+  no longer publish to a client site; `ext:read`/`ext:ask` stay NULL-permissive by design. **`ext:corch`** (enqueue central-orchestrator work items via `POST /api/ext/corch/work-items`) is likewise EXPLICIT-only: NULL/legacy keys and the other `ext:*` scopes do not satisfy it. **`settings:read`/`settings:write`** are also EXPLICIT-only and reach ONLY the
   settings route allowlist in `hub/src/auth/settings-api-key.ts` via `authMiddleware` (any other
   `/api/*` path ⇒ 403 for an api key). **`chat:session`** is EXPLICIT-only and reaches ONLY `/api/chat/*` (Bearer chat surface for a live stream-json session: list/history/send/cancel/prompts/SSE; pty-interactive refused; docs/auth.md "Chat via API key"). **`/api/api-keys` is cookie-auth ONLY —
   an api key must NEVER be able to mint an api key.** N keys per user; only `purpose='supervisor'`

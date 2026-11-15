@@ -153,3 +153,20 @@ describe('PTYCAP-07-10: the heal seam and the governed-launch adapter send no se
     expect(/['"`]session\.start['"`]/.test("send({ type: 'session.start' })")).toBe(true)
   })
 })
+
+describe('CORCH-01: no session-start literal under hub/src/corch', () => {
+  test('self-check: the corch tree is found', () => {
+    expect(walk(join(SRC, 'corch')).length).toBeGreaterThanOrEqual(8)
+  })
+
+  test('no file under hub/src/corch holds a session-start literal (launch goes through governedLaunch)', () => {
+    const hits = walk(join(SRC, 'corch'))
+      .map((f) => relative(SRC, f).split('\\').join('/'))
+      .filter((f) =>
+        /['"`]session\.start['"`]/.test(
+          readFileSync(join(SRC, f), 'utf8').split(/\r?\n/).filter((l) => !isComment(l)).join('\n'),
+        ),
+      )
+    expect(hits).toEqual([])
+  })
+})
