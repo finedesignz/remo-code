@@ -436,7 +436,7 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   **`REMO_CORCH_QUOTA_CEILING_PCT`** (default **55**; the account eligibility ceiling on `max(5h, 7d)`; a non-numeric,
   `<= 0` or `> 100` value refuses boot, but only while `REMO_CORCH_ENABLED` is on). With the flag ON the real quota
   provider (CUG snapshot via `POST /api/quota/snapshot`) replaces the fail-closed default; flag OFF still stores
-  snapshots and dispatches nothing.
+  snapshots and dispatches nothing. CORCH-04 adds **`REMO_CORCH_GSDC_URL`** + **`REMO_CORCH_GSDC_TOKEN`** (`gsdc_`, `board:read`; both unset = source off, no connection): the hub consumes the gsd-console board SSE and queues the next GSD phase of every enrolled repo as a `gsd_console` item, fail closed (any console failure adds and cancels nothing, one notification per outage, backoff capped at 5 min); see [docs/corch.md](docs/corch.md) "gsd-console ingestion".
 
 ## Docs map — subsystems & phases
 
