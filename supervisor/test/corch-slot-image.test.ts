@@ -99,7 +99,8 @@ describe('slot-image pipeline and runbook', () => {
   test('builds linux/amd64 on pull_request, never pushes', () => {
     expect(wp).toMatch(/event: pull_request/)
     expect(wp).toMatch(/platform: linux\/amd64/)
-    expect(wp).toMatch(/dry_run: true/)
+    expect(wp).toMatch(/docker build .*-f Dockerfile\.slot/)
+    expect(wp).not.toMatch(/docker (push|login)|plugin-docker-buildx/)
     expect(wp).not.toMatch(/username|password|from_secret|coolify/i)
   })
   test('docs/corch-linux-slots.md exists and names the required sections', () => {

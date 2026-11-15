@@ -53,6 +53,6 @@ Local smoke (dummy values only): `docker build -f Dockerfile.slot -t remo-slot .
 
 ## CI
 
-`.woodpecker/slot-image.yaml` builds the image on pull requests that touch it (linux/amd64, `dry_run: true`: no
-registry push, no deploy). `supervisor/test/corch-slot-image.test.ts` statically pins non-root, no secret ARG/ENV, and
+`.woodpecker/slot-image.yaml` builds the image on pull requests that touch it (linux/amd64, plain
+`docker build` against the host daemon, image removed after: no registry push, no deploy). `supervisor/test/corch-slot-image.test.ts` statically pins non-root, no secret ARG/ENV, and
 no Tauri/ConPTY. Deploying slots with real tokens is CORCH cutover item 8.
