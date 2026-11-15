@@ -6510,6 +6510,163 @@ To perform this operation, you must be authenticated by means of one of the foll
 apiKeyAuth
 </aside>
 
+## AgentAutofix PR-outcome event (timestamped HMAC; no cookie or api key)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/corch-events/aaf \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "event_id": "string",
+  "event": "pr.merged",
+  "repo": "string",
+  "pr_number": 0,
+  "head_ref": "string",
+  "merged_sha": "string",
+  "occurred_at": "string"
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/corch-events/aaf',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/corch-events/aaf`
+
+CORCH-08 receiver for events signed by AgentAutofix (`X-ZeroExposure-Timestamp`, `X-ZeroExposure-Signature: sha256=HMAC-SHA256(secret, ts + "." + rawBody)`, optional `X-ZeroExposure-Event-Id`). Raw body is read before any parse; the signature is compared in constant time; a timestamp more than 5 minutes off is rejected; every credential failure is the same 401. `pr.merged` marks the item done, `pr.closed` (unmerged) blocks it, `pr.failed` blocks it and sends one owner notification. An unknown or terminal item and a replayed `event_id` are 200 with no change. 503 until REMO_CORCH_AAF_EVENT_SECRET is set.
+
+> Body parameter
+
+```json
+{
+  "event_id": "string",
+  "event": "pr.merged",
+  "repo": "string",
+  "pr_number": 0,
+  "head_ref": "string",
+  "merged_sha": "string",
+  "occurred_at": "string"
+}
+```
+
+<h3 id="agentautofix-pr-outcome-event-(timestamped-hmac;-no-cookie-or-api-key)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|body|body|object|false|none|
+|» event_id|body|string|true|none|
+|» event|body|string|true|none|
+|» repo|body|string|true|none|
+|» pr_number|body|integer|false|none|
+|» head_ref|body|string|true|none|
+|» merged_sha|body|string|false|none|
+|» occurred_at|body|string|false|none|
+
+#### Enumerated Values
+
+|Parameter|Value|
+|---|---|
+|» event|pr.merged|
+|» event|pr.closed|
+|» event|pr.failed|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "ok": true,
+  "status": "applied"
+}
+```
+
+<h3 id="agentautofix-pr-outcome-event-(timestamped-hmac;-no-cookie-or-api-key)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Handled|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|bad_request (no value echoed)|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|unauthorized (uniform: bad or missing signature, stale timestamp)|Inline|
+|413|[Payload Too Large](https://tools.ietf.org/html/rfc7231#section-6.5.11)|Body over 16 KiB|Inline|
+|429|[Too Many Requests](https://tools.ietf.org/html/rfc6585#section-4)|Rate limited|Inline|
+|503|[Service Unavailable](https://tools.ietf.org/html/rfc7231#section-6.6.4)|not_configured (secret unset; nothing recorded) or notification_pending (a pr.failed owner notification was not delivered; the transition is applied, retry the same event_id)|Inline|
+
+<h3 id="agentautofix-pr-outcome-event-(timestamped-hmac;-no-cookie-or-api-key)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» ok|boolean|true|none|none|
+|» status|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|ok|true|
+|status|applied|
+|status|duplicate|
+|status|ignored|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **413**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **429**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **503**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
 <h1 id="remo-code-hub-chat">chat</h1>
 
 ## List the owner's sessions (optionally by project_dir)

@@ -9,6 +9,9 @@ import { randomUUID } from 'node:crypto'
 import { sql } from '../db/postgres.ts'
 import { buildCorchKey, corchBranch, corchUserLockKey } from './keys.ts'
 
+/** corch/<work_item_id> head ref (the id is a lowercase uuid). */
+const AAF_HEAD_REF_RE = /^corch\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/
+
 export type WorkSource = 'manual' | 'gsd_console' | 'aaf' | 'memlog'
 
 export interface CorchProject {
@@ -19,9 +22,15 @@ export interface CorchProject {
   daily_token_budget: string | number
   enabled: boolean
   accept_external: boolean
+  /** CORCH-08: AAF project id once provisioned. */
+  aaf_project_id: string | null
+  /** CORCH-08: only 'provisioned' projects are dispatchable (fail closed). */
+  aaf_provision_status: AafProvisionStatus
   created_at: Date
   updated_at: Date
 }
+
+export type AafProvisionStatus = 'aaf_unprovisioned' | 'provisioned'
 
 export interface CorchWorkItem {
   id: string
@@ -84,7 +93,15 @@ export interface EndRequeueInput {
 
 export type EndResult =
   | { changed: false }
-  | { changed: true; workItemId: string; userId: string; itemStatus: CorchWorkItem['status']; attempts: number }
+  | {
+      changed: true
+      workItemId: string
+      userId: string
+      itemStatus: CorchWorkItem['status']
+      attempts: number
+      /** CORCH-08: the item was no longer 'running' (an AAF closure event moved it), so it was left untouched. */
+      itemUntouched?: boolean
+    }
 
 /** Everything a gate needs about one run: identity, the item/project, the user's cap and tz. */
 export interface RunContext {
@@ -123,6 +140,33 @@ export interface LiveRun extends CorchRun {
   item_attempts: number
 }
 
+/** CORCH-08: a validated AAF event (parsed fields only; never the raw body). */
+export interface AafEventInput {
+  eventId: string
+  event: 'pr.merged' | 'pr.closed' | 'pr.failed'
+  /** owner/name as sent (untrusted; validated by the route). */
+  repo: string
+  headRef: string
+  prNumber: number | null
+}
+
+export type AafEventResult =
+  | { kind: 'duplicate' }
+  | { kind: 'unchanged'; reason: 'unknown_item' | 'terminal' | 'already_blocked' }
+  | { kind: 'transitioned'; userId: string; workItemId: string; to: 'done' | 'blocked'; endedRunIds: string[] }
+
+export type AafNotifyClaim =
+  | { kind: 'claimed'; userId: string; workItemId: string; token: string }
+  /** Another delivery holds a fresh claim: not delivered yet, the sender must retry. */
+  | { kind: 'busy' }
+  /** Nothing to send (no notification owed, or already delivered). */
+  | { kind: 'none' }
+
+export interface ProvisionResultInput {
+  status: AafProvisionStatus
+  aafProjectId: string | null
+}
+
 /** Every store method, so tests can implement fakes. */
 export interface CorchStore {
   createProject(i: CreateProjectInput): Promise<{ project: CorchProject; created: boolean }>
@@ -133,6 +177,19 @@ export interface CorchStore {
   updateProject(userId: string, projectId: string, patch: ProjectPatch): Promise<{ project: CorchProject; previousEnabled: boolean } | null>
   listWorkItems(userId: string, status: CorchWorkItem['status'] | null, limit: number): Promise<CorchWorkItem[]>
   enqueueWorkItem(i: EnqueueInput): Promise<{ item: CorchWorkItem; created: boolean }>
+  /** CORCH-08: record the outcome of an AAF provision attempt on the project. */
+  setProvisionResult(projectId: string, r: ProvisionResultInput): Promise<CorchProject | null>
+  /** CORCH-08: projects still needing provisioning (one-shot corch-provision-existing script). */
+  listUnprovisionedProjects(): Promise<CorchProject[]>
+  /** CORCH-08: dedupe on event_id, resolve the item by repo + head ref, apply the closure transition, one tx. */
+  applyAafEvent(e: AafEventInput): Promise<AafEventResult>
+  /**
+   * CORCH-08: atomically claim the owner notification of a pr.failed event (pending, or a 'sending' claim older
+   * than 5 minutes). Returns the recipient, or null when there is nothing to send / another delivery owns it.
+   */
+  claimAafNotify(eventId: string): Promise<AafNotifyClaim>
+  /** CORCH-08: record the delivery outcome of a claimed notification (false releases it). Fenced by the claim token. */
+  finishAafNotify(eventId: string, token: string, delivered: boolean): Promise<void>
   claimNext(userId: string, excludeIds: string[]): Promise<Claimed | null>
   attachSession(runId: string, sessionId: string, worktreePath: string | null): Promise<boolean>
   endRunAndRequeue(runId: string, i: EndRequeueInput): Promise<EndResult>
@@ -183,6 +240,16 @@ export interface GsdcApplyEntry {
   priority: number
   doneRefs: string[]
   candidate: { sourceRef: string; title: string; body: string } | null
+}
+
+/**
+ * CORCH-08: lock order is the item row first, then run rows, on every path that writes both (claimNext, the two
+ * run-end transitions, the AAF closure). Without this the closure (item, then run) and a run end (run, then item)
+ * could deadlock. A run that does not exist (or whose item is gone) locks nothing; the guarded UPDATE then no-ops.
+ */
+async function lockItemOfRun(tx: any, runId: string): Promise<void> {
+  const pre = await tx<{ work_item_id: string }[]>`SELECT work_item_id FROM corch_runs WHERE id = ${runId}`
+  if (pre.length > 0) await tx`SELECT id FROM corch_work_items WHERE id = ${pre[0]!.work_item_id} FOR UPDATE`
 }
 
 export const corchStore: CorchStore = {
@@ -252,6 +319,104 @@ export const corchStore: CorchStore = {
     return { item: existing[0]!, created: false }
   },
 
+  async setProvisionResult(projectId, r) {
+    const rows = await sql<CorchProject[]>`
+      UPDATE corch_projects SET aaf_provision_status = ${r.status}, aaf_project_id = ${r.aafProjectId}, updated_at = now()
+      WHERE id = ${projectId} RETURNING *`
+    return rows[0] ?? null
+  },
+
+  async listUnprovisionedProjects() {
+    return sql<CorchProject[]>`
+      SELECT * FROM corch_projects WHERE aaf_provision_status <> 'provisioned' ORDER BY created_at ASC, id ASC`
+  },
+
+  async applyAafEvent(e) {
+    return sql.begin(async (tx): Promise<AafEventResult> => {
+      // Dedupe first: a replayed event_id (unique) is a no-op with no second transition. A concurrent duplicate
+      // blocks on the unique index until the first commits, then does nothing.
+      const ins = await tx<{ id: string }[]>`
+        INSERT INTO corch_events (event_id, event, repo, head_ref, pr_number)
+        VALUES (${e.eventId}, ${e.event}, ${e.repo}, ${e.headRef}, ${e.prNumber})
+        ON CONFLICT (event_id) DO NOTHING RETURNING id`
+      if (ins.length === 0) return { kind: 'duplicate' }
+      const rowId = ins[0]!.id
+      const record = (outcome: string, userId: string | null, itemId: string | null, notify = false) =>
+        tx`UPDATE corch_events SET outcome = ${outcome}, user_id = ${userId}, work_item_id = ${itemId},
+             notify_state = ${notify ? 'pending' : 'none'} WHERE id = ${rowId}`
+
+      const m = AAF_HEAD_REF_RE.exec(e.headRef)
+      const found = m
+        ? await tx<{ id: string }[]>`
+            SELECT i.id
+            FROM corch_work_items i JOIN corch_projects p ON p.id = i.project_id AND p.user_id = i.user_id
+            WHERE i.id = ${m[1]!}::uuid AND i.branch = ${e.headRef} AND p.repo_ident = ${'github://' + e.repo.toLowerCase()}`
+        : []
+      if (found.length === 0) {
+        await record('unknown_item', null, null)
+        return { kind: 'unchanged', reason: 'unknown_item' }
+      }
+      // Lock order everywhere is item row first, then run rows (claimNext, the run-end paths, this): no deadlock.
+      const locked = await tx<{ id: string; user_id: string; status: CorchWorkItem['status'] }[]>`
+        SELECT id, user_id, status FROM corch_work_items WHERE id = ${found[0]!.id} FOR UPDATE`
+      const item = locked[0]!
+      // The item is closed out: any live run for it must stop. Ending the run row is what every dispatch gate and
+      // the parked-turn replay check, so a turn parked offline can never be sent for a merged / closed / failed item.
+      const endRuns = (reason: string) => tx<{ id: string }[]>`
+        UPDATE corch_runs SET status = 'ended', end_reason = ${reason}, ended_at = now()
+        WHERE work_item_id = ${item.id} AND ended_at IS NULL RETURNING id`
+      if (item.status === 'done' || item.status === 'cancelled') {
+        await record('terminal', item.user_id, item.id)
+        return { kind: 'unchanged', reason: 'terminal' }
+      }
+      if (e.event === 'pr.merged') {
+        await tx`
+          UPDATE corch_work_items SET status = 'done', wait_reason = NULL, not_before = NULL, updated_at = now()
+          WHERE id = ${item.id}`
+        const ended = await endRuns('aaf_pr_merged')
+        await record('done', item.user_id, item.id)
+        return { kind: 'transitioned', userId: item.user_id, workItemId: item.id, to: 'done', endedRunIds: ended.map((r) => r.id) }
+      }
+      if (item.status === 'blocked') {
+        await record('already_blocked', item.user_id, item.id)
+        return { kind: 'unchanged', reason: 'already_blocked' }
+      }
+      const reason = e.event === 'pr.failed' ? 'pr_failed' : 'pr_closed'
+      await tx`
+        UPDATE corch_work_items SET status = 'blocked', wait_reason = ${reason}, not_before = NULL, updated_at = now()
+        WHERE id = ${item.id}`
+      const ended = await endRuns(e.event === 'pr.failed' ? 'aaf_pr_failed' : 'aaf_pr_closed')
+      await record('blocked', item.user_id, item.id, e.event === 'pr.failed')
+      return { kind: 'transitioned', userId: item.user_id, workItemId: item.id, to: 'blocked', endedRunIds: ended.map((r) => r.id) }
+    })
+  },
+
+  async claimAafNotify(eventId) {
+    const token = randomUUID()
+    const rows = await sql<{ user_id: string; work_item_id: string }[]>`
+      UPDATE corch_events SET notify_state = 'sending', notify_claimed_at = now(), notify_claim_token = ${token}::uuid
+      WHERE event_id = ${eventId}
+        AND user_id IS NOT NULL AND work_item_id IS NOT NULL
+        AND (notify_state = 'pending'
+             OR (notify_state = 'sending' AND notify_claimed_at < now() - interval '5 minutes'))
+      RETURNING user_id, work_item_id`
+    if (rows[0]) return { kind: 'claimed', userId: rows[0].user_id, workItemId: rows[0].work_item_id, token }
+    // A fresh claim held by another delivery means "not delivered yet" (the sender must retry), not "done".
+    const cur = await sql<{ notify_state: string }[]>`
+      SELECT notify_state FROM corch_events WHERE event_id = ${eventId}`
+    // 'pending' here means a concurrent delivery claimed, failed and released between our UPDATE and this read: still
+    // not delivered, so it is unfinished too. Only 'none' (nothing owed) and 'sent' are done.
+    return cur[0]?.notify_state === 'sending' || cur[0]?.notify_state === 'pending' ? { kind: 'busy' } : { kind: 'none' }
+  },
+
+  async finishAafNotify(eventId, token, delivered) {
+    // Fenced: a slow, superseded delivery (its claim was reclaimed) can no longer overwrite the new owner's state.
+    await sql`
+      UPDATE corch_events
+      SET notify_state = ${delivered ? 'sent' : 'pending'}, notify_claimed_at = NULL, notify_claim_token = NULL
+      WHERE event_id = ${eventId} AND notify_state = 'sending' AND notify_claim_token = ${token}::uuid`
+  },
+
   async claimNext(userId, excludeIds) {
     const lockKey = corchUserLockKey(userId)
     try {
@@ -271,6 +436,7 @@ export const corchStore: CorchStore = {
             AND i.status = 'queued'
             AND (i.not_before IS NULL OR i.not_before <= now())
             AND p.enabled = true
+            AND p.aaf_provision_status = 'provisioned'
             AND NOT EXISTS (SELECT 1 FROM corch_runs r WHERE r.project_id = p.id AND r.ended_at IS NULL)
             AND NOT EXISTS (SELECT 1 FROM corch_work_items x WHERE x.project_id = p.id AND x.status = 'pr_open')
             AND i.id <> ALL(${excludeIds}::uuid[])
@@ -305,6 +471,7 @@ export const corchStore: CorchStore = {
 
   async endRunAndRequeue(runId, i) {
     return sql.begin(async (tx): Promise<EndResult> => {
+      await lockItemOfRun(tx, runId)
       const ended = await tx<{ work_item_id: string; user_id: string }[]>`
         UPDATE corch_runs SET status = 'ended', end_reason = ${i.endReason}, ended_at = now()
         WHERE id = ${runId} AND ended_at IS NULL RETURNING work_item_id, user_id`
@@ -321,7 +488,7 @@ export const corchStore: CorchStore = {
             not_before = CASE WHEN attempts + 1 >= max_attempts THEN NULL
                               ELSE now() + make_interval(secs => 60 * power(5, attempts)::double precision) END,
             updated_at = now()
-          WHERE id = ${itemId} RETURNING status, attempts`
+          WHERE id = ${itemId} AND status = 'running' RETURNING status, attempts`
       } else {
         const nb = i.notBefore
         const midnightTz = nb && 'midnightTz' in nb ? nb.midnightTz : null
@@ -339,7 +506,21 @@ export const corchStore: CorchStore = {
               WHEN ${at}::timestamptz IS NOT NULL THEN ${at}::timestamptz
               ELSE NULL END,
             updated_at = now()
-          WHERE id = ${itemId} RETURNING status, attempts`
+          WHERE id = ${itemId} AND status = 'running' RETURNING status, attempts`
+      }
+      // CORCH-08: an AAF closure event (done / blocked) may have moved the item while the run was live. The run
+      // still ends, but the item is left exactly as the event set it (never requeued, never re-notified).
+      if (row.length === 0) {
+        const cur = await tx<{ status: CorchWorkItem['status']; attempts: number }[]>`
+          SELECT status, attempts FROM corch_work_items WHERE id = ${itemId}`
+        return {
+          changed: true,
+          workItemId: itemId,
+          userId: ended[0]!.user_id,
+          itemStatus: cur[0]!.status,
+          attempts: cur[0]!.attempts,
+          itemUntouched: true,
+        }
       }
       return { changed: true, workItemId: itemId, userId: ended[0]!.user_id, itemStatus: row[0]!.status, attempts: row[0]!.attempts }
     })
@@ -347,13 +528,26 @@ export const corchStore: CorchStore = {
 
   async endRunMarkPrOpen(runId, prUrl) {
     return sql.begin(async (tx): Promise<EndResult> => {
+      await lockItemOfRun(tx, runId)
       const ended = await tx<{ work_item_id: string; user_id: string }[]>`
         UPDATE corch_runs SET status = 'ended', end_reason = 'pr_open', ended_at = now()
         WHERE id = ${runId} AND ended_at IS NULL RETURNING work_item_id, user_id`
       if (ended.length === 0) return { changed: false }
       const row = await tx<{ status: CorchWorkItem['status']; attempts: number }[]>`
         UPDATE corch_work_items SET status = 'pr_open', pr_url = ${prUrl}, wait_reason = NULL, not_before = NULL, updated_at = now()
-        WHERE id = ${ended[0]!.work_item_id} RETURNING status, attempts`
+        WHERE id = ${ended[0]!.work_item_id} AND status = 'running' RETURNING status, attempts`
+      if (row.length === 0) {
+        const cur = await tx<{ status: CorchWorkItem['status']; attempts: number }[]>`
+          SELECT status, attempts FROM corch_work_items WHERE id = ${ended[0]!.work_item_id}`
+        return {
+          changed: true,
+          workItemId: ended[0]!.work_item_id,
+          userId: ended[0]!.user_id,
+          itemStatus: cur[0]!.status,
+          attempts: cur[0]!.attempts,
+          itemUntouched: true,
+        }
+      }
       return { changed: true, workItemId: ended[0]!.work_item_id, userId: ended[0]!.user_id, itemStatus: row[0]!.status, attempts: row[0]!.attempts }
     })
   },
@@ -414,7 +608,7 @@ export const corchStore: CorchStore = {
     const r = await sql<{ t: Date | null }[]>`
       SELECT min(i.not_before) AS t
       FROM corch_work_items i JOIN corch_projects p ON p.id = i.project_id
-      WHERE i.status = 'queued' AND p.enabled = true AND i.not_before > now()`
+      WHERE i.status = 'queued' AND p.enabled = true AND p.aaf_provision_status = 'provisioned' AND i.not_before > now()`
     return r[0]?.t ?? null
   },
 
@@ -422,7 +616,8 @@ export const corchStore: CorchStore = {
     const r = await sql<{ user_id: string }[]>`
       SELECT DISTINCT i.user_id
       FROM corch_work_items i JOIN corch_projects p ON p.id = i.project_id
-      WHERE i.status = 'queued' AND p.enabled = true AND (i.not_before IS NULL OR i.not_before <= now())`
+      WHERE i.status = 'queued' AND p.enabled = true AND p.aaf_provision_status = 'provisioned'
+        AND (i.not_before IS NULL OR i.not_before <= now())`
     return r.map((x) => x.user_id)
   },
 

@@ -35,6 +35,8 @@ delete process.env.TELEGRAM_WEBHOOK_SECRET;
 // Titanium license-changed webhook: leave secret UNSET → inert 503 (still proves
 // the route is mounted; never a 404).
 delete process.env.TITANIUM_WEBHOOK_SECRET;
+// CORCH-08 AAF event receiver: secret UNSET -> inert 503 (mounted, never a 404). The describe below sets it.
+delete process.env.REMO_CORCH_AAF_EVENT_SECRET;
 
 import { describe, test, expect, mock } from 'bun:test';
 
@@ -105,6 +107,7 @@ const WEBHOOK_PATHS: Array<{ path: string; note: string }> = [
   { path: '/api/telegram/webhook/wrong-secret', note: 'telegram URL-secret' },
   { path: '/api/cloud-hook/reply', note: 'cloud-session Stop hook (Bearer cloud:hook key; none → 401)' },
   { path: '/api/quota/snapshot', note: 'CORCH-02 quota ingest (Bearer quota:publish key; none → 401)' },
+  { path: '/api/corch-events/aaf', note: 'CORCH-08 AAF event receiver (timestamped HMAC; secret unset -> 503)' },
   { path: '/webhooks/titanium/license-changed', note: 'titanium license-changed HMAC' },
 ];
 
@@ -169,6 +172,28 @@ describe('mount-order: CORCH-02 /api/quota/snapshot is api-key-authed and mounte
   test('a cookie-style request (no Bearer) is never authenticated', async () => {
     const res = await app.request('/api/quota/snapshot', { method: 'GET', headers: { cookie: 'remo_session=abc; csrf_token=x' } });
     expect(res.status).toBe(401);
+  });
+});
+
+describe('mount-order: CORCH-08 /api/corch-events/aaf is HMAC-authed and mounted BEFORE the cookie catch-all', () => {
+  test('secret unset => 503 not_configured (mounted; not a 404, not the cookie 401, not a CSRF 403)', async () => {
+    delete process.env.REMO_CORCH_AAF_EVENT_SECRET;
+    const res = await app.request('/api/corch-events/aaf', { method: 'POST', body: '{}' });
+    expect(res.status, `POST /api/corch-events/aaf returned ${res.status}; expected 503 (mounted before the JWT catch-all)`).toBe(503);
+    expect(await res.json()).toEqual({ error: 'not_configured' });
+  });
+
+  test('secret set + unsigned POST => the route uniform 401 (HMAC ran; no CSRF token or Origin needed)', async () => {
+    process.env.REMO_CORCH_AAF_EVENT_SECRET = 'mount-order-secret-0123456789';
+    try {
+      const res = await app.request('/api/corch-events/aaf', { method: 'POST', body: '{}', headers: { cookie: 'remo_session=abc' } });
+      expect(res.status).toBe(401);
+      const body: any = await res.json();
+      expect(body).toEqual({ error: 'unauthorized' });
+      expect(body.error).not.toBe('csrf_failed');
+    } finally {
+      delete process.env.REMO_CORCH_AAF_EVENT_SECRET;
+    }
   });
 });
 

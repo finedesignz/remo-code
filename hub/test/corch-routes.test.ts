@@ -70,6 +70,8 @@ const fakeDeps = {
   evaluate: async (u: string) => {
     triggers.push(u)
   },
+  // CORCH-08: provisioning is exercised in corch-aaf-provision.test.ts; here it is an identity pass-through.
+  provision: async (p: P) => p as any,
 }
 
 const savedFlag = process.env.REMO_CORCH_ENABLED
