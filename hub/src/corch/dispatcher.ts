@@ -32,13 +32,20 @@ export type WorkspaceResult =
 /** Resolves the repo worktree + session a run executes in. CORCH-09 supplies the real one. */
 export interface Workspace {
   resolve(a: { userId: string; item: CorchWorkItem; project: CorchProject; runId: string }): Promise<WorkspaceResult>
+  /**
+   * CORCH-09: the item reached done, blocked or cancelled. The real Workspace removes the worktree (done and
+   * cancelled only, never blocked) and releases the memlog claim. Best effort: it never throws into the caller.
+   */
+  release?(a: { userId: string; itemId: string; status: 'done' | 'blocked' | 'cancelled' | 'requeued' }): Promise<void>
+  /** CORCH-09: heartbeat the item's memlog claim; called from the reconciler for every run it sees alive. */
+  heartbeat?(a: { itemId: string; repoIdent: string }): Promise<void>
 }
 
 export type PrLookupResult = { kind: 'open'; url: string } | { kind: 'none' } | { kind: 'unavailable' }
 
 /** Finds the PR for a finished run's branch. CORCH-09 supplies the real one. */
 export interface PrLookup {
-  lookup(a: { userId: string; repoIdent: string; branch: string; workItemId: string }): Promise<PrLookupResult>
+  lookup(a: { userId: string; repoIdent: string; branch: string; workItemId: string; runId: string }): Promise<PrLookupResult>
 }
 
 export const DEFAULT_WORKSPACE: Workspace = {
@@ -210,7 +217,7 @@ export function refusalSchedule(reason: string): { endReason: string; waitReason
   let notBefore: NotBeforeKind = null
   if (MIDNIGHT_PREFIXES.some((p) => reason === p || reason.startsWith(p))) notBefore = 'midnight'
   else if (reason.startsWith(INJECT_RATE_PREFIX)) notBefore = 'plus_60m'
-  else if (reason.startsWith('autospawn_launch_')) notBefore = 'plus_lease'
+  else if (reason.startsWith('autospawn_launch_') || reason.startsWith('memlog_')) notBefore = 'plus_lease' // memlog_conflict / memlog_unavailable: re-evaluate after one lease (event-less wait, bounded timer)
   else if (reason.startsWith('quota:')) notBefore = 'quota' // resolved in refuseRun via deps.quota.earliestEligibleAt (CORCH-02)
   return { endReason, waitReason: reason, notBefore }
 }
@@ -263,6 +270,25 @@ function errMsg(err: unknown): string {
 export function createCorchDispatcher(deps: CorchDeps) {
   /** Items this process is currently launching (never reclaimed as orphans). */
   const inFlight = new Set<string>()
+  /**
+   * CORCH-09 claim fencing (hub is a single process). The memlog session is `corch:<item>` for EVERY attempt, so an
+   * old run's cleanup must never release a newer run's claim. `claimOwner` records which run holds the item's claim; every
+   * resolve and every release for an item runs under `withItemLock`, so a cleanup that lost the race sees the newer owner.
+   */
+  const claimOwner = new Map<string, string>()
+  /** Items whose worktree command timed out: it may still be running, so the claim is left to lapse (never released). */
+  const unconfirmed = new Set<string>()
+  const itemLocks = new Map<string, Promise<unknown>>()
+  function withItemLock<T>(itemId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = itemLocks.get(itemId) ?? Promise.resolve()
+    const run = prev.then(fn, fn)
+    const tail = run.then(() => undefined, () => undefined)
+    itemLocks.set(itemId, tail)
+    void tail.then(() => {
+      if (itemLocks.get(itemId) === tail) itemLocks.delete(itemId)
+    })
+    return run
+  }
   let timer: unknown = null
   /**
    * Run ids that may still send. Added when a run's pipeline is built, removed SYNCHRONOUSLY by every path
@@ -340,6 +366,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
     const r = await refuseRun(c.runId, c.userId, reason)
     if (!r.changed) return
     if (release) await releaseReservation(c)
+    await releaseIfClaimed(c.runId, c.userId, c.itemId)
     if (!c.inline) await armNotBeforeTimer()
   }
 
@@ -354,8 +381,60 @@ export function createCorchDispatcher(deps: CorchDeps) {
     })
     if (!r.changed) return
     if (release) await releaseReservation(c)
-    if (r.itemStatus === 'blocked' && !r.itemUntouched) await notifyBlocked(c, r.attempts, endReason)
+    if (r.itemStatus === 'blocked' && !r.itemUntouched) {
+      await notifyBlocked(c, r.attempts, endReason)
+      await releaseItem(c.userId, c.itemId, 'blocked')
+    } else {
+      await releaseIfClaimed(c.runId, c.userId, c.itemId)
+    }
     await afterRunEnd(c)
+  }
+
+  /** CORCH-09: item terminal -> the Workspace's removal/claim release. Best effort, never throws (LD-10). */
+  async function releaseItem(userId: string, itemId: string, status: 'done' | 'blocked' | 'cancelled' | 'requeued'): Promise<void> {
+    await withItemLock(itemId, async () => {
+      // A worktree command that timed out may still be mutating the worktree: never release OR remove under it, for any
+      // status (a done/cancelled item's worktree is then left for manual cleanup; the claim lapses).
+      if (unconfirmed.has(itemId)) {
+        log(`release skipped item=${itemId} status=${status}: worktree command unconfirmed`)
+        return
+      }
+      claimOwner.delete(itemId)
+      try {
+        await deps.workspace.release?.({ userId, itemId, status })
+      } catch (err) {
+        log(`workspace release failed item=${itemId}: ${errMsg(err)}`)
+      }
+    })
+  }
+
+  /**
+   * A run ended and its item went back to the queue: release the claim this RUN holds (the next attempt re-claims).
+   * A newer run that already took the claim is never touched (fenced by `claimOwner` under the item lock). Not called for
+   * pr_open (the claim is kept and heartbeated until done/blocked).
+   */
+  async function releaseIfClaimed(runId: string, userId: string, itemId: string): Promise<void> {
+    await withItemLock(itemId, async () => {
+      const owner = claimOwner.get(itemId)
+      if (owner !== undefined && owner !== runId) return // a newer run holds the claim now
+      if (owner === undefined) {
+        // No in-memory record (hub restarted since): fall back to the run having a worktree attached.
+        try {
+          const rc = await deps.store.runContext(runId)
+          if (!rc?.run.worktree_path) return
+        } catch (err) {
+          log(`run context failed run=${runId}: ${errMsg(err)}`)
+          return
+        }
+      }
+      if (unconfirmed.has(itemId)) return
+      claimOwner.delete(itemId)
+      try {
+        await deps.workspace.release?.({ userId, itemId, status: 'requeued' })
+      } catch (err) {
+        log(`workspace release failed item=${itemId}: ${errMsg(err)}`)
+      }
+    })
   }
 
   /** A run ended: free slot may start another item. Not re-entered from inside the claiming loop. */
@@ -402,6 +481,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
       notBefore: notBeforeAt === null ? null : { at: new Date(notBeforeAt).toISOString() },
     })
     if (!r.changed) return
+    await releaseIfClaimed(c.runId, c.userId, c.itemId)
     await afterRunEnd(c)
   }
 
@@ -412,7 +492,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
     if (death) return endQuotaDeath(c, death)
     let pr: Awaited<ReturnType<PrLookup['lookup']>>
     try {
-      pr = await deps.prLookup.lookup({ userId: c.userId, repoIdent: c.repoIdent, branch: c.branch, workItemId: c.itemId })
+      pr = await deps.prLookup.lookup({ userId: c.userId, repoIdent: c.repoIdent, branch: c.branch, workItemId: c.itemId, runId: c.runId })
     } catch (err) {
       log(`pr lookup failed run=${c.runId}: ${errMsg(err)}`)
       pr = { kind: 'unavailable' }
@@ -543,9 +623,12 @@ export function createCorchDispatcher(deps: CorchDeps) {
         resolveTarget: supervisorFor
           ? async () => {
               try {
-                const accountId = (await deps.store.runContext(run.id))?.run.account_slot ?? null
+                const recorded = (await deps.store.runContext(run.id))?.run
+                const accountId = recorded?.account_slot ?? null
                 const supervisorId = accountId ? await supervisorFor(userId, accountId) : null
                 if (!accountId || !supervisorId) return { ok: false as const, reason: UNBOUND }
+                // CORCH-09: the worktree host was recorded before worktree_ensure; launching anywhere else would strand it.
+                if (recorded?.supervisor_id && recorded.supervisor_id !== supervisorId) return { ok: false as const, reason: UNBOUND }
                 // QC2 G3: re-read the target's CURRENT advertised account (null = not connected) and require it to be
                 // the run's recorded account, so a reconnect advertising another account is never launched on.
                 const current = await deps.quota.supervisorAccountSlot?.(userId, supervisorId)
@@ -614,7 +697,12 @@ export function createCorchDispatcher(deps: CorchDeps) {
     } catch (err) {
       log(`pipeline release failed run=${run.id}: ${errMsg(err)}`)
     }
-    if (r.itemStatus === 'blocked' && !r.itemUntouched) await notifyBlocked(liveRunCtx(run), r.attempts, endReason)
+    if (r.itemStatus === 'blocked' && !r.itemUntouched) {
+      await notifyBlocked(liveRunCtx(run), r.attempts, endReason)
+      await releaseItem(run.user_id, run.work_item_id, 'blocked')
+    } else {
+      await releaseIfClaimed(run.id, run.user_id, run.work_item_id)
+    }
     await evaluateUser(run.user_id) // a run ended: the free slot may start another item
     return r
   }
@@ -648,7 +736,20 @@ export function createCorchDispatcher(deps: CorchDeps) {
         try {
           let ws: WorkspaceResult
           try {
-            ws = await deps.workspace.resolve({ userId, item: c.item, project: c.project, runId: c.run.id })
+            ws = await withItemLock(c.item.id, async () => {
+              try {
+                const r = await deps.workspace.resolve({ userId, item: c.item, project: c.project, runId: c.run.id })
+                // The claim is ours from here (even if attachSession or the launch fails): record the owner BEFORE the lock opens.
+                if (r.ok) {
+                  claimOwner.set(c.item.id, c.run.id)
+                  unconfirmed.delete(c.item.id)
+                }
+                return r
+              } catch (err) {
+                if (/supervisor_timeout/.test(errMsg(err))) unconfirmed.add(c.item.id)
+                throw err
+              }
+            })
           } catch (err) {
             // A throwing Workspace is a failure with an attempt (bounded backoff, blocked + one notification):
             // ending the run as an orphan would requeue it with no attempt and retry forever (QC MED 2).
@@ -743,7 +844,7 @@ export function createCorchDispatcher(deps: CorchDeps) {
     }
   }
 
-  return { deps, evaluateUser, evaluateAll, armNotBeforeTimer, inFlight, reclaimRun, stallRun, onSupervisorClosed, cancelRunSends }
+  return { deps, evaluateUser, evaluateAll, armNotBeforeTimer, inFlight, reclaimRun, stallRun, onSupervisorClosed, cancelRunSends, releaseItem, releaseIfClaimed }
 }
 
 export type CorchDispatcher = ReturnType<typeof createCorchDispatcher>
@@ -824,21 +925,26 @@ export async function realCorchDeps(): Promise<CorchDeps> {
     }
     return { fresh: true, sessionIds: new Set(e.sessionInventory.map((s) => s.session_id)) }
   }
+  const quota = createQuotaProvider({
+    accountsFor: (u) => quotaStore.accountsFor(u),
+    liveRunsByAccount: (u, ex) => quotaStore.liveRunsByAccount(u, ex),
+    onlineSlotSupervisors: (u) => registry.listOnlineSlotSupervisorsForUser(u),
+    claimAccountSlot: (r, u, a, c) => quotaStore.claimAccountSlot(r, u, a, c),
+    now: () => new Date(),
+    ceilingPct: corchQuotaCeilingPct,
+    markDeath: (a) => quotaStore.markDeath(a),
+  })
+  // CORCH-09: the real Workspace + PrLookup (only ever built when the flag is ON, via getCorch). The memlog client is
+  // the refusing default until a verified hub->memlog transport exists (R3.8 BLOCKED-ON-MCP): items wait.
+  const { createWorkspace, createPrLookup, realWorkspaceDeps } = await import('./workspace.ts')
+  const wsDeps = await realWorkspaceDeps(quota)
   return {
     store: corchStore,
-    workspace: DEFAULT_WORKSPACE,
+    workspace: createWorkspace(wsDeps),
     // LD-1: the heal/orchestrator launch deps with ONE override: CORCH enrollment replaces the allowlist.
     launch: { ...REAL_AUTOSPAWN, isRepoAutospawnAllowed: (u, r) => corchStore.isEnrolledEnabled(u, r) },
     launchCommand: AUTOSPAWN_LAUNCH_COMMAND,
-    quota: createQuotaProvider({
-      accountsFor: (u) => quotaStore.accountsFor(u),
-      liveRunsByAccount: (u, ex) => quotaStore.liveRunsByAccount(u, ex),
-      onlineSlotSupervisors: (u) => registry.listOnlineSlotSupervisorsForUser(u),
-      claimAccountSlot: (r, u, a, c) => quotaStore.claimAccountSlot(r, u, a, c),
-      now: () => new Date(),
-      ceilingPct: corchQuotaCeilingPct,
-      markDeath: (a) => quotaStore.markDeath(a),
-    }),
+    quota,
     pipeline: {
       isOnline: (req) => getChannel(req.sessionId) != null,
       send: (req, guard) => corchSend(req, guard),
@@ -847,7 +953,7 @@ export async function realCorchDeps(): Promise<CorchDeps> {
       },
     },
     dispatch,
-    prLookup: DEFAULT_PR_LOOKUP,
+    prLookup: createPrLookup(wsDeps),
     notify: async (n) => {
       const { fanOutNotify } = await import('../orchestrator/notify.ts')
       await fanOutNotify({
@@ -891,6 +997,12 @@ export function getCorch(): Promise<CorchDispatcher> {
 export async function cancelRunSendsNow(runIds: string[]): Promise<void> {
   if (singleton === null || runIds.length === 0) return
   await (await singleton).cancelRunSends(runIds)
+}
+
+/** CORCH-09: an AAF closure made the item done or blocked: remove the worktree (done) and release the memlog claim. */
+export async function releaseWorkItemNow(a: { userId: string; itemId: string; status: 'done' | 'blocked' | 'cancelled' | 'requeued' }): Promise<void> {
+  if (singleton === null) return // flag OFF / nothing ever launched in this process: no claim or worktree is ours
+  await (await singleton).releaseItem(a.userId, a.itemId, a.status)
 }
 
 /** Whether the real singleton was ever built (a flag-OFF process must never build it). */

@@ -396,3 +396,63 @@ transitions, the closure) is item row first, then run rows, so a closure racing 
 Tests: `corch-aaf-events` (auth envelope, vector, skew, replay, non-leaky errors), `corch-aaf-provision` (fake AAF, env
 unset, enrollment hook, backfill), real-Postgres `e2e/corch-aaf.e2e.test.ts` (transitions, reconciler pass, race,
 provision gate, backfill idempotency); `corch-dispatcher` and `corch-quota` e2e fixtures seed `provisioned` projects.
+
+## Slot injection, worktrees and PR lookup (CORCH-09)
+
+A headless Linux supervisor takes a CORCH run end to end. Everything is additive and default OFF: a desktop MSI never
+sets `REMO_ACCOUNT_SLOT`, so it is never a CORCH target and nothing below changes for it.
+
+**Supervisor env (process env, never sent to the hub):**
+
+| Var | Effect |
+|---|---|
+| `REMO_ACCOUNT_SLOT` | Advertised as `account_slot` in `supervisor.hello` (key absent when unset). Marks the supervisor as a slot. Must match `^[A-Za-z0-9_-]{1,64}$`. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Read from the supervisor's own env and handed ONLY to the spawned `claude` child of the stream-json runner, only with the slot set. |
+| `REMO_SLOT_CLAUDE_CONFIG_DIR` | Becomes the child's `CLAUDE_CONFIG_DIR` (the slot's own login and settings), only with the slot set. |
+
+With the slot set, `claude-runner.ts` spawns with `slotSpawnEnv` (`supervisor/src/slot.ts`): token and config dir are
+both REQUIRED (a missing one refuses the spawn with a code, never a fallback to another login), `ANTHROPIC_API_KEY` is
+scrubbed, deploy credentials stay scrubbed, and the git push credential (`GH_TOKEN`/`GITHUB_TOKEN`) is kept so the worker can
+push `corch/<id>` and open its PR. Without the slot the spawn env is byte for byte the previous one. `sanitizeSpawnEnv` does not
+match `CLAUDE_CODE_OAUTH_TOKEN` by name (it is not in the denylist or the credential patterns), so it is injected explicitly
+rather than "let through"; the human PTY paths are untouched. No hub source, schema, frame or log carries a token value
+(`hub/test/corch-no-token-guard.test.ts` plus the supervisor frame test).
+
+**Allowlisted supervisor commands** (`corch.worktree_ensure`, `corch.worktree_remove`, `corch.pr_lookup`, in
+`supervisor/src/commands/corch-worktree.ts` and `EXT_READ_COMMANDS`). The hub sends each only through
+`hub/src/corch/workspace.ts`, immediately after `haltBeforeMachineSend` (pinned by the guard test).
+
+- `worktree_ensure [repo_ident, work_item_id]`: ensure the canonical clone `<root>/<owner>/<name>` (https clone with the
+  worker credential via a credential helper that references the env var, never argv), fetch, resolve the REMOTE default
+  branch (never guessed), then `git worktree add <root>/corch/<name>-<work_item_id> -b corch/<work_item_id> origin/<default>`.
+  Idempotent (an existing worktree on that branch is reused; a kept branch is re-attached). Identifiers are validated and the
+  paths pass `assertTargetWithinRoots`, so traversal is refused before git runs. Reply: path, branch, default branch.
+- `worktree_remove`: on done and cancelled only (blocked keeps the worktree for inspection). Idempotent. The hub targets only the supervisor recorded on the run (`corch_runs.supervisor_id`, persisted BEFORE `worktree_ensure`; every host recorded by any run of the item is cleaned, and launch is pinned to the recorded host); a failed removal is logged, best effort, with no automatic retry; a run with no recorded host is never guessed from the account's current binding.
+- `pr_lookup [path, branch]`: `gh api repos/<o>/<r>/pulls` with `head=<o>:corch/<id>`, `state=open`, `--hostname github.com` and the worker
+  credential (the head filter is server-side, so newer fork PRs cannot hide the match past a page cut); an open SAME-repo PR
+  (head repo re-checked, never a fork) returns its url. Replies carry only paths, branch names, PR urls or an error code, never gh/git output.
+
+**Hub (`workspace.ts`).** `resolve` runs: pick and record the quota account and slot supervisor, take the memlog claim,
+`worktree_ensure`, then find or create the `sessions` row for the path (hostname = the slot supervisor). A refusal
+(`quota:*`, `memlog_conflict`, `memlog_unavailable`, halt) is a no-attempt wait; a worktree command failure throws (bounded
+failure with an attempt, blocked plus one notification). The real `PrLookup` asks the run's own supervisor (`open` => `pr_open`
+plus `pr_url`; none => requeue per R3.4; any failure => `unavailable`). Claim lifecycle: the claim is taken in `resolve` and released (a) when a run ends and the item goes back to the queue (a refusal,
+failure, quota death or reclaim after a worktree was attached; the worktree is kept and the next attempt re-claims), (b) when the item
+is blocked (worktree kept), (c) when it is done (AAF merged) or cancelled (gsd-console cancelled a queued item), which also removes
+the worktree, and (d) on any throw inside `resolve` after the claim (an RPC timeout excepted: the command may still be mutating the
+worktree, so the claim is left to lapse and re-taken by the same session). While an item is `pr_open` the claim is KEPT and the
+reconciler heartbeats it (paged, 200 items per pass with a cursor), together with the claims of live runs, until AAF closes the item. Claim ownership is fenced per item (an in-process owner map under a per-item lock), so a stale run's cleanup never releases a newer run's claim. One `worktree_ensure` runs under a single 480s budget (each git command also capped at 240s), below the hub's 600s RPC timeout, so the hub always receives a real reply; a timeout leaves the claim to lapse and is never released. The supervisor never advertises the
+`corch.*` commands, so a scheduled task cannot invoke them; clone identity is bound (`origin` must equal the expected remote,
+`clone_origin_mismatch` otherwise), the git credential helper is scoped to `https://github.com`, a worktree on any branch other than
+`corch/<id>` is never force-removed (`worktree_wrong_branch`), and with the slot set every runner event (string values and keys) is scrubbed of the exact
+token and git credential values before it reaches the hub (best-effort: a value split across events or re-encoded is not caught; the control is that no hub state holds the token). `pr_lookup` queries `gh api repos/<owner>/<repo>/pulls` with a server-side `head=<owner>:<branch>` filter and `--hostname github.com`, and ignores an inherited `GH_REPO`.
+
+**Memlog claim (R3.8): BLOCKED-ON-MCP.** memlog is a gateway-only MCP Factory server; the hub holds no gateway credential
+and has no MCP client, so no verified hub->memlog transport exists (7e request filed to `mcp-servers`). The `MemlogClient`
+seam (`memlog.ts`) defaults to refusing `memlog_unavailable`: with the flag ON every item waits (re-evaluated after one lease)
+and one ticket is raised per process; nothing dispatches without a claim. A real client only needs to implement
+`claim/heartbeat/release` and be passed to `realWorkspaceDeps`. No workaround transport was built.
+
+Tests: supervisor `corch-slot` (hello, spawn env, fail closed, frame test), `corch-worktree` (temp git repos, fake gh);
+hub `corch-workspace` (fake memlog and slot supervisor), `corch-no-token-guard`, real-Postgres `e2e/corch-slot.e2e.test.ts`
+(claim, worktree, launch, turn end, lookup, release with the real Workspace and PrLookup).
