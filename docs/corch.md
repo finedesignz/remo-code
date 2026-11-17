@@ -185,6 +185,35 @@ one GSD phase, push the branch and open a pull request, and the single sentence 
 never push to the default branch, never deploy." Title, body, source and source_ref pass ONLY through
 `fenceUntrusted`. Launch goes through `governedLaunch` HEAL policy, which forces `skipPermissions: false`.
 
+## Built-in quota source (CORCH-14)
+
+The orchestrator reads account usage itself; no separate app is required. Each slot supervisor (the container
+that holds one Claude account, `REMO_ACCOUNT_SLOT` set) polls its own account and reports the result:
+
+- **Supervisor** (`supervisor/src/usage/slot-quota-poll.ts`): on `auth_ok` and then every
+  `REMO_SLOT_QUOTA_INTERVAL_MS` (default 300000, floor 60000) it sends one minimal `max_tokens: 1` call to
+  `POST /v1/messages` with the slot's own subscription token and reads the response headers
+  `anthropic-ratelimit-unified-{5h,7d}-utilization` (0..1 fraction) and `-{5h,7d}-reset` (unix seconds). The
+  long-lived slot token cannot use `/api/oauth/usage` (403, it lacks `user:profile`), which is why the headers are
+  used. The token is only ever the Authorization header: it is never logged, returned or framed, and the response
+  body is never read. A desktop supervisor (no slot) never runs this poll.
+  The 5h headers are absent while the account has no open 5h window (seen live 2026-11-17): that is sent as
+  `five_h_pct: null` (unknown, never 0), which rule 10 below caps at one live run. A 429 that still carries the
+  windows is a valid reading. The interval is clamped to 1..8 min so the hub's 10 min staleness TTL cannot be
+  reached by configuration.
+- **Wire**: one `/ws/agent` frame `slot_quota_report` with `account_slot`, `five_h_pct` (0..100 or null), `seven_d_pct` (0..100),
+  `resets_5h`, `resets_7d` (ISO or null) and `fetched_at`.
+- **Hub** (`hub/src/corch/slot-quota.ts`): accepted only when the reporting connection registered that exact
+  `account_slot` in its hello, so a supervisor can write only its own account's row; a `fetched_at` more than 120s
+  ahead of the hub clock is dropped. The reading is upserted into `corch_quota_accounts` with
+  `account_id = slot = account_slot`, `source = 'live'`, `enabled = true`, `cug_blocked = false`, through the same
+  store function as the HTTP ingest (same replay and death-clear rules), then triggers the same queue push and
+  dispatch evaluation. It is stored with `REMO_CORCH_ENABLED` OFF too.
+
+`POST /api/quota/snapshot` (an external publisher with a `quota:publish` key) still works and is OPTIONAL: both
+sources write the same rows, and the newer `fetched_at` wins. The eligibility rules below are unchanged; where they
+say "CUG" read "the quota source".
+
 ## Quota eligibility (CORCH-02)
 
 The hub uses ONLY the CUG snapshot (never the oauth-poll `hub/src/usage/**` store or the threshold gate; a test

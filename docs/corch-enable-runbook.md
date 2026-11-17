@@ -30,7 +30,7 @@ cannot pass before this is resolved.** This is a code prerequisite, not an owner
 
 | # | Item | Gate | Needed by |
 |---|---|---|---|
-| 1 | Hub key `quota:publish`; CUG `hub_publish_url` + credential | OWNER | CORCH-03 live |
+| 1 | OPTIONAL (CORCH-14: slots report their own quota). Hub key `quota:publish`; CUG `hub_publish_url` + credential | OWNER | nothing; only for an external publisher |
 | 2 | Hub key `quota:read` for AAF; AAF `QUOTA_FEED_*` | OWNER | CORCH-07 live |
 | 3 | Shared event secret (AAF + hub) | OWNER | CORCH-06/08 live |
 | 4 | AAF `CORCH_TRUSTED_PR_AUTHORS` (after CORCH-05b deployed) | OWNER | CORCH-05/05b live |
@@ -45,7 +45,12 @@ The live proof runs between item 8 and a wider rollout, on ONE throwaway repo (s
 Items 1-8 do not change production behavior while `REMO_CORCH_ENABLED` is OFF: the hub only stores snapshots,
 events and rows.
 
-## Item 1 - quota publish key (CUG to hub)
+## Item 1 - quota publish key (CUG to hub) - OPTIONAL
+
+Since CORCH-14 every slot supervisor reports its own account's usage to the hub (see docs/corch.md "Built-in quota
+source"), so the cutover needs no claude-usage-guard release and no `quota:publish` key. Skip this item unless an
+external publisher is wanted. The quota verification for the cutover is done in item 8: once a slot container is
+online, `GET /api/quota/snapshot` lists an account whose `account_id` equals the slot id within one poll interval.
 
 - Mint a hub API key with scope `quota:publish` through the cookie-only `/api/api-keys` route (an api key can never
   mint a key). Scope is EXPLICIT-only and reaches only `POST /api/quota/snapshot`.

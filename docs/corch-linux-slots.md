@@ -22,7 +22,8 @@ refuses to start (exit 64) if any required one is missing and never prints a val
 | `REMO_ACCOUNT_SLOT` | yes | Slot id, `^[A-Za-z0-9_-]{1,64}$`; advertised as `account_slot` |
 | `REMO_HUB_URL` | yes | Hub origin, for example `https://app.remo-code.com` |
 | `REMO_API_KEY` | yes | This slot's own `purpose='host'` key (`POST /api/api-keys {host:true}`), written to a 0600 `supervisor.json` at start |
-| `CLAUDE_CODE_OAUTH_TOKEN` | yes | Exactly one account's subscription OAuth token; handed only to the spawned `claude` child. No API key is supported |
+| `CLAUDE_CODE_OAUTH_TOKEN` | yes | Exactly one account's subscription OAuth token; handed to the spawned `claude` child and used by the supervisor itself for the CORCH-14 quota poll (Authorization header only; never logged or sent to the hub). No API key is supported |
+| `REMO_SLOT_QUOTA_INTERVAL_MS` | no | Quota poll cadence, default `300000`, clamped to `60000`..`480000` (docs/corch.md "Built-in quota source") |
 | `GH_TOKEN` | yes | Git credential (also used by `gh api` for `corch.pr_lookup`); the entrypoint refuses to start without it. Wired through an in-memory credential helper (the supervisor already redacts this exact name from child output) scoped to `https://$REMO_GIT_HOST` (default `github.com`) only; nothing written to disk |
 
 Non-secret defaults baked in: `REMO_ROOTS=/data/work`, `REMO_SLOT_CLAUDE_CONFIG_DIR=/data/claude`,
