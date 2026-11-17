@@ -12,7 +12,7 @@
  * Reqs: R-ADO-26 (per-stage frequency presets, data not behavior),
  *       R-ADO-27 (apply preset, overridable — overrides persist).
  */
-import { describe, test, expect, beforeAll } from 'bun:test'
+import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import {
   PRESET_ROWS,
   presetRowsForStage,
@@ -157,6 +157,7 @@ describe('stage-presets — e2e gating', () => {
 maybe('stage-presets — applyStagePreset e2e', () => {
   let sql: any
   let taskId: string
+  let userId: string
 
   beforeAll(async () => {
     process.env.DATABASE_URL = process.env.REMO_E2E_DB_URL!
@@ -171,6 +172,7 @@ maybe('stage-presets — applyStagePreset e2e', () => {
       VALUES (${`ado-preset-${Date.now()}@e2e.local`}, 'x')
       RETURNING id
     `
+    userId = u[0].id
     const s = await sql`
       INSERT INTO sessions (user_id, name, project_dir, token_hash)
       VALUES (${u[0].id}, 'preset-sess', '/tmp/preset', ${`h-${Date.now()}`})
@@ -182,6 +184,13 @@ maybe('stage-presets — applyStagePreset e2e', () => {
       RETURNING id
     `
     taskId = t[0].id
+  })
+
+  afterAll(async () => {
+    // The inserted orchestrator task defaults to enabled. Leaving it blocks the
+    // hub-global proof arm (other_orchestrator_task_enabled) for the rest of the
+    // qc database. Users cascade to the task and its rows.
+    if (sql && userId) await sql`DELETE FROM users WHERE id = ${userId}`
   })
 
   test('apply (no overwrite) inserts the full preset; second apply skips all', async () => {
