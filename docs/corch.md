@@ -447,11 +447,16 @@ reconciler heartbeats it (paged, 200 items per pass with a cursor), together wit
 `corch/<id>` is never force-removed (`worktree_wrong_branch`), and with the slot set every runner event (string values and keys) is scrubbed of the exact
 token and git credential values before it reaches the hub (best-effort: a value split across events or re-encoded is not caught; the control is that no hub state holds the token). `pr_lookup` queries `gh api repos/<owner>/<repo>/pulls` with a server-side `head=<owner>:<branch>` filter and `--hostname github.com`, and ignores an inherited `GH_REPO`.
 
-**Memlog claim (R3.8): BLOCKED-ON-MCP.** memlog is a gateway-only MCP Factory server; the hub holds no gateway credential
-and has no MCP client, so no verified hub->memlog transport exists (7e request filed to `mcp-servers`). The `MemlogClient`
-seam (`memlog.ts`) defaults to refusing `memlog_unavailable`: with the flag ON every item waits (re-evaluated after one lease)
-and one ticket is raised per process; nothing dispatches without a claim. A real client only needs to implement
-`claim/heartbeat/release` and be passed to `realWorkspaceDeps`. No workaround transport was built.
+**Memlog claim (R3.8): REST transport (CORCH-15).** `hub/src/corch/memlog-rest.ts` implements `MemlogClient` over
+memlog's REST claims API: `POST /v1/claims` (`repo`, `session`, `cli`, `branch`, `worktree`, `scope`),
+`POST /v1/claims/heartbeat`, `POST /v1/claims/release`, authenticated with `x-api-key` (a per-agent token whose
+principal is registered in memlog's `MEMLOG_AGENT_PRINCIPALS`). `host` is never sent, so it defaults to the token
+principal's. Mapping: 2xx = claimed; 409 = `memlog_conflict` (another live session holds the branch or worktree;
+the item waits, no attempt consumed); a network error, a 10s timeout or any other status = `memlog_unavailable`
+(fail closed, no second transport). The token is only that one header and is never logged. It is selected in
+`realDeps` only when `REMO_CORCH_MEMLOG_URL` and `REMO_CORCH_MEMLOG_TOKEN` are both set (`REMO_CORCH_MEMLOG_CLI`
+defaults to `claude`); otherwise the `MemlogClient` default still refuses `memlog_unavailable`, every item waits
+(re-evaluated after one lease) and nothing dispatches without a claim.
 
 Tests: supervisor `corch-slot` (hello, spawn env, fail closed, frame test), `corch-worktree` (temp git repos, fake gh);
 hub `corch-workspace` (fake memlog and slot supervisor), `corch-no-token-guard`, real-Postgres `e2e/corch-slot.e2e.test.ts`

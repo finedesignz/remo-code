@@ -85,6 +85,27 @@ export function aafEventSecret(): string | null {
 }
 
 /**
+ * CORCH-15 (R3.8): the memlog REST transport, read at call time. null (the refusing default client stays) unless
+ * BOTH REMO_CORCH_MEMLOG_URL (https, or loopback http) and REMO_CORCH_MEMLOG_TOKEN are set. REMO_CORCH_MEMLOG_CLI
+ * is the cli of the token's memlog principal (default `claude`). The token is read only to build one header.
+ */
+export function memlogRestConfig(): { baseUrl: string; token: string; cli: string } | null {
+  const url = (process.env.REMO_CORCH_MEMLOG_URL ?? '').trim()
+  const token = (process.env.REMO_CORCH_MEMLOG_TOKEN ?? '').trim()
+  if (!url || !token) return null
+  let u: URL
+  try {
+    u = new URL(url)
+  } catch {
+    return null
+  }
+  const loopback = u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]'
+  if (!(u.protocol === 'https:' || (u.protocol === 'http:' && loopback))) return null
+  const cli = (process.env.REMO_CORCH_MEMLOG_CLI ?? '').trim() || 'claude'
+  return { baseUrl: `${u.origin}${u.pathname.replace(/\/+$/, '')}`, token, cli }
+}
+
+/**
  * CORCH-08 (CORCH-R5.7): the AAF provision endpoint configuration, read at call time.
  *  - off:      REMO_CORCH_AAF_URL or REMO_CORCH_AAF_TOKEN unset (no call is made; the project stays aaf_unprovisioned)
  *  - partial:  URL and token set but REMO_CORCH_AAF_INSTALLATION_ID missing/invalid, or the URL unusable
