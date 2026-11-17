@@ -127,15 +127,20 @@ export async function runProofChecks(a: ProofChecksArgs): Promise<void> {
   const scheduleRule = () => ({ interval: 5, unit: 'minutes', start_at: new Date().toISOString() })
   const arm = (userId: string, sessionId: string, repoIdent: string, over: Record<string, unknown> = {}) =>
     dal.armProofRunTx({ userId, sessionId, repoIdent, scheduleRule: scheduleRule(), ...frozen(over) } as any)
-  // Arm refuses while ANY other orchestrator task is enabled (hub-global flags). The e2e
-  // suite runs files concurrently, and orchestrator-due-waves enables one for a short
-  // scan. That refusal is real; it is not a single-flight result. Wait it out, then
-  // assert the race. A non-transient error still fails immediately.
+  // Arm refuses while ANY other orchestrator task is enabled (hub-global flags). The
+  // orchestrator:e2e script runs the e2e files concurrently (bun's default concurrency),
+  // and peers (due-waves' scan, the automation-controls helper) leave an enabled
+  // orchestrator task until they finish. Under CI load that hold outlasted an 8s
+  // poll, so every parallel arm lost with other_orchestrator_task_enabled and the
+  // single-flight assertion never ran. The refusal is real; it is not a single-flight
+  // result. Wait the peer out (bounded by the enclosing test's timeout), then assert
+  // the race. A non-transient error still fails immediately.
+  const QUIET_MS = 90_000
   const TRANSIENT_ARM = new Set(['other_orchestrator_task_enabled', '40P01', '40001'])
   const reasonCode = (err: any): string => String(err?.code ?? err?.message ?? 'unknown')
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
   const armWhenQuiet = async (userId: string, sessionId: string, repoIdent: string, over: Record<string, unknown> = {}) => {
-    const deadline = Date.now() + 8_000
+    const deadline = Date.now() + QUIET_MS
     for (;;) {
       try {
         return await arm(userId, sessionId, repoIdent, over)
@@ -209,7 +214,7 @@ export async function runProofChecks(a: ProofChecksArgs): Promise<void> {
     expect(idx.every((r: any) => /UNIQUE/i.test(r.indexdef) && /WHERE/i.test(r.indexdef))).toBe(true)
 
     // ── 2. Single-flight under concurrency: 5 parallel arms, exactly 1 wins ──────────────
-    const deadline = Date.now() + 8_000
+    const deadline = Date.now() + QUIET_MS
     let won: PromiseFulfilledResult<{ run: any; taskId: string }>[] = []
     let lost: PromiseRejectedResult[] = []
     let lostCodes = ''

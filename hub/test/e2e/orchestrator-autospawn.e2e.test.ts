@@ -258,7 +258,7 @@ maybeDescribe('BSA-07 e2e — build-session autospawn (real PG + stub supervisor
     // is untouched.
     const { runProofChecks } = await import('./proof-checks.ts');
     await runProofChecks({ sql: h.sql, userId: h.userId, sessionId: h.sessionId });
-  }, 120_000);
+  }, 180_000);
 
   // ── GATE NO-OPS ───────────────────────────────────────────────────────────────
   test('allowlist EMPTY → refused:not_allowlisted, no launch, no ledger row', async () => {
