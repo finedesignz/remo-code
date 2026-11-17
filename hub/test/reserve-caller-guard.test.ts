@@ -107,3 +107,10 @@ describe('PTYCAP-04-04 -- counterKey / turnToken suppliers of the PTY door (T-04
     expect(args).toEqual(['{ a: f(1), b: 2 }'])
   })
 })
+
+describe('CORCH-01 -- no reserveInject( call under hub/src/corch (the reservation arrives through the governed launch deps)', () => {
+  test('reserveInject( never appears in a corch file; the ALLOWED set above is unchanged', () => {
+    expect(filesIncluding('reserveInject(').filter((f) => f.startsWith('corch/'))).toEqual([])
+    expect(FILES.filter((f) => f.rel.startsWith('corch/')).length).toBeGreaterThanOrEqual(8)
+  })
+})

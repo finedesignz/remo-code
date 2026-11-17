@@ -18,6 +18,7 @@ import {
   setSupervisorStatusServer,
 } from './supervisor-registry'
 import { log } from '../observability/logger'
+import { corchEnabled } from '../corch/flag.ts'
 
 const AUTH_TIMEOUT_MS = 5_000
 const HEARTBEAT_INTERVAL_MS = 30_000
@@ -920,7 +921,8 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
       roots: msg.roots,
     })
     ws.data.supervisorId = row.id
-    registerSupervisor({ ws, supervisorId: row.id, userId, apiKeyId, roots: msg.roots, hostname: msg.hostname })
+    registerSupervisor({ ws, supervisorId: row.id, userId, apiKeyId, roots: msg.roots, hostname: msg.hostname, accountSlot: msg.account_slot, maxConcurrent: msg.max_concurrent })
+    if (corchEnabled()) void import('../corch/dispatcher.ts').then((m) => m.onSupervisorHello(userId)).catch((err) => console.warn(`[corch] supervisor hello hook failed: ${err?.message ?? err}`))
     // Reset state to idle on (re)connect — any previously running session was
     // owned by the supervisor process which has since restarted.
     await updateSupervisorState(row.id, 'idle', null)
@@ -1417,6 +1419,7 @@ export async function handleAgentClose(ws: ServerWebSocket<AgentWsData>) {
     // Pass the closing ws so unregister can ignore stale closes from sockets
     // that have already been replaced by a reconnect.
     unregisterSupervisor(ws.data.supervisorId, ws)
+    if (corchEnabled()) void import('../corch/dispatcher.ts').then((m) => m.onSupervisorClosed(ws.data.supervisorId as string)).catch((err) => console.warn(`[corch] supervisor close hook failed: ${err?.message ?? err}`))
     return
   }
 

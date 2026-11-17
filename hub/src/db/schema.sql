@@ -1883,3 +1883,125 @@ CREATE INDEX IF NOT EXISTS idx_heal_events_user_repo_created
 -- predate this column stay recognised by the __internal_ name-prefix half of
 -- isInternalScheduledTask (hub/src/heal/internal-task.ts).
 ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS is_internal BOOLEAN NOT NULL DEFAULT false;
+
+-- CORCH-01 central orchestrator queue (additive; re-runs every boot).
+-- Enrolled repos, queued work items, and one row per launch attempt. Idempotency lives in the
+-- structure: unique (user_id, source, source_ref) per item, and partial unique indexes allowing at
+-- most one live run per item and per project.
+CREATE TABLE IF NOT EXISTS corch_projects (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id            UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  repo_ident         TEXT NOT NULL,
+  priority           INTEGER NOT NULL DEFAULT 0,
+  daily_token_budget BIGINT NOT NULL DEFAULT 2000000 CHECK (daily_token_budget > 0),
+  enabled            BOOLEAN NOT NULL DEFAULT true,
+  accept_external    BOOLEAN NOT NULL DEFAULT false,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (user_id, repo_ident)
+);
+
+CREATE TABLE IF NOT EXISTS corch_work_items (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  project_id   UUID NOT NULL REFERENCES corch_projects(id) ON DELETE CASCADE,
+  source       TEXT NOT NULL CHECK (source IN ('manual','gsd_console','aaf','memlog')),
+  source_ref   TEXT NOT NULL,
+  title        TEXT NOT NULL,
+  body         TEXT NOT NULL DEFAULT '',
+  priority     INTEGER NOT NULL DEFAULT 0,
+  status       TEXT NOT NULL DEFAULT 'queued'
+               CHECK (status IN ('queued','running','pr_open','done','blocked','cancelled')),
+  wait_reason  TEXT NULL,
+  not_before   TIMESTAMPTZ NULL,
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 3 CHECK (max_attempts > 0),
+  branch       TEXT NOT NULL,
+  pr_url       TEXT NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (user_id, source, source_ref)
+);
+CREATE INDEX IF NOT EXISTS idx_corch_work_items_status_not_before
+  ON corch_work_items(status, not_before);
+
+CREATE TABLE IF NOT EXISTS corch_runs (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  work_item_id  UUID NOT NULL REFERENCES corch_work_items(id) ON DELETE CASCADE,
+  project_id    UUID NOT NULL REFERENCES corch_projects(id) ON DELETE CASCADE,
+  user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  account_slot  TEXT NULL,
+  supervisor_id TEXT NULL,
+  session_id    TEXT NULL,
+  worktree_path TEXT NULL,
+  counter_key   TEXT NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'launching'
+                CHECK (status IN ('launching','running','stalled','ended')),
+  end_reason    TEXT NULL,
+  heartbeat_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ended_at      TIMESTAMPTZ NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_corch_runs_live_item
+  ON corch_runs(work_item_id) WHERE ended_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_corch_runs_live_project
+  ON corch_runs(project_id) WHERE ended_at IS NULL;
+
+-- Per-user concurrency cap for CORCH runs (default 1).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS corch_max_concurrent_runs INTEGER NOT NULL DEFAULT 1;
+DO $$ BEGIN
+  ALTER TABLE users ADD CONSTRAINT users_corch_max_concurrent_runs_positive
+    CHECK (corch_max_concurrent_runs > 0);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- CORCH-11: remote pause. Paused = no new dispatch (live runs continue); distinct from the kill switch. Additive.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS corch_paused BOOLEAN NOT NULL DEFAULT false;
+
+-- CORCH-08 AAF provisioning + closure events (additive). Only a project AAF has provisioned is dispatchable:
+-- the default is 'aaf_unprovisioned' (fail closed), set to 'provisioned' only by a successful AAF provision call.
+ALTER TABLE corch_projects ADD COLUMN IF NOT EXISTS aaf_project_id TEXT NULL;
+ALTER TABLE corch_projects ADD COLUMN IF NOT EXISTS aaf_provision_status TEXT NOT NULL DEFAULT 'aaf_unprovisioned';
+DO $$ BEGIN
+  ALTER TABLE corch_projects ADD CONSTRAINT corch_projects_aaf_provision_status_check
+    CHECK (aaf_provision_status IN ('aaf_unprovisioned','provisioned'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- One row per AAF event received (dedupe on the sender's stable event_id). Holds no raw body: only the parsed,
+-- validated fields. user_id / work_item_id are NULL when the event matched no item (audited, unchanged).
+CREATE TABLE IF NOT EXISTS corch_events (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  event_id     TEXT NOT NULL UNIQUE,
+  event        TEXT NOT NULL,
+  repo         TEXT NOT NULL,
+  head_ref     TEXT NOT NULL,
+  pr_number    INTEGER NULL,
+  user_id      UUID NULL REFERENCES users(id) ON DELETE CASCADE,
+  work_item_id UUID NULL REFERENCES corch_work_items(id) ON DELETE SET NULL,
+  outcome      TEXT NOT NULL DEFAULT 'received',
+  -- Durable owner-notification intent for pr.failed: none | pending | sending | sent. 'sending' is a short claim
+  -- (a crash mid-send is reclaimable after 5 minutes); the sender retries a 503 with the same event_id.
+  notify_state      TEXT NOT NULL DEFAULT 'none' CHECK (notify_state IN ('none','pending','sending','sent')),
+  notify_claimed_at TIMESTAMPTZ NULL,
+  notify_claim_token UUID NULL,
+  received_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- CORCH-02 quota ingest: latest CUG usage reading per account slot; no email column.
+-- One row per (user_id, account_id); blocked_until / blocked_at are hub-owned (quota death).
+CREATE TABLE IF NOT EXISTS corch_quota_accounts (
+  user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  account_id    TEXT NOT NULL,
+  slot          TEXT NULL,
+  five_h_pct    NUMERIC NULL,
+  seven_d_pct   NUMERIC NULL,
+  resets_5h     TIMESTAMPTZ NULL,
+  resets_7d     TIMESTAMPTZ NULL,
+  fetched_at    TIMESTAMPTZ NULL,
+  source        TEXT NOT NULL,
+  enabled       BOOLEAN NOT NULL,
+  cug_blocked   BOOLEAN NOT NULL,
+  received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  blocked_until TIMESTAMPTZ NULL,
+  blocked_at    TIMESTAMPTZ NULL,
+  PRIMARY KEY (user_id, account_id)
+);

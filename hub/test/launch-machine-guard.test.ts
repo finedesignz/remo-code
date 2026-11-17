@@ -4,9 +4,15 @@
  * The primitive is shared with the HUMAN Telegram /doctor relaunch and /commands, which must
  * keep working during a halt. So the kill-switch predicate is consulted ONLY when the caller
  * passes `machine: true`. Controls module, DB, registry and the orchestrator primitive are
- * leaf-mocked; mock.module is process-global, so this file runs in its own bun process.
+ * leaf-mocked; mock.module is process-global first-write-wins, so every mock spreads the
+ * cache-busted REAL module and overrides only what this file drives. Otherwise a partial
+ * factory leaks into later files in the same bun process (e.g. a dal.ts mock lacking
+ * getUserClaudeThresholds breaks orchestrator-macro-path-guard.test.ts) — memory:
+ * bun-mock-pollution.
  */
 import { describe, test, expect, beforeEach, mock } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'x'.repeat(32)
 process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgres://localhost:5432/placeholder'
@@ -22,9 +28,19 @@ const s = {
   sends: [] as any[],
   supervisorsListed: 0,
   orchestratorArgs: [] as any[],
+  extraSupervisor: false,
 }
 
+const realControls = await import(`../src/dispatch/automation-controls.ts?real=${Date.now()}`)
+const realSupervisorDal = await import(`../src/db/supervisor-dal.ts?real=${Date.now()}`)
+const realPostgres = await import(`../src/db/postgres.ts?real=${Date.now()}`)
+const realSupervisorRegistry = await import(`../src/ws/supervisor-registry.ts?real=${Date.now()}`)
+const realBudget = await import(`../src/sessions/budget.ts?real=${Date.now()}`)
+const realDal = await import(`../src/db/dal.ts?real=${Date.now()}`)
+const realAutoLaunch = await import(`../src/orchestrator/auto-launch.ts?real=${Date.now()}`)
+
 mock.module('../src/dispatch/automation-controls.ts', () => ({
+  ...realControls,
   isAutomationHalted: async (a: { userId: string; sessionId?: string }) => {
     s.haltCalls.push(a)
     return s.halted ? { halted: true, scope: s.halted.scope } : { halted: false }
@@ -38,30 +54,36 @@ mock.module('../src/dispatch/automation-controls.ts', () => ({
   },
 }))
 mock.module('../src/db/supervisor-dal.ts', () => ({
+  ...realSupervisorDal,
   listSupervisorsForUser: async () => {
     s.supervisorsListed++
-    return [{ id: 'sup-1', hostname: 'devbox' }]
+    return s.extraSupervisor ? [{ id: 'sup-1', hostname: 'devbox' }, { id: 'sup-2', hostname: 'otherbox' }] : [{ id: 'sup-1', hostname: 'devbox' }]
   },
   endRun: async (...a: any[]) => { s.ended.push(a) },
 }))
 mock.module('../src/db/postgres.ts', () => ({
+  ...realPostgres,
   sql: async () => {
     s.sqlCalls++
     return s.sessionRow ? [s.sessionRow] : []
   },
 }))
 mock.module('../src/ws/supervisor-registry.ts', () => ({
+  ...realSupervisorRegistry,
   isSupervisorOnline: () => true,
   sendToSupervisor: (id: string, msg: any) => s.sends.push({ id, msg }),
   updateSupervisorState: async () => {},
 }))
 mock.module('../src/sessions/budget.ts', () => ({
+  ...realBudget,
   reserveSessionSlot: async () => ({ ok: true, run: { id: 'run-1' } }),
 }))
 mock.module('../src/db/dal.ts', () => ({
+  ...realDal,
   getSessionSkipPermissions: async () => false,
 }))
 mock.module('../src/orchestrator/auto-launch.ts', () => ({
+  ...realAutoLaunch,
   launchOrchestrator: async (a: any) => {
     s.orchestratorArgs.push(a)
     return { ok: true, sessionId: 'sess-o', runId: 'run-o', supervisorId: 'sup-1', cwd: '/repos', reused: false }
@@ -80,7 +102,30 @@ beforeEach(() => {
   s.sends = []
   s.supervisorsListed = 0
   s.orchestratorArgs = []
+  s.extraSupervisor = false
   s.sessionRow = { id: 'sess-1', project_dir: '/repos/a', hostname: 'devbox', is_orchestrator: false }
+})
+
+describe('CORCH-02 QC F5: explicit targetSupervisorId', () => {
+  test('a target overrides the hostname pick: the session.start goes to exactly that supervisor', async () => {
+    s.extraSupervisor = true
+    const res = await launchSessionForUser({ userId: 'u1', sessionId: 'sess-1', machine: true, targetSupervisorId: 'sup-2' })
+    expect(res).toMatchObject({ ok: true, supervisorId: 'sup-2' })
+    expect(s.sends.map((x) => x.id)).toEqual(['sup-2'])
+  })
+
+  test('a target that is not one of the user supervisors is refused, nothing is sent', async () => {
+    s.extraSupervisor = true
+    const res = await launchSessionForUser({ userId: 'u1', sessionId: 'sess-1', machine: true, targetSupervisorId: 'sup-other-user' })
+    expect(res).toEqual({ ok: false, reason: 'no_online_supervisor' })
+    expect(s.sends).toHaveLength(0)
+  })
+
+  test('no target: unchanged hostname pick (sup-1), even with two supervisors online', async () => {
+    s.extraSupervisor = true
+    const res = await launchSessionForUser({ userId: 'u1', sessionId: 'sess-1', machine: true })
+    expect(res).toMatchObject({ ok: true, supervisorId: 'sup-1' })
+  })
 })
 
 describe('launchSessionForUser machine option', () => {
@@ -143,5 +188,18 @@ describe('launchSessionForUser machine option', () => {
     expect(res.ok).toBe(true)
     expect(s.lateCalls).toBe(0)
     expect(s.sends).toHaveLength(1)
+  })
+})
+
+describe('CORCH-01: the corch dispatcher launches only via governedLaunch with a preLaunch governor', () => {
+  const src = readFileSync(join(import.meta.dir, '..', 'src', 'corch', 'dispatcher.ts'), 'utf8')
+    .split(/\r?\n/)
+    .filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('*'))
+    .join('\n')
+
+  test('dispatcher.ts calls governedLaunch( exactly once, passes preLaunch, and never names the launch primitive', () => {
+    expect((src.match(/\bgovernedLaunch\(/g) ?? []).length).toBe(1)
+    expect(src).toMatch(/preLaunch:\s*\{/)
+    expect(src).not.toContain('launchSessionForUser')
   })
 })

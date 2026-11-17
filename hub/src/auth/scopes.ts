@@ -38,6 +38,12 @@ export const SCOPE_CLOUD_HOOK = 'cloud:hook'
 export const SCOPE_EXT_LAUNCH = 'ext:launch'
 
 /**
+ * EXPLICIT-only: enqueue CORCH work items via POST /api/ext/corch/work-items. A legacy/NULL key never
+ * acquires it implicitly (an enqueue can eventually spend subscription tokens on an enrolled repo).
+ */
+export const SCOPE_EXT_CORCH = 'ext:corch'
+
+/**
  * Read / change the user's Settings (profile, usage + cost controls, notify prefs,
  * supervisor roots, orchestrator prefs) through the normal /api routes with a Bearer key.
  * EXPLICIT-only, and limited to the route allowlist in `settings-api-key.ts`.
@@ -54,16 +60,27 @@ export const SCOPE_SETTINGS_WRITE = 'settings:write'
  */
 export const SCOPE_CHAT_SESSION = 'chat:session'
 
+/**
+ * CORCH-02: publish a CUG usage snapshot via POST /api/quota/snapshot / read per-account eligibility via
+ * GET /api/quota/snapshot. EXPLICIT-only (hasExplicitScope), neither implies the other, and neither
+ * reaches any other route. A legacy/NULL key never acquires them.
+ */
+export const SCOPE_QUOTA_PUBLISH = 'quota:publish'
+export const SCOPE_QUOTA_READ = 'quota:read'
+
 export const ALL_SCOPES = [
   SCOPE_AGENT,
   SCOPE_EXT_READ,
   SCOPE_EXT_ASK,
   SCOPE_EXT_WORK,
   SCOPE_EXT_LAUNCH,
+  SCOPE_EXT_CORCH,
   SCOPE_CLOUD_HOOK,
   SCOPE_SETTINGS_READ,
   SCOPE_SETTINGS_WRITE,
   SCOPE_CHAT_SESSION,
+  SCOPE_QUOTA_PUBLISH,
+  SCOPE_QUOTA_READ,
 ] as const
 export type Scope = (typeof ALL_SCOPES)[number]
 

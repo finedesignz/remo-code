@@ -35,6 +35,8 @@ delete process.env.TELEGRAM_WEBHOOK_SECRET;
 // Titanium license-changed webhook: leave secret UNSET → inert 503 (still proves
 // the route is mounted; never a 404).
 delete process.env.TITANIUM_WEBHOOK_SECRET;
+// CORCH-08 AAF event receiver: secret UNSET -> inert 503 (mounted, never a 404). The describe below sets it.
+delete process.env.REMO_CORCH_AAF_EVENT_SECRET;
 
 import { describe, test, expect, mock } from 'bun:test';
 
@@ -104,6 +106,8 @@ const WEBHOOK_PATHS: Array<{ path: string; note: string }> = [
   { path: '/api/feedback/fb_disabled_token', note: 'feedback intake URL-token (disabled key → 403)' },
   { path: '/api/telegram/webhook/wrong-secret', note: 'telegram URL-secret' },
   { path: '/api/cloud-hook/reply', note: 'cloud-session Stop hook (Bearer cloud:hook key; none → 401)' },
+  { path: '/api/quota/snapshot', note: 'CORCH-02 quota ingest (Bearer quota:publish key; none → 401)' },
+  { path: '/api/corch-events/aaf', note: 'CORCH-08 AAF event receiver (timestamped HMAC; secret unset -> 503)' },
   { path: '/webhooks/titanium/license-changed', note: 'titanium license-changed HMAC' },
 ];
 
@@ -143,6 +147,54 @@ describe('mount-order: public webhooks are reachable BEFORE the JWT catch-all (I
       ).toBe(true);
     });
   }
+});
+
+describe('mount-order: CORCH-02 /api/quota/snapshot is api-key-authed and mounted BEFORE the cookie catch-all', () => {
+  test('unauthenticated POST and GET return the route 401 JSON (not 404, not a CSRF 403, not the cookie 401 shape)', async () => {
+    for (const method of ['POST', 'GET'] as const) {
+      const res = await app.request('/api/quota/snapshot', {
+        method,
+        headers: { 'content-type': 'application/json' },
+        ...(method === 'POST' ? { body: '{}' } : {}),
+      });
+      expect(res.status, `${method} /api/quota/snapshot returned ${res.status}; expected the route 401`).toBe(401);
+      expect(await res.json()).toEqual({ error: 'unauthorized' });
+    }
+  });
+
+  test('a POST without Origin or CSRF token is not rejected by csrfGuard (api-key authed)', async () => {
+    const res = await app.request('/api/quota/snapshot', { method: 'POST', body: '{}' });
+    const body: any = await res.clone().json();
+    expect(body.error).not.toBe('csrf_failed');
+    expect(res.status).toBe(401);
+  });
+
+  test('a cookie-style request (no Bearer) is never authenticated', async () => {
+    const res = await app.request('/api/quota/snapshot', { method: 'GET', headers: { cookie: 'remo_session=abc; csrf_token=x' } });
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('mount-order: CORCH-08 /api/corch-events/aaf is HMAC-authed and mounted BEFORE the cookie catch-all', () => {
+  test('secret unset => 503 not_configured (mounted; not a 404, not the cookie 401, not a CSRF 403)', async () => {
+    delete process.env.REMO_CORCH_AAF_EVENT_SECRET;
+    const res = await app.request('/api/corch-events/aaf', { method: 'POST', body: '{}' });
+    expect(res.status, `POST /api/corch-events/aaf returned ${res.status}; expected 503 (mounted before the JWT catch-all)`).toBe(503);
+    expect(await res.json()).toEqual({ error: 'not_configured' });
+  });
+
+  test('secret set + unsigned POST => the route uniform 401 (HMAC ran; no CSRF token or Origin needed)', async () => {
+    process.env.REMO_CORCH_AAF_EVENT_SECRET = 'mount-order-secret-0123456789';
+    try {
+      const res = await app.request('/api/corch-events/aaf', { method: 'POST', body: '{}', headers: { cookie: 'remo_session=abc' } });
+      expect(res.status).toBe(401);
+      const body: any = await res.json();
+      expect(body).toEqual({ error: 'unauthorized' });
+      expect(body.error).not.toBe('csrf_failed');
+    } finally {
+      delete process.env.REMO_CORCH_AAF_EVENT_SECRET;
+    }
+  });
 });
 
 describe('mount-order: protected /api/* routes are behind the JWT catch-all', () => {
@@ -205,6 +257,29 @@ describe('mount-order: /api/ext is api-key-authed and mounted BEFORE the cookie 
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: '{"question":"done?"}',
+    });
+    expect(res.status).toBe(401);
+    let body: any = null;
+    try { body = await res.clone().json(); } catch { /* ignore */ }
+    expect(body?.error).not.toBe('csrf_failed');
+  });
+});
+
+describe('mount-order: CORCH routes (milestone CORCH-01)', () => {
+  test('unauth GET /api/corch/projects -> 401 (authMiddleware ran, not a 404)', async () => {
+    const res = await app.request('/api/corch/projects', { method: 'GET' });
+    expect(
+      res.status,
+      `GET /api/corch/projects returned ${res.status}; expected 401. A 404 means the corch router is ` +
+        `not mounted after the /api/* catch-alls in index.ts.`,
+    ).toBe(401);
+  });
+
+  test('unauth POST /api/ext/corch/work-items -> 401 (api-key middleware ran, not 404, not a CSRF rejection)', async () => {
+    const res = await app.request('/api/ext/corch/work-items', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
     });
     expect(res.status).toBe(401);
     let body: any = null;

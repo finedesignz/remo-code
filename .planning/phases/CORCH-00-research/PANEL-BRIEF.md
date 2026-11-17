@@ -1,0 +1,21 @@
+# CORCH architecture panel brief
+
+Milestone CORCH (Central Orchestrator), repo remo-code. Goal: one always-on dispatcher in the remo-code hub that continues GSD development across ~60 repos without the owner managing sessions.
+
+Locked by owner (do not re-litigate): build in remo-code (no external orchestrator); remo-code owns backlog + sessions (spawn, resume, budgets, remote reach); AgentAutofix (AAF) owns everything after a PR exists (CI fix, merge); Claude Usage Guard (CUG) is the single quota source. Subscription OAuth only (CLAUDE_CODE_OAUTH_TOKEN), never an API key. Everything ships behind flags default OFF. Additive DB changes only. Event-driven, no polling loops where an event surface exists.
+
+Requirements: R1 cross-repo priority backlog + dispatcher (concurrency cap, per-project daily token budget); R2 single quota feed CUG -> hub, per-account choice per dispatch, fail CLOSED without fresh snapshot, AAF reads same feed; R3 no dropped work (re-queue on death, quota-skipped runs re-queued, heartbeat+reclaim, idempotent, memlog claims); R4 Linux supervisor on Coolify (server-side dispatch/resume); R5 PR hand-off closure with AAF (red-CI owner, merge owner incl. repos with no AAF project row, AAF->hub webhook on merge/fail); R6 status view + remote pause/priority, retire overlapping flag-OFF remo code.
+
+Evidence (read these, all file:line cited; treat as leads and spot-check code where your verdict depends on it):
+- C:\Users\artic\GitHub\remo-code-corch-planning\.planning\phases\CORCH-00-research\RESEARCH-remo.md
+- C:\Users\artic\GitHub\remo-code-corch-planning\.planning\phases\CORCH-00-research\RESEARCH-cug-gsdconsole.md
+- C:\Users\artic\GitHub\remo-code-corch-planning\.planning\phases\CORCH-00-research\RESEARCH-aaf.md
+- remo-code code: C:\Users\artic\GitHub\remo-code-corch-planning (origin/main). AAF: C:\Users\artic\GitHub\agentautofix (read via git show origin/main:<path>). CUG: C:\Users\artic\GitHub\claude-usage-guard (same).
+
+## Forks to decide (each: verdict, 2-4 line rationale, strongest counter-argument and why it loses, risk)
+F1. Dispatcher core: EXTEND the flag-OFF per-session macro orchestrator (hub/src/orchestrator: scheduled_tasks orchestrator rows, routine_queue, runMacroCycle, autospawn allowlist, governedLaunch) vs REPLACE with a new cross-repo work-item queue that reuses only the dispatch primitives (dispatch/ gates, governedLaunch/launchSessionForUser, lifetime ledger, kill switch). Note PTYCAP guards (counter-key-assignment-guard, token-cap-coverage, launch-callers-guard) any new dispatch path must satisfy.
+F2. Backlog storage + ingestion: hub Postgres tables (corch_work_items etc. in schema.sql) fed by gsd-console board API (gsdc_ board:read, SSE /api/board/stream) vs fed by supervisor reading .planning directly vs both. Where does owner priority + per-project budget live. How AAF tickets / memlog requests enter.
+F3. Quota feed: CUG already writes usage-snapshot.json v1 per slot (no tokens). Transport to hub (CUG Rust POST to new hub endpoint with a scoped api key vs supervisor reads the local file and forwards over /ws/agent) and how AAF reads it (hub GET endpoint with scoped key vs push). Freshness TTL and fail-closed semantics. Note live snapshot shows five_h_pct null on all live slots: how to treat null.
+F4. Server-side Linux worker (R4): how tokens for 6 accounts reach the server safely (Coolify env per slot vs pulled per dispatch from hub vs Proton Pass at boot), how the hub selects account per dispatch without the token ever transiting the hub, repo checkout/worktree strategy on server, isolation (one container per session? per account CLAUDE_CONFIG_DIR), and whether Windows desktop supervisor also gets per-account injection.
+F5. PR identity + AAF closure: which GitHub identity authors orchestrator PRs (owner account vs machine user vs App); AAF adoption of foreign PRs for red CI (POST /api/pr-adoptions design) vs requiring every target repo to have an AAF project row (POST /api/projects/provision); outbound AAF->hub event (outbox + signedPost) header/HMAC; is pr.closed-unmerged an event.
+F6. Phase order: propose the ordered phase list (one phase = one PR in one repo), with paired repo PRs (claude-usage-guard, agentautofix) explicit, first phase = backlog + dispatcher core.

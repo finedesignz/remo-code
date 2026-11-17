@@ -11,6 +11,7 @@ import { runErrorSetupProbe } from './error-setup-probe'
 import { runErrorSetupApply } from './error-setup-apply'
 import { runTeabRun, runTeabStatus } from './teab-run'
 import { runSessionTranscriptTail, runSessionMemory } from './session-read'
+import { runCorchWorktreeEnsure, runCorchWorktreeRemove, runCorchPrLookup } from './corch-worktree'
 import { runWorkPushBranch, runWorkDiffScope, runWorkBuild, runWorkPublish } from './work-git'
 
 export interface CommandResult {
@@ -57,6 +58,11 @@ const HANDLERS: Record<string, CommandHandler> = {
   work_diff_scope: (args) => runWorkDiffScope(args),
   work_build: (args) => runWorkBuild(args),
   work_publish: (args) => runWorkPublish(args),
+  // CORCH-09 - central-orchestrator worktree + PR lookup, hub-driven over run_command (the hub sends each
+  // only after haltBeforeMachineSend). Replies carry paths / branch / PR url only, never an env value.
+  'corch.worktree_ensure': (args) => runCorchWorktreeEnsure(args),
+  'corch.worktree_remove': (args) => runCorchWorktreeRemove(args),
+  'corch.pr_lookup': (args) => runCorchPrLookup(args),
 }
 
 export function getHandler(name: string): CommandHandler | null {
@@ -75,6 +81,8 @@ const NATIVE: Array<{ name: string; description: string }> = [
   { name: 'work_diff_scope', description: 'READ-ONLY: file list + head sha of a work/<id> branch vs the default branch' },
   { name: 'work_build', description: 'Run the operator-configured build cmd against a work/<id> branch (deploy creds scrubbed)' },
   { name: 'work_publish', description: 'HUB-ONLY: ff-only merge a work/<id> branch into the default branch + run the operator publish cmd' },
+  // corch.* are deliberately NOT advertised: the generic scheduled-task sender runs only advertised commands, so a
+  // scheduled task can never reach them. Only the hub's CORCH workspace sender (allowlisted RPC) does.
 ]
 
 export function nativeSupervisorCommands(): ScannedCommand[] {

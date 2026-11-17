@@ -45,8 +45,11 @@ import {
 import { renderWorkPrompt } from '../work/prompt.ts'
 import { createTaskV2 } from '../db/scheduled-tasks-dal.ts'
 import * as scheduleRegistry from '../scheduler/registry.ts'
+import { extCorchRoutes } from '../corch/routes.ts'
 
 export const ext = new Hono()
+
+ext.route('/corch', extCorchRoutes) // CORCH-01: explicit ext:corch scope (extApiKeyMiddleware)
 
 const MAX_WAIT_MS = 120_000
 

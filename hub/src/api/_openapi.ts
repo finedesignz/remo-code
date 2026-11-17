@@ -1403,6 +1403,296 @@ openapi.openapi(taskTemplatesRoute, (c) => {
   });
 }
 
+// ── /api/corch + /api/ext/corch — central orchestrator queue (milestone CORCH) ─────────────
+// Spec-only registration; `../corch/routes.ts` serves traffic. Flag REMO_CORCH_ENABLED (default OFF):
+// with it OFF these routes only store and list rows. See docs/corch.md.
+{
+  const Err = z.object({ error: z.string(), detail: z.string().optional() });
+  const json = (schema: any) => ({ content: { "application/json": { schema } } });
+  const reg = openapi.openAPIRegistry;
+  const cookie = { tags: ["corch"], security: [{ bearerAuth: [] as string[] }] };
+  const extBase = { tags: ["corch"], security: [{ apiKeyAuth: [] as string[] }] };
+  const body = (schema: any) => ({ body: { content: { "application/json": { schema } } } });
+  const Project = z
+    .object({
+      id: z.string(),
+      repo_ident: z.string(),
+      priority: z.number().int(),
+      daily_token_budget: z.union([z.number(), z.string()]),
+      enabled: z.boolean(),
+      accept_external: z.boolean(),
+    })
+    .openapi("CorchProject");
+  const Item = z
+    .object({
+      id: z.string(),
+      project_id: z.string(),
+      source: z.enum(["manual", "gsd_console", "aaf", "memlog"]),
+      source_ref: z.string(),
+      title: z.string(),
+      status: z.enum(["queued", "running", "pr_open", "done", "blocked", "cancelled"]),
+      wait_reason: z.string().nullable(),
+      attempts: z.number().int(),
+      branch: z.string(),
+    })
+    .openapi("CorchWorkItem");
+  const common = { 401: { description: "Not authenticated", ...json(Err) } };
+  const WorkFields = {
+    title: z.string().min(1).max(500),
+    body: z.string().max(20000).optional(),
+    priority: z.number().int().optional(),
+  };
+
+  reg.registerPath({
+    method: "post", path: "/api/corch/projects", summary: "Enroll a github:// repo with the central orchestrator", ...cookie,
+    request: body(z.object({
+      repo_ident: z.string(),
+      priority: z.number().int().optional(),
+      daily_token_budget: z.number().int().positive().optional(),
+      enabled: z.boolean().optional(),
+      accept_external: z.boolean().optional(),
+    })),
+    responses: {
+      201: { description: "Created", ...json(z.object({ project: Project, created: z.literal(true) })) },
+      200: { description: "Already enrolled", ...json(z.object({ project: Project, created: z.literal(false) })) },
+      400: { description: "Invalid body or repo_ident (path_ident_not_supported for path://)", ...json(Err) },
+      ...common,
+    },
+  });
+  reg.registerPath({
+    method: "get", path: "/api/corch/projects", summary: "List the caller's enrolled projects", ...cookie,
+    responses: { 200: { description: "Projects", ...json(z.object({ projects: z.array(Project) })) }, ...common },
+  });
+  reg.registerPath({
+    method: "patch", path: "/api/corch/projects/{id}", summary: "Update priority, budget, enabled or accept_external", ...cookie,
+    request: {
+      params: z.object({ id: z.string().openapi({ param: { name: "id", in: "path" } }) }),
+      ...body(z.object({
+        priority: z.number().int().optional(),
+        daily_token_budget: z.number().int().positive().optional(),
+        enabled: z.boolean().optional(),
+        accept_external: z.boolean().optional(),
+      })),
+    },
+    responses: {
+      200: { description: "Updated", ...json(z.object({ project: Project })) },
+      400: { description: "Invalid body", ...json(Err) },
+      404: { description: "No such project for this user", ...json(Err) },
+      ...common,
+    },
+  });
+  reg.registerPath({
+    method: "post", path: "/api/corch/work-items", summary: "Enqueue a manual work item (idempotent on source_ref)", ...cookie,
+    request: body(z.object({ project_id: z.string().uuid(), ...WorkFields, source_ref: z.string().min(1).max(200).optional() })),
+    responses: {
+      201: { description: "Created", ...json(z.object({ item: Item, created: z.literal(true) })) },
+      200: { description: "Already enqueued", ...json(z.object({ item: Item, created: z.literal(false) })) },
+      400: { description: "Invalid body", ...json(Err) },
+      404: { description: "No such project for this user", ...json(Err) },
+      ...common,
+    },
+  });
+  reg.registerPath({
+    method: "get", path: "/api/corch/work-items", summary: "List the caller's work items (limit 200, newest first)", ...cookie,
+    request: { query: z.object({ status: z.enum(["queued", "running", "pr_open", "done", "blocked", "cancelled"]).optional() }) },
+    responses: {
+      200: { description: "Items", ...json(z.object({ items: z.array(Item) })) },
+      400: { description: "Invalid status", ...json(Err) },
+      ...common,
+    },
+  });
+  // CORCH-11: status view, pause/resume, item priority and cancel (cookie only).
+  const idParam = z.object({ id: z.string().openapi({ param: { name: "id", in: "path" } }) });
+  reg.registerPath({
+    method: "get", path: "/api/corch/queue", summary: "Queue view: projects, items, live runs, quota accounts, pause flag", ...cookie,
+    description:
+      "Read model shared with the `corch_queue` WebSocket event and the Telegram `/queue` summary. Works with REMO_CORCH_ENABLED off (it only reads). Items omit `body`.",
+    responses: {
+      200: {
+        description: "Snapshot",
+        ...json(z.object({
+          paused: z.boolean(),
+          max_concurrent_runs: z.number().int(),
+          counts: z.record(z.string(), z.number().int()),
+          projects: z.array(z.object({ id: z.string(), repo_ident: z.string(), priority: z.number().int(), enabled: z.boolean(), aaf_provision_status: z.string() })),
+          items: z.array(z.object({ id: z.string(), project_id: z.string(), repo_ident: z.string(), title: z.string(), source: z.string(), priority: z.number().int(), status: z.string(), wait_reason: z.string().nullable(), not_before: z.string().nullable(), attempts: z.number().int(), pr_url: z.string().nullable(), created_at: z.string() })),
+          live_runs: z.array(z.object({ id: z.string(), work_item_id: z.string(), repo_ident: z.string(), status: z.string(), account_slot: z.string().nullable(), supervisor_id: z.string().nullable(), started_at: z.string(), heartbeat_at: z.string(), age_seconds: z.number().int() })),
+          quota_accounts: z.array(z.object({ account_id: z.string(), slot: z.string().nullable(), eligible: z.boolean(), reason: z.string().nullable(), not_before: z.string().nullable(), five_h_pct: z.number().nullable(), seven_d_pct: z.number().nullable() })),
+          generated_at: z.string(),
+        })),
+      },
+      500: { description: "queue_unavailable", ...json(Err) },
+      ...common,
+    },
+  });
+  reg.registerPath({
+    method: "patch", path: "/api/corch/settings", summary: "Pause or resume dispatch; set the concurrent-run cap", ...cookie,
+    description:
+      "`paused: true` stops NEW dispatch (live runs continue); it is distinct from the automation kill switch. `paused: false` triggers one evaluation (a no-op with the flag off).",
+    request: body(z.object({ paused: z.boolean().optional(), max_concurrent_runs: z.number().int().min(1).max(32).optional() })),
+    responses: {
+      200: { description: "Updated", ...json(z.object({ settings: z.object({ corch_paused: z.boolean(), corch_max_concurrent_runs: z.number().int() }) })) },
+      400: { description: "Invalid or empty body", ...json(Err) },
+      ...common,
+    },
+  });
+  reg.registerPath({
+    method: "patch", path: "/api/corch/work-items/{id}", summary: "Change a work item's priority", ...cookie,
+    request: { params: idParam, ...body(z.object({ priority: z.number().int() })) },
+    responses: {
+      200: { description: "Updated", ...json(z.object({ item: Item })) },
+      400: { description: "Invalid body", ...json(Err) },
+      404: { description: "No such item for this user", ...json(Err) },
+      ...common,
+    },
+  });
+  reg.registerPath({
+    method: "post", path: "/api/corch/work-items/{id}/cancel", summary: "Cancel a queued work item (any other state is 409)", ...cookie,
+    request: { params: idParam },
+    responses: {
+      200: { description: "Cancelled (terminal)", ...json(z.object({ item: Item })) },
+      404: { description: "No such item for this user", ...json(Err) },
+      409: { description: "not_cancellable: the item is not queued", ...json(Err) },
+      ...common,
+    },
+  });
+  reg.registerPath({
+    method: "post", path: "/api/ext/corch/work-items", summary: "External enqueue of a work item (EXPLICIT ext:corch scope)", ...extBase,
+    description:
+      "Enqueues a work item for an enrolled project that has `accept_external=true` and `enabled=true`. The key needs the EXPLICIT `ext:corch` scope (a NULL-scopes key is refused). Idempotent on `(source, source_ref)`. Nothing runs unless REMO_CORCH_ENABLED is on.",
+    request: body(z.object({
+      repo_ident: z.string(),
+      source: z.enum(["aaf", "memlog", "manual"]),
+      source_ref: z.string().min(1).max(200),
+      ...WorkFields,
+    })),
+    responses: {
+      201: { description: "Created", ...json(z.object({ item: Item, created: z.literal(true) })) },
+      200: { description: "Already enqueued", ...json(z.object({ item: Item, created: z.literal(false) })) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      403: { description: "Key lacks the explicit ext:corch scope, OR project_not_accepting", ...json(Err) },
+    },
+  });
+}
+
+// ── /api/quota — CUG usage-snapshot ingest + eligibility read (milestone CORCH-02) ──────────
+// Spec-only registration; `./quota.ts` serves traffic. Auth is route-local: Bearer api key with the EXPLICIT
+// `quota:publish` (POST) / `quota:read` (GET) scope; cookies never authenticate. See docs/corch.md.
+{
+  const Err = z.object({ error: z.string() });
+  const json = (schema: any) => ({ content: { "application/json": { schema } } });
+  const reg = openapi.openAPIRegistry;
+  const base = { tags: ["corch"], security: [{ apiKeyAuth: [] as string[] }] };
+  const ScopeErr = z.object({ error: z.string(), required: z.string() });
+  const pct = z.number().min(0).max(1000).nullable();
+  const when = z.string().datetime({ offset: true }).nullable();
+  const Account = z
+    .object({
+      account_id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+      slot: z.union([z.string().max(64), z.number().int()]).nullable(),
+      five_h_pct: pct,
+      seven_d_pct: pct,
+      resets_5h: when,
+      resets_7d: when,
+      fetched_at: when,
+      source: z.string().min(1).max(32),
+      enabled: z.boolean(),
+      blocked: z.boolean(),
+      current: z.boolean(),
+    })
+    .strict()
+    .openapi("QuotaSnapshotAccount");
+  reg.registerPath({
+    method: "post", path: "/api/quota/snapshot", summary: "Publish a CUG usage-snapshot v1 (EXPLICIT quota:publish scope)", ...base,
+    description:
+      "Upserts one row per `(key owner, account_id)` into `corch_quota_accounts`. The body is strict at both levels: `email`, `label` and any unknown key are a 400 and write nothing. Body cap 64 KiB (413), at most 32 accounts. The user is always the key owner. A successful POST triggers one dispatcher evaluation when REMO_CORCH_ENABLED is on (none when off).",
+    request: {
+      body: json(
+        z
+          .object({
+            schema: z.literal(1),
+            publisher: z.literal("cug"),
+            generated_at: z.string().datetime({ offset: true }),
+            poll_interval_secs: z.number().int().min(1).max(86400),
+            accounts: z.array(Account).max(32),
+          })
+          .strict(),
+      ),
+    },
+    responses: {
+      200: { description: "Stored", ...json(z.object({ ok: z.literal(true), accepted: z.number().int() })) },
+      400: { description: "invalid_snapshot (no value echoed)", ...json(Err) },
+      401: { description: "Missing/unknown api key", ...json(Err) },
+      403: { description: "Key lacks the explicit quota:publish scope", ...json(ScopeErr) },
+      413: { description: "Body over 64 KiB", ...json(Err) },
+      429: { description: "Rate limited", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "get", path: "/api/quota/snapshot", summary: "Per-account quota eligibility for the key owner (EXPLICIT quota:read scope)", ...base,
+    description:
+      "Returns the owner's stored readings with the fail-closed eligibility verdict (`eligible`, `reason` = `quota:<reason>`, `not_before`) computed by the same rules the dispatcher uses. No email or label field exists.",
+    responses: {
+      200: {
+        description: "Accounts",
+        ...json(
+          z.object({
+            ceiling_pct: z.number(),
+            accounts: z.array(
+              z.object({
+                account_id: z.string(),
+                slot: z.string().nullable(),
+                eligible: z.boolean(),
+                reason: z.string().nullable(),
+                not_before: z.string().nullable(),
+                five_h_pct: z.number().nullable(),
+                seven_d_pct: z.number().nullable(),
+                resets_5h: z.string().nullable(),
+                resets_7d: z.string().nullable(),
+                fetched_at: z.string().nullable(),
+                source: z.string(),
+                received_at: z.string(),
+                blocked_until: z.string().nullable(),
+              }),
+            ),
+          }),
+        ),
+      },
+      401: { description: "Missing/unknown api key", ...json(Err) },
+      403: { description: "Key lacks the explicit quota:read scope", ...json(ScopeErr) },
+      500: { description: "quota_ceiling_invalid", ...json(Err) },
+      429: { description: "Rate limited", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "post", path: "/api/corch-events/aaf", summary: "AgentAutofix PR-outcome event (timestamped HMAC; no cookie or api key)", ...base,
+    description:
+      "CORCH-08 receiver for events signed by AgentAutofix (`X-ZeroExposure-Timestamp`, `X-ZeroExposure-Signature: sha256=HMAC-SHA256(secret, ts + \".\" + rawBody)`, optional `X-ZeroExposure-Event-Id`). Raw body is read before any parse; the signature is compared in constant time; a timestamp more than 5 minutes off is rejected; every credential failure is the same 401. `pr.merged` marks the item done, `pr.closed` (unmerged) blocks it, `pr.failed` blocks it and sends one owner notification. An unknown or terminal item and a replayed `event_id` are 200 with no change. 503 until REMO_CORCH_AAF_EVENT_SECRET is set.",
+    request: {
+      body: json(
+        z.object({
+          event_id: z.string(),
+          event: z.enum(["pr.merged", "pr.closed", "pr.failed"]),
+          repo: z.string(),
+          pr_number: z.number().int().optional(),
+          head_ref: z.string(),
+          merged_sha: z.string().optional(),
+          occurred_at: z.string().optional(),
+        }),
+      ),
+    },
+    responses: {
+      200: { description: "Handled", ...json(z.object({ ok: z.literal(true), status: z.enum(["applied", "duplicate", "ignored"]) })) },
+      400: { description: "bad_request (no value echoed)", ...json(Err) },
+      401: { description: "unauthorized (uniform: bad or missing signature, stale timestamp)", ...json(Err) },
+      413: { description: "Body over 16 KiB", ...json(Err) },
+      429: { description: "Rate limited", ...json(Err) },
+      503: { description: "not_configured (secret unset; nothing recorded) or notification_pending (a pr.failed owner notification was not delivered; the transition is applied, retry the same event_id)", ...json(Err) },
+    },
+  });
+}
+
 // ── /api/chat — Bearer-key chat surface (scope chat:session) ────────────────
 // Spec-only registration; `./chat.ts` serves traffic. See docs/auth.md "Chat via API key".
 {

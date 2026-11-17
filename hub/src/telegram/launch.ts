@@ -81,6 +81,17 @@ async function pickSupervisorForSession(
   return { ok: false, reason: 'supervisor_ambiguous', count: online.length }
 }
 
+/** F5: the explicit target, only when it is one of the user's supervisors and online. */
+async function pickTargetSupervisor(
+  userId: string,
+  supervisorId: string,
+): Promise<{ ok: true; supervisorId: string; hostname: string } | { ok: false; reason: 'no_online_supervisor' }> {
+  const sups = (await listSupervisorsForUser(userId)) as unknown as Array<{ id: string; hostname: string }>
+  const match = sups.find((s) => s.id === supervisorId)
+  if (!match || !isSupervisorOnline(match.id)) return { ok: false, reason: 'no_online_supervisor' }
+  return { ok: true, supervisorId: match.id, hostname: match.hostname }
+}
+
 export async function launchSessionForUser(args: {
   userId: string
   sessionId: string
@@ -99,6 +110,12 @@ export async function launchSessionForUser(args: {
    * Omitted => the session row value, unchanged for every other caller.
    */
   skipPermissions?: false
+  /**
+   * CORCH-02 QC F5: launch on exactly this supervisor (must be one of the user's, online) instead of the
+   * hostname pick. Passed ONLY by the corch dispatcher (via governedLaunch.resolveTarget); every other caller
+   * omits it and keeps the hostname pick unchanged.
+   */
+  targetSupervisorId?: string
 }): Promise<LaunchResult> {
   // AM-F1-4: the supervisor run reserved below; closed on EVERY non-launch exit after the
   // reservation (send_failed, halt unwind, any throw) so a failed spawn cannot leak a slot.
@@ -167,7 +184,9 @@ export async function launchSessionForUser(args: {
 
     if (!session.project_dir) return { ok: false, reason: 'no_project_dir' }
 
-    const pick = await pickSupervisorForSession(args.userId, session)
+    const pick = args.targetSupervisorId
+      ? await pickTargetSupervisor(args.userId, args.targetSupervisorId)
+      : await pickSupervisorForSession(args.userId, session)
     if (!pick.ok) {
       if (pick.reason === 'supervisor_ambiguous') {
         return { ok: false, reason: 'supervisor_ambiguous', count: pick.count ?? 0 }

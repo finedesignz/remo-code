@@ -20,6 +20,7 @@ const ALLOWED = new Set([
   'scheduler/senders/triage.ts', //     triage:<application_uuid>
   'api/sessions.ts', //                 POST /heal reserves heal:<userId>:<repo> (04-07, panel F-2); server-set from the validated repo, never a DispatchRequest
   'heal/route.ts', //                   the heal seam assigns the lifetime key from the shared buildHealKey (07-05, AM-F4-3)
+  'corch/dispatcher.ts', //             CORCH-01: buildCorchRequest assigns the key from buildCorchKey (LD-4)
 ])
 
 // property (`counterKey: x`, `counterKey?: x`), shorthand (`{ counterKey }`), member (`.counterKey = x`)
@@ -82,5 +83,28 @@ describe('PTYCAP-07-10 (AM-F4-3): the heal lifetime key', () => {
     expect(lines.length).toBeGreaterThanOrEqual(2)
     for (const l of lines) expect([l.trim(), /buildHealKey\(|req\.counterKey/.test(l)]).toEqual([l.trim(), true])
     expect(readFileSync(join(SRC, 'heal/counter-key.ts'), 'utf8')).toContain('export function buildHealKey')
+  })
+})
+
+describe('CORCH-01 (LD-4): the corch lifetime key', () => {
+  test('self-check: the scanner finds the corch dispatcher site', () => {
+    expect(sitesByFile().has('corch/dispatcher.ts')).toBe(true)
+  })
+
+  test('within hub/src/corch only dispatcher.ts assigns the key', () => {
+    const corchFiles = [...sitesByFile().keys()].filter((f) => f.startsWith('corch/'))
+    expect(corchFiles).toEqual(['corch/dispatcher.ts'])
+  })
+
+  test('every corch assignment takes its value from buildCorchKey, which is defined only in corch/keys.ts', () => {
+    const lines = readFileSync(join(SRC, 'corch/dispatcher.ts'), 'utf8')
+      .split(/\r?\n/)
+      .filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('*'))
+      .filter((l) => ASSIGNMENT.some((re) => re.test(l)))
+    expect(lines.length).toBeGreaterThanOrEqual(1)
+    for (const l of lines) expect([l.trim(), /buildCorchKey\(/.test(l)]).toEqual([l.trim(), true])
+    expect(readFileSync(join(SRC, 'corch/keys.ts'), 'utf8')).toContain('export function buildCorchKey')
+    const definers = walk(SRC).filter((f) => /function\s+buildCorchKey\b/.test(readFileSync(f, 'utf8')))
+    expect(definers.map((f) => relative(SRC, f).split('\\').join('/'))).toEqual(['corch/keys.ts'])
   })
 })
