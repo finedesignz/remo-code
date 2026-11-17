@@ -59,6 +59,7 @@ describe('PTYCAP-04-04 -- reserveInject( callers (T-04-15, T-04-18)', () => {
     'dispatch/pty-preflight.ts',
     'api/sessions.ts', // POST /heal: external self-heal MACHINE surface, one reservation per request (04-07, panel F-2)
     'scheduler/senders/task-qc.ts', // task quality auditor: ONE lifetime slot per run under taskqc:<userId>, token = run id (08-07, D-22); shape pinned below
+    'heal/autospawn-deps.ts', // PTYCAP-07: pre-launch reservation binding handed to governedLaunch (AM-F1-2)
   ])
 
   test('reserveInject( appears only in the controls module, the PTY door and the self-heal route', () => {
@@ -136,3 +137,9 @@ describe('PTYCAP-08-07 -- task_qc sender reservation shape (D-22, T-08-36)', () 
   })
 })
 
+describe('CORCH-01 -- no reserveInject( call under hub/src/corch (the reservation arrives through the governed launch deps)', () => {
+  test('reserveInject( never appears in a corch file; the ALLOWED set above is unchanged', () => {
+    expect(filesIncluding('reserveInject(').filter((f) => f.startsWith('corch/'))).toEqual([])
+    expect(FILES.filter((f) => f.rel.startsWith('corch/')).length).toBeGreaterThanOrEqual(8)
+  })
+})

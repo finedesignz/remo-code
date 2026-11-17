@@ -14,6 +14,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { hubFetch } from "../../lib/api";
+import { CorchQueuePanel } from "../../components/CorchQueuePanel";
 import type { Profile } from "../../hooks/useProfile";
 import {
   useProgrammaticLeakAlert,
@@ -75,6 +76,7 @@ export function UsageTab({ token, profile, onUpdateProfile, subscribe }: Props) 
       <CostCards summary={summary} error={error} />
       <LimitsCard summary={summary} />
       <ProgrammaticCreditCard summary={summary} />
+      <CorchQueuePanel token={token} />
       <ControlsCard
         token={token}
         profile={profile}

@@ -418,6 +418,39 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   **`REMO_REVANOTE_STALL_DISABLED`** (`1|true|yes|on`) — no-op escape hatch. Fan-out reuses the
   existing orchestrator notify channel (`orchestrator/notify.ts` `fanOutNotify` — telegram + in-app +
   emails4agents email); no new transport.
+- **`REMO_HEAL_UNIFIED`** (default **OFF**; accepts `1|true|yes|on` only, anything else is OFF; read at call
+  time): the unified **self-heal seam** (PTYCAP Phase 7; [docs/self-heal-routing.md](docs/self-heal-routing.md)).
+  OFF = every failure source (Coolify deploy webhook, scheduled-task failure, error-capture, feedback) keeps its
+  current path byte for byte and `routeHeal` is never called. ON = each source builds a `HealEvent` and calls
+  `hub/src/heal/route.ts::routeHeal`: live repo-bound session (ghost-aware) -> dispatch; else an OFFLINE
+  session of an allowlisted repo -> governed autospawn; else fail fast `no_routable_session` with ONE owner
+  notification (exactly one send attempt, not exactly-once delivery). Companion knobs (hub env, all in
+  `hub/src/heal/config.ts`; non-positive/non-finite/non-numeric => the default, never "no bound"):
+  **`REMO_HEAL_DEDUPE_WINDOW_MS`** (900000), **`REMO_HEAL_SPAWN_TIMEOUT_MS`** (25000, deadline for a launched
+  session to connect), **`REMO_HEAL_MAX_CLAIMS_PER_USER_HOUR`** (30), **`REMO_HEAL_MAX_PER_REPO_HOUR`** (4,
+  per-repo hourly dispatch bound), **`REMO_HEAL_MAX_PER_TASK_DAY`** (3, per scheduled-task daily ceiling),
+  **`REMO_HEAL_RETENTION_HOURS`** (48, floored at 24). **Arming:** heal autospawn needs the heal flag AND
+  `REMO_ORCHESTRATOR_AUTOSPAWN`, never `REMO_ORCHESTRATOR_ENABLED`; the allowlist
+  (`orchestrator_autospawn_allowlist`) is shared with the orchestrator and EMPTY by default, so a default
+  configuration spawns nothing. The `heal_events` ledger (atomic advisory-lock claim, unique-index backstop,
+  notification ownership by conditional update) is the dedupe and audit store; a boot sweep
+  (`hub/src/heal/sweep.ts`, only when the flag is ON) terminalizes launches stranded by a restart. Arming is an
+  owner action: [docs/orchestrator-autospawn-runbook.md](docs/orchestrator-autospawn-runbook.md).
+- **`REMO_CORCH_ENABLED`** (default **OFF**; accepts `1|true|yes|on` only; read at call time): the **central
+  orchestrator** backlog and dispatcher (milestone CORCH phase 01; [docs/corch.md](docs/corch.md)). OFF is a true
+  no-op: the `/api/corch/*` and `/api/ext/corch/work-items` routes only store and list rows; no dispatcher
+  evaluation, no reconciler interval, no `not_before` timer, no launch, no send. **Mutually exclusive with
+  `REMO_ORCHESTRATOR_ENABLED`**: `assertCorchConfig()` in `hub/src/index.ts` refuses boot when both are truthy.
+  ON launches only through `governedLaunch` (HEAL policy, shared autospawn daily launch cap) and sends the prompt
+  only through shared `dispatch()` with the 8-gate list (kill switch first, lifetime counter `corch:<work_item_id>`
+  last). The CORCH-01 default `QuotaProvider`, `Workspace` and `PrLookup` all fail closed, so nothing can launch in
+  production until CORCH-02 and CORCH-09 replace them. Companion knobs (non-positive/non-numeric => the default):
+  **`REMO_CORCH_LEASE_MS`** (120000, how long a live run may lack positive liveness knowledge before it is
+  reclaimed or marked stalled) and **`REMO_CORCH_RECONCILE_INTERVAL_MS`** (60000, the reconciler's single interval). CORCH-02 adds
+  **`REMO_CORCH_QUOTA_CEILING_PCT`** (default **55**; the account eligibility ceiling on `max(5h, 7d)`; a non-numeric,
+  `<= 0` or `> 100` value refuses boot, but only while `REMO_CORCH_ENABLED` is on). With the flag ON the real quota
+  provider (CUG snapshot via `POST /api/quota/snapshot`) replaces the fail-closed default; flag OFF still stores
+  snapshots and dispatches nothing. CORCH-04 adds **`REMO_CORCH_GSDC_URL`** + **`REMO_CORCH_GSDC_TOKEN`** (`gsdc_`, `board:read`; both unset = source off, no connection): the hub consumes the gsd-console board SSE and queues the next GSD phase of every enrolled repo as a `gsd_console` item, fail closed (any console failure adds and cancels nothing, one notification per outage, backoff capped at 5 min); see [docs/corch.md](docs/corch.md) "gsd-console ingestion". CORCH-08 adds **`REMO_CORCH_AAF_EVENT_SECRET`** (unset = the `POST /api/corch-events/aaf` receiver answers 503; set = signed AAF PR events close work items: merged = done, closed = blocked, failed = blocked + one notification) and **`REMO_CORCH_AAF_URL`** + **`REMO_CORCH_AAF_TOKEN`** + **`REMO_CORCH_AAF_INSTALLATION_ID`** (provision on enrollment; unset = `aaf_unprovisioned`); only AAF-provisioned projects are dispatchable. See [docs/corch.md](docs/corch.md) "AAF event receiver". CORCH-09 adds three SUPERVISOR-side env vars (process env of a headless Linux slot, never a desktop MSI, never sent to the hub): **`REMO_ACCOUNT_SLOT`** (advertised as `account_slot` in `supervisor.hello` only when set), **`REMO_SLOT_CLAUDE_CONFIG_DIR`** (the child's `CLAUDE_CONFIG_DIR`) and **`CLAUDE_CODE_OAUTH_TOKEN`** (handed only to the stream-json `claude` child, only with the slot set; both are required with the slot or the spawn is refused; `ANTHROPIC_API_KEY` stays scrubbed; no hub source or frame ever carries it, pinned by `hub/test/corch-no-token-guard.test.ts`). The hub drives allowlisted `corch.worktree_ensure` / `corch.worktree_remove` / `corch.pr_lookup` on the slot supervisor, each after `haltBeforeMachineSend`. The memlog claim per item (R3.8) is BLOCKED-ON-MCP: the `MemlogClient` default refuses `memlog_unavailable`, so items wait until a verified hub->memlog transport exists. See [docs/corch.md](docs/corch.md) "Slot injection, worktrees and PR lookup".
 
 ## Docs map — subsystems & phases
 
@@ -452,6 +485,10 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 | API docs | [api.md](docs/api.md) · `/openapi.json` · `/docs` | OpenAPI 3.1 assembled in `hub/src/api/_openapi.ts`; run `bun run docs:sync` after route changes (docs-drift CI enforces). |
 | Cloud-session host | [cloud-session-supervisor.md](docs/cloud-session-supervisor.md) | Headless supervisor inside a Claude Code cloud session: `tools/cloud-session/setup.sh` (env Setup script) clones + starts the Bun source, SessionStart hook restarts it; hub WebSockets honour `HTTPS_PROXY` (`supervisor/src/ws-proxy.ts`); authenticates with an **additional host key** (`purpose='host'`, `POST /api/api-keys {host:true}`) so it never evicts the tray app's key. |
 | TEAB tasks | [teab-tasks.md](docs/teab-tasks.md) · [.planning/TEAB-MILESTONE.md](.planning/TEAB-MILESTONE.md) | Milestone TEAB — `task_type:'teab'` scheduled task runs `teab run --repo <X>` on the supervisor host (allowlisted `teab_run`/`teab_status` commands; preflight fails closed; NO bypassPermissions / NO programmatic claude flags). Hub-driven background poll-to-terminal (idle-teardown-safe) → `finalizeRun` → post-run actions; cost/token cap unchanged. Columns `teab_repo_ident`/`teab_last_status`. **A new signed supervisor MSI is REQUIRED** for `teab_run` to exist on installed hosts. |
+| Unified self-heal routing | [self-heal-routing.md](docs/self-heal-routing.md) | PTYCAP Phase 7 - one seam, `hub/src/heal/route.ts::routeHeal`, for the four failure sources (Coolify deploy, scheduled-task failure, error-capture, feedback), behind `REMO_HEAL_UNIFIED` (default OFF). Live repo-bound session -> shared `dispatch()` six-gate chain; allowlisted offline repo -> `governedLaunch` (gates + lifetime reservation BEFORE the spawn); else fail fast `no_routable_session` + one notification. `heal_events` ledger (dedupe, provenance, notification owner), key `heal:<userId>:<canonical repo_ident>`, boot sweep. `POST /api/sessions/heal` is unchanged (prefix-compatible key only). |
+| Central orchestrator (CORCH) | [corch.md](docs/corch.md) | Milestone CORCH phase 01 - `hub/src/corch/`: per-user backlog (`corch_projects` / `corch_work_items` / `corch_runs`), cookie enrollment + enqueue routes and explicit-scope `POST /api/ext/corch/work-items`, an 8-gate chain (kill switch first, lifetime counter `corch:<work_item_id>` last), claim transaction (per-user advisory lock + partial unique indexes), launch only via `governedLaunch` HEAL policy, bounded requeue (60s, 300s, then blocked + one notification), positive-knowledge reclaim, one reconciler interval + one `not_before` timer, behind `REMO_CORCH_ENABLED` (default OFF, mutually exclusive with `REMO_ORCHESTRATOR_ENABLED`). Fail-closed default quota / workspace / PR lookup: cannot launch in prod yet. **CORCH-02 quota ingest:** `POST/GET /api/quota/snapshot` (explicit `quota:publish` / `quota:read`), `corch_quota_accounts`, one pure fail-closed eligibility function (`quota-eligibility.ts`), a real provider that picks the account with the most headroom per dispatch, waits with a quota `not_before`, and blocks an account after a quota death; CUG snapshot only. |
+| CORCH status and control | [corch.md](docs/corch.md) | CORCH-11 - `GET /api/corch/queue`, live `corch_queue` WS panel (no polling), `users.corch_paused` remote pause (distinct from the kill switch), item priority PATCH, cancel only `queued` (409 otherwise), read-only Telegram `/queue`. |
+| CORCH Linux slots | [corch-linux-slots.md](docs/corch-linux-slots.md) | CORCH-10 - `Dockerfile.slot` headless per-slot supervisor image (Bun source, non-root, no Tauri/ConPTY, no secret in any layer; runtime-only env), build-only `.woodpecker/slot-image.yaml`, Coolify runbook. Deploys nothing. |
 
 ## Cross-cutting invariants (do not violate)
 
@@ -497,7 +534,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   feedback and Coolify triage prompt builders. A machine path NEVER instructs the agent to push
   to main / merge / deploy: revanote's `deploy_strategy='direct'` and `auto_merge` are inert
   unless `revanote_app_mappings.trusted = true` (default FALSE). Machine-triggered spawns force
-  `dangerously_skip_permissions: false` (`dispatch/spawn-on-error.ts`, `scheduler/senders/triage.ts`)
+  `dangerously_skip_permissions: false` (`dispatch/spawn-on-error.ts`, `scheduler/senders/triage.ts`; `spawn-on-error` stays for flag-OFF error-capture/feedback and Revanote, while `ask/dispatch.ts` calls `launchSessionForUser` directly and the heal seam launches only through `governedLaunch`)
   regardless of the session-row default. Every self-heal gate list carries `sessionInjectRateGate`
   alongside the cost + token caps — a report flood cannot buy N turns/hour.
 - **Public webhooks: raw body BEFORE JSON parse**, constant-time secret compare, HMAC over
@@ -554,6 +591,14 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   DEPLOY (this change touched no prod env or flag). The corrected PTY usage emitter (dedupe on `message.id`,
   supervisor 0.15.1) needs a SIGNED supervisor MSI on the hosts (tag `supervisor-v*`); until hosts update, PTY
   consumption is recorded about 2.5x too low (hub-versus-MSI ordering window).
+- **One self-heal seam (PTYCAP Phase 7).** A failure source builds a `HealEvent` and calls `routeHeal`
+  (`hub/src/heal/route.ts`); none constructs its own routing, capacity fallback, dispatch, supervisor frame or
+  launch for a heal, none calls `listOnlineAgentSessionsForUser` / `pickSessionTarget` / `launchSessionForUser`,
+  and there is no fail-open dispatch-anyway branch (a routing error finalizes the run `failed`). The lifetime
+  key is `heal:<userId>:<canonical repo_ident>` from `buildHealKey` only. Guarded by
+  `hub/test/heal-single-seam.test.ts` (plus the extended token-cap, counter-key, session-start and
+  launch-caller guards); flag OFF is pinned by `hub/test/heal-flag-off.test.ts`. See
+  [docs/self-heal-routing.md](docs/self-heal-routing.md).
 - **Don't hand-roll per-subsystem dispatch/queue/grace.** Round-2 collapse is complete — use
   `hub/src/dispatch/` (the old `scheduler/session-queue.ts` shim is deleted).
 - **One-time tasks are `scheduled_tasks`, not a parallel queue (milestone once).** A
@@ -583,7 +628,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   `ext:*`-only key and can never spawn a CLI on a host. **`ext:work` (live-site publish via
   `POST /api/ext/work`) is EXPLICIT-only** — the gate uses `hasExplicitScope`, so a legacy/NULL
   key (incl. the supervisor's own `purpose='supervisor'` spawn key) does NOT satisfy it and can
-  no longer publish to a client site; `ext:read`/`ext:ask` stay NULL-permissive by design. **`settings:read`/`settings:write`** are also EXPLICIT-only and reach ONLY the
+  no longer publish to a client site; `ext:read`/`ext:ask` stay NULL-permissive by design. **`ext:corch`** (enqueue central-orchestrator work items via `POST /api/ext/corch/work-items`) is likewise EXPLICIT-only: NULL/legacy keys and the other `ext:*` scopes do not satisfy it. **`quota:publish`** (CUG usage snapshot, `POST /api/quota/snapshot`) and **`quota:read`** (per-account eligibility, `GET /api/quota/snapshot`) are EXPLICIT-only too; neither implies the other, they reach ONLY `/api/quota/*` (route-local Bearer auth before the cookie catch-all), and a legacy NULL-scopes key never acquires them. **`settings:read`/`settings:write`** are also EXPLICIT-only and reach ONLY the
   settings route allowlist in `hub/src/auth/settings-api-key.ts` via `authMiddleware` (any other
   `/api/*` path ⇒ 403 for an api key). **`chat:session`** is EXPLICIT-only and reaches ONLY `/api/chat/*` (Bearer chat surface for a live stream-json session: list/history/send/cancel/prompts/SSE; pty-interactive refused; docs/auth.md "Chat via API key"). **`/api/api-keys` is cookie-auth ONLY —
   an api key must NEVER be able to mint an api key.** N keys per user; only `purpose='supervisor'`

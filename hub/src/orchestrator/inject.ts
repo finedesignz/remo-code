@@ -45,11 +45,13 @@ import {
   AUTOSPAWN_LAUNCH_COMMAND,
 } from '../db/orchestrator-rows-dal.ts'
 import { getTokenCapStatus } from '../dispatch/gates.ts'
-import { launchSessionForUser, type LaunchResult } from '../telegram/launch.ts'
+import { launchSessionForUser } from '../telegram/launch.ts'
 import { isSupervisorOnline } from '../ws/supervisor-registry.ts'
 import { listSupervisorsForUser } from '../db/supervisor-dal.ts'
 import { appendRunLog } from './run-log.ts'
 import { getGraceBuffer } from '../dispatch/grace.ts'
+import { isSessionLive } from '../sessions/liveness.ts'
+import { governedLaunch } from '../dispatch/governed-launch.ts'
 
 export type InjectOutcome =
   | { kind: 'dispatched' }
@@ -133,33 +135,10 @@ async function defaultSupervisorOnlineForUser(userId: string): Promise<boolean> 
   }
 }
 
-/**
- * Default liveness check: a session is live only if it has a live agent channel
- * AND is not a ghost. A ghost is `status='online' AND hostname IS NULL` (a
- * phantom channel from a hostname-less re-auth). On any DB error we fail OPEN to
- * "live" (channel present ⇒ preserve the legacy dispatch behaviour for genuine
- * sessions rather than mis-route them to autospawn on a transient read error).
- */
-async function defaultIsSessionLive(sessionId: string): Promise<boolean> {
-  if (getChannel(sessionId) == null) return false
-  try {
-    const { sql } = await import('../db/postgres.ts')
-    const rows = await sql<{ status: string | null; hostname: string | null }[]>`
-      SELECT status, hostname FROM sessions WHERE id = ${sessionId} AND deleted_at IS NULL LIMIT 1
-    `
-    const row = rows[0]
-    if (!row) return true // channel present but no row — treat as live (best-effort)
-    const isGhost = row.status === 'online' && row.hostname == null
-    return !isGhost
-  } catch {
-    return true // fail-open to live — never mis-route a genuine session on a read error
-  }
-}
-
 const REAL_DEPS: InjectDeps = {
   dispatch,
   getChannel,
-  isSessionLive: defaultIsSessionLive,
+  isSessionLive,
   isOrchestratorEnabled,
   isAutospawnEnabled,
   isRepoAutospawnAllowed,
@@ -358,75 +337,59 @@ async function maybeAutospawnOffline(
   if (!autospawn || !autospawn.isBuild) return { kind: 'no_session' }
   if (!deps.isOrchestratorEnabled() || !deps.isAutospawnEnabled()) return { kind: 'no_session' }
 
-  const tz = autospawn.tz || 'UTC'
-
-  // Allowlist (fail-closed: empty allowlist ⇒ false ⇒ refused:not_allowlisted).
-  const allowed = await deps.isRepoAutospawnAllowed(userId, autospawn.repoIdent)
-  if (!allowed) return { kind: 'refused', reason: 'not_allowlisted' }
-
-  // Supervisor must be online to host the spawned session.
-  const supOnline = await deps.supervisorOnlineForUser(userId, sessionId)
-  if (!supOnline) return { kind: 'refused', reason: 'supervisor_offline' }
-
-  // BSA-04 token ceiling (non-bypassable, ALONGSIDE cost cap). Pre-launch check so
-  // we never SPAWN over the ceiling; the dispatch gate list re-checks per turn.
-  const tokenStatus = await deps.getTokenCapStatus(userId, tz)
-  if (tokenStatus.over) return { kind: 'refused', reason: 'over_token_cap' }
-
-  // BSA-04 per-day launch-count cap (each spawn is a cost/risk event regardless of
-  // tokens). Source: count today's `autospawn-launch` run-log rows (tz-day).
-  let launchesToday = 0
-  try {
-    launchesToday = await deps.countAutospawnLaunchesToday(userId, tz)
-  } catch {
-    /* best-effort; treat as 0 so a transient read error does not over-block */
-  }
-  if (isOverAutospawnDailyLaunchCap(launchesToday)) return { kind: 'refused', reason: 'launch_cap' }
-
-  // PTYCAP-04: the budget identity, resolved ONCE for this inject (the online path
-  // never reaches here) and BEFORE the launch so a resolver failure fails CLOSED
-  // without spawning a session.
-  let counterKey: string
-  try {
-    counterKey = await resolveInjectCounterKey(input, deps)
-  } catch (err: any) {
-    return { kind: 'failed', reason: `counter_key_unresolved:${err?.message ?? err}` }
-  }
-
-  // ── Launch + park ────────────────────────────────────────────────────────────
-  // Dedup: a live grace entry means a launch is already in flight for this session
-  // (one spawn per grace window) — don't fire a duplicate session.start; the
-  // earlier parked prompt already covers delivery on reconnect.
-  if (deps.graceParkPending(sessionId)) {
-    return { kind: 'autospawn_parked' }
-  }
-
-  let launch: LaunchResult
-  try {
-    launch = await deps.launchSessionForUser({ userId, sessionId, machine: true })
-  } catch (err: any) {
-    return { kind: 'failed', reason: `autospawn_launch_threw: ${err?.message ?? String(err)}` }
-  }
-
-  if (!launch.ok) {
-    // no_online_supervisor (raced offline) maps to supervisor_offline; capacity /
-    // other definitive reasons surface as a typed refusal.
-    if (launch.reason === 'no_online_supervisor') return { kind: 'refused', reason: 'supervisor_offline' }
-    return { kind: 'refused', reason: `autospawn_launch_${launch.reason}` }
-  }
-
-  // Ledger row: one `autospawn-launch` run-log entry per real spawn — this is the
-  // BSA-04 launch-count cap's source (counted above). Best-effort.
-  try {
-    await deps.appendRunLog({
-      session_id: sessionId,
-      repo_key: autospawn.repoIdent,
-      command: AUTOSPAWN_LAUNCH_COMMAND,
-      decision_rationale: `autospawn build session (run=${launch.runId}, sup=${launch.supervisorId})`,
-      outcome: 'launched',
-    })
-  } catch {
-    /* best-effort — the cap is conservative; a missed ledger row only under-counts */
+  // PTYCAP-07-04 (D-03/D-04): the post-flag chain (allowlist, supervisor, token cap,
+  // launch-count cap, in-flight dedupe, launch, ledger) lives in the shared governed
+  // adapter. Legacy policy = no pre-launch governor: the original order, strings and
+  // best-effort post-launch ledger. The arming flags stay evaluated here.
+  //
+  // PTYCAP-04: the budget identity, resolved ONCE for this inject (the online path never
+  // reaches here) inside the adapter's preflight, i.e. BEFORE the launch so a resolver
+  // failure fails CLOSED without spawning a session.
+  let counterKey = ''
+  const launched = await governedLaunch(
+    {
+      userId,
+      sessionId,
+      repoIdent: autospawn.repoIdent,
+      tz: autospawn.tz || 'UTC',
+      armed: true,
+      preflight: async () => {
+        try {
+          counterKey = await resolveInjectCounterKey(input, deps)
+          return { ok: true as const }
+        } catch (err: any) {
+          return {
+            ok: false as const,
+            result: { kind: 'failed' as const, reason: `counter_key_unresolved:${err?.message ?? err}` },
+          }
+        }
+      },
+      ledger: {
+        repoKey: autospawn.repoIdent,
+        command: AUTOSPAWN_LAUNCH_COMMAND,
+        rationale: (l) => `autospawn build session (run=${l?.runId}, sup=${l?.supervisorId})`,
+      },
+    },
+    {
+      isRepoAutospawnAllowed: deps.isRepoAutospawnAllowed,
+      supervisorOnlineForUser: deps.supervisorOnlineForUser,
+      getTokenCapStatus: deps.getTokenCapStatus,
+      countAutospawnLaunchesToday: deps.countAutospawnLaunchesToday,
+      isOverAutospawnDailyLaunchCap,
+      graceParkPending: deps.graceParkPending,
+      launchSessionForUser: deps.launchSessionForUser,
+      appendRunLog: deps.appendRunLog,
+    },
+  )
+  switch (launched.kind) {
+    case 'in_flight':
+      return { kind: 'autospawn_parked' }
+    case 'refused':
+      return { kind: 'refused', reason: launched.reason }
+    case 'failed':
+      return { kind: 'failed', reason: launched.reason }
+    case 'launched':
+      break
   }
 
   // Park the macro prompt in grace so the freshly-launched runner receives it on

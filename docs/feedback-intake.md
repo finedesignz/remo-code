@@ -34,6 +34,25 @@ Files:
 - Tests: `hub/test/feedback-webhook.test.ts` + mount-order coverage in
   `hub/test/mount-order.test.ts`.
 
+## Unified self-heal routing (flag `REMO_HEAL_UNIFIED`)
+
+With `REMO_HEAL_UNIFIED` ON (default OFF), `dispatchFeedback` builds a `feedback` `HealEvent`
+(`hub/src/heal/sources/feedback.ts`, dedupe key `fb:<submission_id>`, the screenshot passed as an
+image) and calls `routeHeal` (`docs/self-heal-routing.md`):
+
+- the key's bound session is revalidated against the owner; a missing, deleted, rootless,
+  foreign-tenant, PTY-ineligible or repo-mismatched session is never dispatched into;
+- no `ensureOnline` hook; an offline bound session is woken only through the governed autospawn
+  (shared allowlist, heal armed, supervisor online), otherwise the submission fails fast with
+  `no_routable_session` and one owner notification;
+- the shared six-gate chain applies, including the Phase 4 lifetime counter and the session
+  inject-rate gate; a duplicate submission within `REMO_HEAL_DEDUPE_WINDOW_MS` maps to
+  `skipped/deduped`.
+
+With the flag OFF the dispatcher runs its previous body unchanged (`dispatchFeedbackLegacy`).
+`spawn-on-error` stays for the flag-OFF path. The per-token and per-IP rate limits, the cost cap and
+the untrusted-data fence are unchanged either way.
+
 ## Data model
 
 `feedback_keys` — **one key per app**:

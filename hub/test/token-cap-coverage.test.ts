@@ -88,6 +88,10 @@ describe('daily TOKEN cap covers every dispatch entry point', () => {
       // [thresholdGate, dailyTokenCapGate, dailyCostCapGate, sessionInjectRateGate]
       // order) lives here — see hub/src/dispatch/pty-preflight.ts.
       'dispatch/pty-preflight.ts',
+      // PTYCAP Phase 7 (SC3): the single self-heal seam's pipeline builder.
+      'heal/route.ts',
+      // CORCH-01: the central orchestrator's pipeline builder.
+      'corch/dispatcher.ts',
     ]) {
       expect(files.has(expected)).toBe(true)
     }
@@ -98,5 +102,57 @@ describe('daily TOKEN cap covers every dispatch entry point', () => {
       .filter((g) => !g.list.includes('dailyTokenCapGate') || !g.list.includes('dailyCostCapGate'))
       .map((g) => `${g.file}: gates: [${g.list.trim()}]`)
     expect(offenders).toEqual([])
+  })
+})
+
+describe('PTYCAP-07-10 (SC3, SH-06): the heal gate list is discovered and ordered', () => {
+  const heal = () => gateLists().lists.filter((g) => g.file.startsWith('heal/'))
+
+  test('heal/route.ts holds the ONLY gate list under hub/src/heal', () => {
+    expect(heal().map((g) => g.file)).toEqual(['heal/route.ts'])
+  })
+
+  test('the heal gate list holds the locked D-07 gates plus the PTY denial, in order', () => {
+    const order = [
+      'automationKillSwitchGate',
+      'thresholdGate',
+      'dailyCostCapGate',
+      'dailyTokenCapGate',
+      'governedAutomationPtyGate',
+      'sessionInjectRateGate',
+      'automationLifetimeCounterGate',
+    ]
+    const list = heal()[0]!.list
+    const idx = order.map((g) => list.indexOf(g))
+    for (const [i, g] of order.entries()) expect([g, idx[i]! > -1]).toEqual([g, true])
+    expect(idx).toEqual([...idx].sort((a, b) => a - b))
+    expect((list.match(/Gate\b/g) ?? []).length).toBe(7) // no eighth gate, no duplicate
+  })
+})
+
+describe('CORCH-01 (CORCH-R1.9): the corch gate list is discovered and ordered', () => {
+  const corch = () => gateLists().lists.filter((g) => g.file.startsWith('corch/'))
+
+  test('corch/dispatcher.ts holds the ONLY gate list under hub/src/corch', () => {
+    expect(corch().map((g) => g.file)).toEqual(['corch/dispatcher.ts'])
+  })
+
+  test('the corch gate list holds the locked 8 gates, in order', () => {
+    const order = [
+      'automationKillSwitchGate',
+      'dailyCostCapGate',
+      'dailyTokenCapGate',
+      'corchProjectBudgetGate',
+      'corchConcurrencyGate',
+      'corchQuotaGate',
+      'sessionInjectRateGate',
+      'automationLifetimeCounterGate',
+    ]
+    const list = corch()[0]!.list
+    const idx = order.map((g) => list.indexOf(g))
+    for (const [i, g] of order.entries()) expect([g, idx[i]! > -1]).toEqual([g, true])
+    expect(idx).toEqual([...idx].sort((a, b) => a - b))
+    expect((list.match(/Gate\b/g) ?? []).length).toBe(8) // no ninth gate, no duplicate
+    expect(list.includes('thresholdGate')).toBe(false) // A6: CORCH does not use thresholdGate
   })
 })

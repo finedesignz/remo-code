@@ -10,7 +10,8 @@ import { describe, it, expect, afterAll, mock } from 'bun:test'
 import { Hono } from 'hono'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { hasScope, hasExplicitScope, normalizeScopes, SCOPE_AGENT, SCOPE_EXT_ASK, SCOPE_EXT_READ, SCOPE_EXT_WORK, SCOPE_EXT_LAUNCH } from '../src/auth/scopes.ts'
+import { hasScope, hasExplicitScope, normalizeScopes, SCOPE_AGENT, SCOPE_EXT_ASK, SCOPE_EXT_READ, SCOPE_EXT_WORK, SCOPE_EXT_LAUNCH, SCOPE_EXT_CORCH, ALL_SCOPES } from '../src/auth/scopes.ts'
+import { matchSettingsRoute } from '../src/auth/settings-api-key.ts'
 
 const SRC = join(import.meta.dir, '..', 'src')
 
@@ -65,7 +66,9 @@ describe('scopes helper', () => {
 
 describe('apiKeyMiddleware scope enforcement', () => {
   async function appWithKey(scopes: string[] | null) {
+    const realDal = await import('../src/db/dal.ts')
     mock.module(join(SRC, 'db/dal.ts'), () => ({
+      ...realDal,
       verifyApiKeyWithScope: async (_hash: string, scope: string) => {
         if (!hasScope(scopes, scope)) return { error: 'missing_scope' }
         return { userId: 'u1', apiKeyId: 'k1' }
@@ -107,7 +110,9 @@ describe('apiKeyMiddleware scope enforcement', () => {
 
 describe('/api/ext scope enforcement (milestone ASK middleware × SKEY scopes)', () => {
   async function extApp(scopes: string[] | null) {
+    const realAskDal = await import('../src/db/ask-dal.ts')
     mock.module(join(SRC, 'db/ask-dal.ts'), () => ({
+      ...realAskDal,
       verifyApiKeyForExt: async () => ({ id: 'k1', user_id: 'u1', scopes }),
       hasScope: (s: string[] | null | undefined, scope: string) => hasScope(s, scope),
     }))
@@ -188,7 +193,9 @@ describe('/api/ext scope enforcement (milestone ASK middleware × SKEY scopes)',
 
 describe('/api/ext launch + stop need EXPLICIT ext:launch', () => {
   async function extApp(scopes: string[] | null) {
+    const realAskDal = await import('../src/db/ask-dal.ts')
     mock.module(join(SRC, 'db/ask-dal.ts'), () => ({
+      ...realAskDal,
       verifyApiKeyForExt: async () => ({ id: 'k1', user_id: 'u1', scopes }),
       hasScope: (s: string[] | null | undefined, scope: string) => hasScope(s, scope),
     }))
@@ -234,6 +241,53 @@ describe('/api/ext launch + stop need EXPLICIT ext:launch', () => {
   })
 })
 
+describe('ext:corch is an EXPLICIT-only scope (milestone CORCH-01)', () => {
+  it('is in ALL_SCOPES, accepted by normalizeScopes, never satisfied by NULL/empty/other scopes', () => {
+    expect(SCOPE_EXT_CORCH).toBe('ext:corch')
+    expect((ALL_SCOPES as readonly string[]).includes('ext:corch')).toBe(true)
+    expect(normalizeScopes(['ext:read', 'ext:corch'])).toEqual({ ok: true, scopes: ['ext:read', 'ext:corch'] })
+    expect(hasExplicitScope(null, 'ext:corch')).toBe(false)
+    expect(hasExplicitScope([], 'ext:corch')).toBe(false)
+    expect(hasExplicitScope([SCOPE_AGENT, SCOPE_EXT_READ, SCOPE_EXT_ASK, SCOPE_EXT_WORK, SCOPE_EXT_LAUNCH], 'ext:corch')).toBe(false)
+    expect(hasExplicitScope([SCOPE_EXT_READ, 'ext:corch'], 'ext:corch')).toBe(true)
+  })
+
+  it('an api key can never reach the cookie /api/corch routes: they are not on the settings allowlist (authMiddleware -> 403)', () => {
+    for (const [m, p] of [
+      ['GET', '/api/corch/projects'],
+      ['POST', '/api/corch/projects'],
+      ['PATCH', '/api/corch/projects/p1'],
+      ['POST', '/api/corch/work-items'],
+      ['GET', '/api/corch/work-items'],
+    ] as const) {
+      expect(matchSettingsRoute(m, p)).toBeNull()
+    }
+  })
+
+  it('extApiKeyMiddleware gates POST /api/ext/corch/work-items on the explicit scope', async () => {
+    async function extApp(scopes: string[] | null) {
+      mock.module(join(SRC, 'db/ask-dal.ts'), () => ({
+        verifyApiKeyForExt: async () => ({ id: 'k1', user_id: 'u1', scopes }),
+        hasScope: (s: string[] | null | undefined, scope: string) => hasScope(s, scope),
+      }))
+      const { extApiKeyMiddleware } = await import(
+        `../src/auth/ext-api-key-middleware.ts?extcorch=${encodeURIComponent(JSON.stringify(scopes))}`
+      )
+      const app = new Hono()
+      app.use('/api/ext/*', extApiKeyMiddleware)
+      app.post('/api/ext/corch/work-items', (c) => c.json({ ok: true }))
+      return app
+    }
+    const auth = { method: 'POST', headers: { Authorization: 'Bearer remokey_x' } }
+    for (const scopes of [null, [], ['ext:read'], ['ext:read', 'ext:work']]) {
+      const res = await (await extApp(scopes)).request('/api/ext/corch/work-items', auth)
+      expect(res.status).toBe(403)
+      expect(await res.json()).toEqual({ error: 'insufficient_scope', required: 'ext:corch' })
+    }
+    expect((await (await extApp(['ext:read', 'ext:corch'])).request('/api/ext/corch/work-items', auth)).status).toBe(200)
+  })
+})
+
 describe('/ws/agent requires the agent scope', () => {
   it('agent.ts gates auth on verifyApiKeyWithScope(…, agent) and closes missing_agent_scope', () => {
     const src = readFileSync(join(SRC, 'ws/agent.ts'), 'utf8')
@@ -256,5 +310,73 @@ describe('an api key can never mint an api key', () => {
     const src = readFileSync(join(SRC, 'api/api-keys.ts'), 'utf8')
     expect(src).not.toContain("header('Authorization')")
     expect(src).not.toContain('import { apiKeyMiddleware')
+  })
+})
+
+describe('quota:publish and quota:read are EXPLICIT-only scopes (milestone CORCH-02)', () => {
+  it('are in ALL_SCOPES, accepted by normalizeScopes, never satisfied by NULL/empty/other scopes', () => {
+    expect((ALL_SCOPES as readonly string[]).includes('quota:publish')).toBe(true)
+    expect((ALL_SCOPES as readonly string[]).includes('quota:read')).toBe(true)
+    expect(normalizeScopes(['quota:publish'])).toEqual({ ok: true, scopes: ['quota:publish'] })
+    expect(normalizeScopes(['quota:read', 'quota:publish'])).toEqual({ ok: true, scopes: ['quota:read', 'quota:publish'] })
+    for (const s of ['quota:publish', 'quota:read']) {
+      expect(hasExplicitScope(null, s)).toBe(false)
+      expect(hasExplicitScope([], s)).toBe(false)
+      expect(hasExplicitScope([SCOPE_AGENT, SCOPE_EXT_READ, SCOPE_EXT_ASK, SCOPE_EXT_WORK, SCOPE_EXT_LAUNCH, SCOPE_EXT_CORCH], s)).toBe(false)
+    }
+    // neither implies the other
+    expect(hasExplicitScope(['quota:publish'], 'quota:read')).toBe(false)
+    expect(hasExplicitScope(['quota:read'], 'quota:publish')).toBe(false)
+    expect(hasExplicitScope(['quota:read', 'quota:publish'], 'quota:publish')).toBe(true)
+  })
+
+  it('hasScope stays NULL-permissive for others and a quota-only key holds no other scope', () => {
+    expect(hasScope(null, SCOPE_AGENT)).toBe(true)
+    for (const k of [['quota:publish'], ['quota:read']]) {
+      for (const other of [SCOPE_AGENT, SCOPE_EXT_READ, SCOPE_EXT_ASK, SCOPE_EXT_WORK, SCOPE_EXT_LAUNCH, SCOPE_EXT_CORCH, 'cloud:hook', 'settings:read', 'chat:session']) {
+        expect(hasScope(k, other)).toBe(false)
+        expect(hasExplicitScope(k, other)).toBe(false)
+      }
+    }
+  })
+
+  it('a quota-only key is refused by /api/ext/* (extApiKeyMiddleware needs ext:read)', async () => {
+    for (const scopes of [['quota:publish'], ['quota:read']]) {
+      mock.module(join(SRC, 'db/ask-dal.ts'), () => ({
+        verifyApiKeyForExt: async () => ({ id: 'k1', user_id: 'u1', scopes }),
+        hasScope: (s: string[] | null | undefined, scope: string) => hasScope(s, scope),
+      }))
+      const { extApiKeyMiddleware } = await import(
+        `../src/auth/ext-api-key-middleware.ts?extquota=${encodeURIComponent(JSON.stringify(scopes))}`
+      )
+      const app = new Hono()
+      app.use('/api/ext/*', extApiKeyMiddleware)
+      app.get('/api/ext/sessions', (c) => c.json({ ok: true }))
+      const res = await app.request('/api/ext/sessions', { headers: { Authorization: 'Bearer remokey_x' } })
+      expect(res.status).toBe(403)
+    }
+  })
+
+  it('/ws/agent and the cloud hook cannot be reached: the agent scope and cloud:hook are not held', () => {
+    const agentSrc = readFileSync(join(SRC, 'ws/agent.ts'), 'utf8')
+    expect(agentSrc).toContain("verifyApiKeyWithScope(keyHash, 'agent')")
+    const hookSrc = readFileSync(join(SRC, 'api/cloud-hook.ts'), 'utf8')
+    expect(hookSrc).toContain('hasExplicitScope(key.scopes, SCOPE_CLOUD_HOOK)')
+    expect(hasExplicitScope(['quota:publish', 'quota:read'], 'cloud:hook')).toBe(false)
+    expect(hasScope(['quota:publish', 'quota:read'], SCOPE_AGENT)).toBe(false)
+  })
+
+  it('a cookie route never accepts an api key: quota routes are not on the settings allowlist and no cookie route reads quota scopes', () => {
+    for (const [m, p] of [
+      ['GET', '/api/quota/snapshot'],
+      ['POST', '/api/quota/snapshot'],
+      ['GET', '/api/sessions'],
+      ['GET', '/api/corch/projects'],
+    ] as const) {
+      expect(matchSettingsRoute(m, p)).toBeNull()
+    }
+    const quotaSrc = readFileSync(join(SRC, 'api/quota.ts'), 'utf8')
+    expect(quotaSrc).toContain('hasExplicitScope')
+    expect(quotaSrc).not.toMatch(/\bhasScope\(/)
   })
 })

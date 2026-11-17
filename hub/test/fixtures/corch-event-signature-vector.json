@@ -1,0 +1,7 @@
+{
+  "_comment": "CORCH-06/CORCH-08 shared signature vector. Identical content must be committed in agentautofix and remo-code. signature = sha256= + hex HMAC-SHA256(hmac_key, timestamp + \".\" + body).",
+  "hmac_key": "corch-vector-key-0123456789abcdef",
+  "timestamp": 1760000000,
+  "body": "{\"event_id\":\"11111111-2222-4333-8444-555555555555\",\"event\":\"pr.merged\",\"repo\":\"acme/site\",\"pr_number\":7,\"head_ref\":\"corch/wi-42\",\"merged_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"occurred_at\":\"2026-11-13T12:00:00.000Z\"}",
+  "signature": "sha256=cd1208a7e5f9412eee5c66fcfdcae1ee09463e6fd91b4dbcad4c327bddc2f997"
+}

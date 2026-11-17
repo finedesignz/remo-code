@@ -81,6 +81,17 @@ async function pickSupervisorForSession(
   return { ok: false, reason: 'supervisor_ambiguous', count: online.length }
 }
 
+/** F5: the explicit target, only when it is one of the user's supervisors and online. */
+async function pickTargetSupervisor(
+  userId: string,
+  supervisorId: string,
+): Promise<{ ok: true; supervisorId: string; hostname: string } | { ok: false; reason: 'no_online_supervisor' }> {
+  const sups = (await listSupervisorsForUser(userId)) as unknown as Array<{ id: string; hostname: string }>
+  const match = sups.find((s) => s.id === supervisorId)
+  if (!match || !isSupervisorOnline(match.id)) return { ok: false, reason: 'no_online_supervisor' }
+  return { ok: true, supervisorId: match.id, hostname: match.hostname }
+}
+
 export async function launchSessionForUser(args: {
   userId: string
   sessionId: string
@@ -92,7 +103,34 @@ export async function launchSessionForUser(args: {
    * consulted). Pinned by test/launch-callers-guard.test.ts.
    */
   machine?: true
+  /**
+   * PTYCAP-07 QC: `false` forces the session.start frame's dangerously_skip_permissions OFF,
+   * ignoring the session row. Required for untrusted-triggered machine spawns (self-heal): a
+   * machine path must never launch with permission prompts disabled (CLAUDE.md invariant).
+   * Omitted => the session row value, unchanged for every other caller.
+   */
+  skipPermissions?: false
+  /**
+   * CORCH-02 QC F5: launch on exactly this supervisor (must be one of the user's, online) instead of the
+   * hostname pick. Passed ONLY by the corch dispatcher (via governedLaunch.resolveTarget); every other caller
+   * omits it and keeps the hostname pick unchanged.
+   */
+  targetSupervisorId?: string
 }): Promise<LaunchResult> {
+  // AM-F1-4: the supervisor run reserved below; closed on EVERY non-launch exit after the
+  // reservation (send_failed, halt unwind, any throw) so a failed spawn cannot leak a slot.
+  let reservedRunId: string | null = null
+  const closeReservedRun = async (reason: string): Promise<void> => {
+    const id = reservedRunId
+    if (!id) return
+    reservedRunId = null
+    try {
+      const { endRun } = await import('../db/supervisor-dal.ts')
+      await endRun(id, null, reason)
+    } catch (e: any) {
+      console.error(`[telegram-launch] endRun failed run=${id}: ${e?.message ?? e}`)
+    }
+  }
   try {
     if (args.machine) {
       const halt = await isAutomationHalted({ userId: args.userId, sessionId: args.sessionId })
@@ -119,6 +157,7 @@ export async function launchSessionForUser(args: {
         requireEnabled: true,
         skipIfRunning: true,
         ...(args.machine ? { machine: true as const } : {}),
+        ...(args.skipPermissions === false ? { skipPermissions: false as const } : {}),
       })
       if (res.ok) {
         return { ok: true, runId: res.runId, supervisorId: res.supervisorId, hostname: '', repoPath: res.cwd }
@@ -145,7 +184,9 @@ export async function launchSessionForUser(args: {
 
     if (!session.project_dir) return { ok: false, reason: 'no_project_dir' }
 
-    const pick = await pickSupervisorForSession(args.userId, session)
+    const pick = args.targetSupervisorId
+      ? await pickTargetSupervisor(args.userId, args.targetSupervisorId)
+      : await pickSupervisorForSession(args.userId, session)
     if (!pick.ok) {
       if (pick.reason === 'supervisor_ambiguous') {
         return { ok: false, reason: 'supervisor_ambiguous', count: pick.count ?? 0 }
@@ -185,21 +226,18 @@ export async function launchSessionForUser(args: {
     }
 
     const run = reservation.run
+    reservedRunId = run.id
     await updateSupervisorState(pick.supervisorId, 'starting', run.id)
 
-    const skipPerms = await getSessionSkipPermissions(session.id, args.userId)
+    const skipPerms =
+      args.skipPermissions === false ? false : await getSessionSkipPermissions(session.id, args.userId)
     // QC B1: fresh kill-switch read immediately before the machine session.start. The check
     // at the top of this function predates the session lookup, supervisor pick and slot
     // reservation. A halt closes the run row the reservation just opened (frees the slot).
     if (args.machine) {
       const pre = await haltBeforeMachineSend({ userId: args.userId, sessionId: args.sessionId })
       if (!pre.ok) {
-        try {
-          const { endRun } = await import('../db/supervisor-dal.ts')
-          await endRun(run.id, null, pre.reason)
-        } catch (err: any) {
-          console.error(`[telegram-launch] halt unwind endRun failed run=${run.id}: ${err?.message ?? err}`)
-        }
+        await closeReservedRun(pre.reason)
         return { ok: false, reason: `automation_halted:${pre.scope}` }
       }
     }
@@ -217,6 +255,7 @@ export async function launchSessionForUser(args: {
         dangerously_skip_permissions: skipPerms,
       } as any)
     } catch (err: any) {
+      await closeReservedRun('send_failed')
       return { ok: false, reason: 'send_failed', error: err?.message ?? String(err) }
     }
 
@@ -228,6 +267,7 @@ export async function launchSessionForUser(args: {
       repoPath: session.project_dir,
     }
   } catch (err: any) {
+    await closeReservedRun('internal_error')
     return { ok: false, reason: 'internal_error', error: err?.message ?? String(err) }
   }
 }

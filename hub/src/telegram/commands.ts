@@ -37,6 +37,7 @@ export type ParsedCommand =
   | { kind: "doctor" }
   | { kind: "status" }
   | { kind: "stop" }
+  | { kind: "queue" }
   | { kind: "unknown"; raw: string }
   | { kind: "none" };
 
@@ -63,6 +64,8 @@ export function parseCommand(text: string | undefined | null): ParsedCommand {
       return { kind: "status" };
     case "stop":
       return { kind: "stop" };
+    case "queue":
+      return { kind: "queue" };
     default:
       return { kind: "unknown", raw: name };
   }
@@ -79,6 +82,7 @@ export const BOT_COMMANDS: ReadonlyArray<{ command: string; description: string 
   { command: "session", description: "Set default session by id-prefix" },
   { command: "status", description: "Show link, default session, supervisor & daily cost" },
   { command: "stop", description: "Halt the running turn for your default session" },
+  { command: "queue", description: "Read-only CORCH backlog: paused flag, live runs, top queued, blocked count" },
   { command: "doctor", description: "Diagnose & auto-fix an offline supervisor/session" },
   { command: "help", description: "Show the command reference" },
 ];
@@ -90,6 +94,7 @@ export const HELP_TEXT = [
   "/session <id> — set default by typed id-prefix (power users; /list is easier)",
   "/status — link, default session, supervisor, channel, daily cost",
   "/stop — halt the running turn for your default session",
+  "/queue — read-only CORCH backlog summary (pause, priority and cancel are web-only)",
   "/doctor — diagnose and auto-fix supervisor/session offline issues",
   "/help — this message",
   "",

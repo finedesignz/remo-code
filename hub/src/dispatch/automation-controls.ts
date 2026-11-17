@@ -295,6 +295,19 @@ export async function lifetimeCounterCheck(
     const n = await countLifetime(sql, req.counterKey)
     const cap = lifetimeInjectCap()
     if (n >= cap) {
+      // A pre-launch reservation (heal governed launch) for THIS token already took its slot, so
+      // it counts in `n`; it must not block its own post-spawn dispatch. Same idempotency rule as
+      // reserveInject: an unreleased row for (counter key, token) passes. Only consulted at the cap.
+      if (req.token) {
+        const own = (
+          await sql`
+            SELECT id, released_at FROM automation_inject_ledger
+            WHERE counter_key = ${req.counterKey} AND token = ${req.token} AND kind = 'inject'
+            LIMIT 1
+          `
+        )[0]
+        if (own && own.released_at == null) return { ok: true }
+      }
       // The gate is the normal place a spent budget is first seen (the in-lock
       // reserve only refuses on a race), so the once-per-epoch exhaustion page
       // is claimed here too. Best-effort: never changes the gate result.
@@ -477,6 +490,15 @@ export async function releaseInject(args: { counterKey: string; token: string })
     pendingReleases.set(`${args.counterKey}\u0000${args.token}`, { counterKey: args.counterKey, token: args.token })
   }
   return false
+}
+
+/**
+ * Strict release: stamps released_at while null and THROWS on a database error, so a caller that
+ * owes a retry (the heal sweep / route) can tell "released" from "still reserved". Idempotent: a
+ * row that never reserved, or is already released, matches nothing and resolves.
+ */
+export async function releaseInjectStrict(args: { counterKey: string; token: string }): Promise<void> {
+  await stampReleased(args)
 }
 
 /**

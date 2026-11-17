@@ -29,6 +29,7 @@ import { coolifyWebhookRoutes } from './api/coolify-webhook'
 import { revanoteWebhookRoutes } from './api/revanote-webhook'
 import { feedbackWebhookRoutes } from './api/feedback-webhook'
 import cloudHookRoutes from './api/cloud-hook'
+import quotaRoutes from './api/quota'
 import { feedbackKeys as feedbackKeysApi } from './api/feedback-keys'
 import { sourceIpFromHeaders } from './lib/cidr'
 import { telegramWebhookRoutes } from './api/telegram-webhook'
@@ -69,7 +70,12 @@ import { startStaleRunReaperSweep, stopStaleRunReaperSweep } from './sessions/st
 import { startBatchSweep, stopBatchSweep } from './revanote/batch-dispatch.ts'
 import { startOnceDueSweep, stopOnceDueSweep } from './scheduler/once-due-sweep.ts'
 import { startRevanoteStallSweep, stopRevanoteStallSweep } from './revanote/stall-alert.ts'
+import { healUnifiedEnabled } from './heal/config.ts'
 import { assertTokenCapConfig } from './dispatch/gates.ts'
+import { assertCorchConfig } from './corch/flag.ts'
+import { corchRoutes } from './corch/routes.ts'
+import { aafEventRoutes } from './corch/aaf-events.ts'
+import { startCorch } from './corch/reconciler.ts'
 import { assertAutomationControlsEnv, assertAutomationControlsTables } from './dispatch/automation-controls.ts'
 import { registerTokenCapAlarm } from './observability/token-cap-alarm.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
@@ -115,6 +121,8 @@ import { withHttpMetrics } from './observability/http-metrics'
 //        - /api/revanote        → revanoteWebhookRoutes     (mounted ~L175)
 //        - /api/feedback        → feedbackWebhookRoutes      (mounted ~L178)
 //        - /api/cloud-hook      → cloudHookRoutes (Bearer key, explicit cloud:hook scope)
+//        - /api/quota           → quotaRoutes (Bearer key, explicit quota:publish / quota:read scope)
+//        - /api/corch-events    → aafEventRoutes (CORCH-08: HMAC over `${ts}.${rawBody}`, 503 until REMO_CORCH_AAF_EVENT_SECRET set)
 //        - /api/telegram        → telegramWebhookRoutes     (mounted ~L181)
 //        - /webhooks/titanium   → webhooksTitanium          (mounted ~L185)
 //      The JWT/auth catch-all is `app.use('/api/*', ...)` (~L190) and its skip
@@ -280,6 +288,16 @@ app.route('/api/feedback', feedbackWebhookRoutes)
 app.use('/api/cloud-hook/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => c.req.header('authorization')?.slice(0, 24) || 'anon' }))
 app.route('/api/cloud-hook', cloudHookRoutes)
 
+// CORCH-02: CUG usage-snapshot ingest + eligibility read. Bearer api key with EXPLICIT quota:publish /
+// quota:read; route-local auth, cookies never authenticate. MUST be mounted BEFORE the JWT catch-all.
+app.use('/api/quota/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => c.req.header('authorization')?.slice(0, 24) || 'anon' }))
+app.route('/api/quota', quotaRoutes)
+
+// CORCH-08: signed AgentAutofix PR-outcome events. The timestamped HMAC is the credential (no cookie, no API key);
+// raw body is read before any parse. MUST be mounted BEFORE the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top).
+app.use('/api/corch-events/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => (c.req.header('x-forwarded-for') ?? '').split(',')[0]!.trim().slice(0, 64) || 'anon' }))
+app.route('/api/corch-events', aafEventRoutes)
+
 // Phase 12: Public Telegram inbound webhook (URL-path secret). MUST be
 // mounted BEFORE the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top).
 // Auth is :secret in the URL, constant-time compared to config.telegram.webhookSecret.
@@ -301,6 +319,8 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/revanote/webhook/')) return next()
   if (c.req.path.startsWith('/api/feedback/')) return next()
   if (c.req.path.startsWith('/api/cloud-hook/')) return next()
+  if (c.req.path.startsWith('/api/quota/')) return next()
+  if (c.req.path.startsWith('/api/corch-events/')) return next()
   if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
   // Milestone ASK: /api/ext/* authenticates with an api_key Bearer (already
   // enforced by extApiKeyMiddleware above), never a cookie.
@@ -327,6 +347,8 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/revanote/webhook/')) return next()
   if (c.req.path.startsWith('/api/feedback/')) return next()
   if (c.req.path.startsWith('/api/cloud-hook/')) return next()
+  if (c.req.path.startsWith('/api/quota/')) return next()
+  if (c.req.path.startsWith('/api/corch-events/')) return next()
   if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
   if (c.req.path.startsWith('/api/auth/')) return next()
   if (c.req.path.startsWith('/api/client-config')) return next()
@@ -466,6 +488,8 @@ app.route('/api/error-setup', errorSetupApi)
 // The public webhook route lives at /api/revanote/webhook/* (mounted above).
 app.route('/api/orchestrator', orchestratorApi)
 app.route('/api/automation', automationApi)
+// CORCH-01: cookie enrollment + enqueue routes (flag OFF = store/list only). API keys get 403 from authMiddleware.
+app.route('/api/corch', corchRoutes)
 // Phase 31 (auto-dev-orchestrator): authed config REST for the one-per-session
 // orchestrator task + its rows. Data-only (controller path is flag-OFF). Mounted
 // alongside the other authed user routes (post-auth catch-all).
@@ -553,6 +577,7 @@ if (config.titaniumBypass) {
 // REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1 says otherwise on purpose.
 try {
   assertTokenCapConfig()
+  assertCorchConfig() // CORCH-R1.3: refuse boot when both CORCH and the old orchestrator are enabled
 } catch (err: any) {
   console.error(`[startup] FATAL: ${err?.message ?? err}`)
   process.exit(1)
@@ -637,7 +662,18 @@ const server = Bun.serve({
 
     // Try Hono (API routes, health)
     const honoResponse = await app.fetch(req)
+    // A 404 from Hono's own API routers (e.g. an authenticated /api/ext/* route
+    // that resolved to extApiKeyMiddleware + the ext router but found no matching
+    // session) is an explicit JSON 404 from the handler itself, NOT "no route
+    // matched" — Hono only falls through to its own not-found handler when NO
+    // route pattern matched at all. The ONLY case we want to fall through to the
+    // SPA (index.html, 200 text/html) is that second case: an unknown path under
+    // the static site. Any already-authenticated/matched /api/* request that
+    // returns 404 must stay a 404 JSON response — masking it as the SPA shell
+    // makes every authenticated not-found (e.g. session_not_found) look like a
+    // 200 success to the caller.
     if (honoResponse.status !== 404) return honoResponse
+    if (url.pathname.startsWith('/api/')) return honoResponse
 
     // Serve static files from web/dist — with path traversal protection (M4 fix)
     const requestedPath = decodeURIComponent(url.pathname)
@@ -753,6 +789,9 @@ runMigrations()
     // session's queue slot was held forever and every later annotation for that
     // repo came back `session_busy`.
     startHookReaper()
+    // CORCH-01 — central orchestrator: reconciler interval + not_before timer. True no-op unless
+    // REMO_CORCH_ENABLED (default OFF); never started alongside the old orchestrator (assertCorchConfig).
+    void startCorch().catch((err) => console.error(`[corch] boot start failed: ${err?.message ?? err}`))
     // Milestone ASK — periodic sweep that finalizes `session_asks` stuck
     // queued/dispatched past REMO_ASK_MAX_MS (default 15min) as `timeout`, so an
     // external caller never polls a dead ask forever. Conditional finalize, so a
@@ -794,6 +833,14 @@ runMigrations()
     // group's latest arrival, so one Revanote review lands as one branch/PR
     // instead of one per comment. No-op when nothing pending carries a batch_id.
     startBatchSweep()
+    // PTYCAP-07-06 — boot-time sweep: terminalizes heal autospawn launches stranded by a
+    // restart (the spawn-deadline timer is process-local) so the 6h reaper is never their
+    // backstop. Event-driven (once at boot plus one follow-up at the deadline, no interval); flag-OFF boot loads nothing of it.
+    if (healUnifiedEnabled()) {
+      void import('./heal/sweep.ts')
+        .then((m) => m.bootSweepHealLaunches())
+        .catch((err) => console.error('[startup] heal boot sweep failed:', err?.message ?? err))
+    }
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {
