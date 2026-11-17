@@ -15,11 +15,13 @@ export const SLOT_QUOTA_URL = 'https://api.anthropic.com/v1/messages'
 export const SLOT_QUOTA_PROBE_MODEL = 'claude-haiku-4-5'
 export const SLOT_QUOTA_DEFAULT_INTERVAL_MS = 5 * 60_000
 const SLOT_QUOTA_MIN_INTERVAL_MS = 60_000
+/** The hub treats a reading as stale 10 min after it was received, so the cadence must stay well inside that. */
+const SLOT_QUOTA_MAX_INTERVAL_MS = 8 * 60_000
 
 export interface SlotQuotaReport {
   account_slot: string
-  /** 0..100 */
-  five_h_pct: number
+  /** 0..100, null = no open 5h window reported (unknown) */
+  five_h_pct: number | null
   /** 0..100 */
   seven_d_pct: number
   resets_5h: string | null
@@ -29,11 +31,11 @@ export interface SlotQuotaReport {
 
 export type SlotQuotaResult = { ok: true; report: SlotQuotaReport } | { ok: false; reason: string }
 
-/** Poll cadence from REMO_SLOT_QUOTA_INTERVAL_MS (default 5 min, never below 1 min). */
+/** Poll cadence from REMO_SLOT_QUOTA_INTERVAL_MS (default 5 min, clamped to 1..8 min). */
 export function slotQuotaIntervalMs(env: NodeJS.ProcessEnv = process.env): number {
   const n = Number(env.REMO_SLOT_QUOTA_INTERVAL_MS)
   if (!Number.isFinite(n) || n <= 0) return SLOT_QUOTA_DEFAULT_INTERVAL_MS
-  return Math.max(SLOT_QUOTA_MIN_INTERVAL_MS, Math.floor(n))
+  return Math.min(SLOT_QUOTA_MAX_INTERVAL_MS, Math.max(SLOT_QUOTA_MIN_INTERVAL_MS, Math.floor(n)))
 }
 
 /** True only for a slot supervisor that also holds its account token. */
@@ -56,13 +58,19 @@ function resetIso(raw: string | null): string | null {
   return Number.isNaN(d.getTime()) ? null : d.toISOString()
 }
 
-/** Both utilization headers are required and must be 0..1; a missing or malformed reset is null. */
+/**
+ * The 7d utilization is required and must be 0..1. The 5h headers are ABSENT when the account has no open 5h
+ * window (observed live): that is reported as null (unknown, never 0), which the hub caps at one run. A 5h value
+ * that is present but malformed is no reading at all. A missing or malformed reset is null.
+ */
 export function parseUnifiedHeaders(
   headers: Headers,
-): { five_h_pct: number; seven_d_pct: number; resets_5h: string | null; resets_7d: string | null } | null {
-  const five_h_pct = pct(headers.get('anthropic-ratelimit-unified-5h-utilization'))
+): { five_h_pct: number | null; seven_d_pct: number; resets_5h: string | null; resets_7d: string | null } | null {
+  const raw5h = headers.get('anthropic-ratelimit-unified-5h-utilization')
+  const five_h_pct = pct(raw5h)
   const seven_d_pct = pct(headers.get('anthropic-ratelimit-unified-7d-utilization'))
-  if (five_h_pct === null || seven_d_pct === null) return null
+  if (seven_d_pct === null) return null
+  if (five_h_pct === null && raw5h !== null) return null
   return {
     five_h_pct,
     seven_d_pct,
@@ -100,7 +108,9 @@ export async function pollSlotQuota(opts?: {
   } catch (err: any) {
     return { ok: false, reason: `network_error: ${err?.name ?? 'error'}` }
   }
-  if (!res.ok) return { ok: false, reason: `http_${res.status}` }
+  void res.body?.cancel().catch(() => {})
+  // A rate-limited (429) answer still carries the windows, and that is exactly when the reading matters.
+  if (!res.ok && res.status !== 429) return { ok: false, reason: `http_${res.status}` }
   const windows = parseUnifiedHeaders(res.headers)
   if (!windows) return { ok: false, reason: 'usage_headers_unavailable' }
   return { ok: true, report: { account_slot: slot, ...windows, fetched_at: (opts?.now?.() ?? new Date()).toISOString() } }

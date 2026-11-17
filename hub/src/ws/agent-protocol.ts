@@ -183,7 +183,8 @@ const SlotQuotaInstant = z.string().datetime({ offset: true })
 export const SupervisorSlotQuotaReport = z.object({
   type: z.literal('slot_quota_report'),
   account_slot: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
-  five_h_pct: z.number().finite().min(0).max(100),
+  // null = the account reported no open 5h window (unknown, never 0): the eligibility rules cap it at one run.
+  five_h_pct: z.number().finite().min(0).max(100).nullable(),
   seven_d_pct: z.number().finite().min(0).max(100),
   resets_5h: SlotQuotaInstant.nullable(),
   resets_7d: SlotQuotaInstant.nullable(),

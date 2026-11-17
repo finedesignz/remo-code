@@ -35,7 +35,13 @@ describe('parseUnifiedHeaders', () => {
     expect(r?.seven_d_pct).toBe(100)
   })
 
-  test('a missing, non-numeric, empty or out-of-range utilization is no reading', () => {
+  test('absent 5h headers (no open 5h window, seen live) give a null 5h, not 0 and not a failure', () => {
+    expect(parseUnifiedHeaders(H({ 'anthropic-ratelimit-unified-7d-utilization': '0.4', 'anthropic-ratelimit-unified-7d-reset': '1795014000' }))).toEqual({
+      five_h_pct: null, seven_d_pct: 40, resets_5h: null, resets_7d: new Date(1795014000 * 1000).toISOString(),
+    })
+  })
+
+  test('a missing 7d, or a non-numeric, empty or out-of-range utilization, is no reading', () => {
     const { ['anthropic-ratelimit-unified-7d-utilization']: _drop, ...missing } = FULL
     expect(parseUnifiedHeaders(H(missing))).toBeNull()
     for (const bad of ['abc', '', '1.01', '-0.1', 'NaN']) {
@@ -71,7 +77,9 @@ describe('gating', () => {
 
   test('interval: default 5 min, floor 1 min, garbage falls back', () => {
     expect(slotQuotaIntervalMs({})).toBe(300_000)
-    expect(slotQuotaIntervalMs({ REMO_SLOT_QUOTA_INTERVAL_MS: '600000' })).toBe(600_000)
+    expect(slotQuotaIntervalMs({ REMO_SLOT_QUOTA_INTERVAL_MS: '120000' })).toBe(120_000)
+    // Ceiling: the hub's 10 min staleness TTL must never be reachable by configuration.
+    expect(slotQuotaIntervalMs({ REMO_SLOT_QUOTA_INTERVAL_MS: '600000' })).toBe(480_000)
     expect(slotQuotaIntervalMs({ REMO_SLOT_QUOTA_INTERVAL_MS: '5' })).toBe(60_000)
     expect(slotQuotaIntervalMs({ REMO_SLOT_QUOTA_INTERVAL_MS: 'x' })).toBe(300_000)
   })
@@ -101,6 +109,12 @@ describe('pollSlotQuota', () => {
     expect(JSON.parse(seen!.init.body as string).max_tokens).toBe(1)
     expect(String(seen!.init.body)).not.toContain(SENTINEL)
     expect(JSON.stringify(r)).not.toContain(SENTINEL)
+  })
+
+  test('a 429 that carries the windows is still a reading', async () => {
+    const fetchImpl = (async () => new Response('{}', { status: 429, headers: { ...FULL, 'anthropic-ratelimit-unified-5h-utilization': '1' } })) as unknown as typeof fetch
+    const r = await pollSlotQuota({ env: SLOT_ENV, fetchImpl })
+    expect(r.ok && r.report.five_h_pct).toBe(100)
   })
 
   test('non-2xx, missing headers and a thrown fetch are reason codes that never carry the token', async () => {

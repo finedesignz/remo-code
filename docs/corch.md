@@ -197,7 +197,11 @@ that holds one Claude account, `REMO_ACCOUNT_SLOT` set) polls its own account an
   long-lived slot token cannot use `/api/oauth/usage` (403, it lacks `user:profile`), which is why the headers are
   used. The token is only ever the Authorization header: it is never logged, returned or framed, and the response
   body is never read. A desktop supervisor (no slot) never runs this poll.
-- **Wire**: one `/ws/agent` frame `slot_quota_report` with `account_slot`, `five_h_pct`, `seven_d_pct` (0..100),
+  The 5h headers are absent while the account has no open 5h window (seen live 2026-11-17): that is sent as
+  `five_h_pct: null` (unknown, never 0), which rule 10 below caps at one live run. A 429 that still carries the
+  windows is a valid reading. The interval is clamped to 1..8 min so the hub's 10 min staleness TTL cannot be
+  reached by configuration.
+- **Wire**: one `/ws/agent` frame `slot_quota_report` with `account_slot`, `five_h_pct` (0..100 or null), `seven_d_pct` (0..100),
   `resets_5h`, `resets_7d` (ISO or null) and `fetched_at`.
 - **Hub** (`hub/src/corch/slot-quota.ts`): accepted only when the reporting connection registered that exact
   `account_slot` in its hello, so a supervisor can write only its own account's row; a `fetched_at` more than 120s

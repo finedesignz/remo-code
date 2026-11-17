@@ -33,6 +33,8 @@ describe('slot_quota_report schema', () => {
   test('a well-formed frame parses', () => {
     expect(parse().success).toBe(true)
     expect(parse({ resets_5h: null, resets_7d: null }).success).toBe(true)
+    expect(parse({ five_h_pct: null, resets_5h: null }).success).toBe(true)
+    expect(parse({ seven_d_pct: null }).success).toBe(false)
   })
 
   test('out-of-range percentages, a bad slot and a non-ISO instant are rejected', () => {
