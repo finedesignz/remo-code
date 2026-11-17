@@ -14,6 +14,7 @@ import { getConfigPath, saveConfig, type SupervisorConfig } from './config'
 import { log as obs } from './observability/logger'
 import { VERSION } from './version'
 import { pollUsage, USAGE_POLL_INTERVAL_MS, type UsagePayload } from './usage/oauth-poll'
+import { pollSlotQuota, slotQuotaEnabled, slotQuotaIntervalMs, type SlotQuotaReport } from './usage/slot-quota-poll'
 import { writeForceUpdateMarker } from './runners/force-update-marker'
 import { runCloudSend } from './commands/cloud-send'
 
@@ -64,6 +65,7 @@ type OutboundMsg =
   // The OAuth token is read locally in usage/oauth-poll.ts and NEVER serialized
   // here; only the four utilization windows + reset times cross the wire.
   | { type: 'usage_report'; usage: UsagePayload }
+  | ({ type: 'slot_quota_report' } & SlotQuotaReport)
   // Phase 08 §6 — create-local-repo-and-push progress + failure.
   | { type: 'repo_create_progress'; job_id: string; stage: 'init' | 'commit' | 'remote_add' | 'pushing_locally' | 'pushed' | 'reindexing' | 'done'; percent?: number; message?: string }
   | { type: 'repo_create_failed'; job_id: string; stage: string; error: string }
@@ -96,6 +98,10 @@ export class SupervisorClient {
   /** P1 — interval handle for the Anthropic OAuth usage poll; null when not
    *  auth'd. Fires once on auth_ok + every 5 min. */
   private usagePollTimer: ReturnType<typeof setInterval> | null = null
+  private slotQuotaTimer: ReturnType<typeof setInterval> | null = null
+  private slotQuotaInFlight = false
+  /** Replaceable in tests so no test reaches the network. */
+  private slotQuotaPoll: typeof pollSlotQuota = pollSlotQuota
 
   /** fix/supervisor-periodic-repo-rescan — interval handle for the periodic
    *  repo inventory re-emit; null when not auth'd. */
@@ -209,6 +215,7 @@ export class SupervisorClient {
       this.authenticated = false
       this.stopSessionInventoryPush()
       this.stopUsagePoll()
+      this.stopSlotQuotaPoll()
       this.stopRepoInventoryPush()
       const code = (ev as any)?.code as number | undefined
       const reason = (ev as any)?.reason as string | undefined
@@ -331,6 +338,8 @@ export class SupervisorClient {
       // P1 — start the Anthropic OAuth usage poll. Fires once immediately +
       // every 5 min; cancels on disconnect. Token stays local.
       this.startUsagePoll()
+      // CORCH-14 - a slot supervisor reports its own account's quota windows. No-op on a desktop supervisor.
+      this.startSlotQuotaPoll()
       return
     }
     if (msg.type === 'auth_error') {
@@ -536,6 +545,41 @@ export class SupervisorClient {
     if (!this.usagePollTimer) return
     clearInterval(this.usagePollTimer)
     this.usagePollTimer = null
+  }
+
+  /**
+   * CORCH-14 - slot-only account quota poll (usage/slot-quota-poll.ts). Runs only when this supervisor is a slot
+   * holding its account token. Fires once on connect, then on the configured interval; stopped on disconnect.
+   */
+  private startSlotQuotaPoll() {
+    if (this.slotQuotaTimer || !slotQuotaEnabled()) return
+    void this.pollAndSendSlotQuota()
+    this.slotQuotaTimer = setInterval(() => {
+      void this.pollAndSendSlotQuota()
+    }, slotQuotaIntervalMs())
+  }
+
+  private stopSlotQuotaPoll() {
+    if (!this.slotQuotaTimer) return
+    clearInterval(this.slotQuotaTimer)
+    this.slotQuotaTimer = null
+  }
+
+  /** Only the parsed windows go on the wire; the token never leaves slot-quota-poll.ts. */
+  private async pollAndSendSlotQuota() {
+    if (this.slotQuotaInFlight || !this.authenticated) return
+    this.slotQuotaInFlight = true
+    try {
+      const result = await this.slotQuotaPoll()
+      if (!result.ok) {
+        this.log('warn', `slot quota poll skipped: ${result.reason}`)
+        return
+      }
+      if (!this.authenticated || this.ws?.readyState !== WebSocket.OPEN) return
+      this.send({ type: 'slot_quota_report', ...result.report })
+    } finally {
+      this.slotQuotaInFlight = false
+    }
   }
 
   /**

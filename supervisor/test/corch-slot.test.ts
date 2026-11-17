@@ -62,6 +62,8 @@ describe('account slot (R4.1)', () => {
     expect(accountSlot({ REMO_ACCOUNT_SLOT: 'acct_1-A' })).toBe('acct_1-A')
   })
 
+  const QUOTA_REPORT = { account_slot: 'acct_main', five_h_pct: 25, seven_d_pct: 50, resets_5h: null, resets_7d: null, fetched_at: '2026-11-17T12:00:00.000Z' }
+
   async function helloFrames(): Promise<any[]> {
     const frames: any[] = []
     // Isolate from the real ~/.claude (the command scan would walk every installed skill) and the real config dir.
@@ -72,6 +74,8 @@ describe('account slot (R4.1)', () => {
     process.env.REMO_CODE_CONFIG_DIR = home
     const c = new SupervisorClient(defaultConfig())
     ;(c as any).ws = { readyState: WebSocket.OPEN, send: (s: string) => frames.push(JSON.parse(s)), close() {} }
+    // CORCH-14: the slot quota poll starts on auth_ok; stub it so the test never reaches the network.
+    ;(c as any).slotQuotaPoll = async () => ({ ok: true, report: QUOTA_REPORT })
     await (c as any).handleMessage({ type: 'auth_ok' })
     await new Promise((r) => setTimeout(r, 50))
     for (const [k, v] of [['HOME', prev.HOME], ['USERPROFILE', prev.USERPROFILE], ['REMO_CODE_CONFIG_DIR', prev.CFG]] as const) {
@@ -84,9 +88,12 @@ describe('account slot (R4.1)', () => {
 
   test('hello carries account_slot ONLY with REMO_ACCOUNT_SLOT set; no frame carries a token value', async () => {
     clearSlotEnv()
-    const off = (await helloFrames()).find((f) => f.type === 'supervisor.hello')
+    const offFrames = await helloFrames()
+    const off = offFrames.find((f) => f.type === 'supervisor.hello')
     expect(off).toBeDefined()
     expect('account_slot' in off).toBe(false)
+    // CORCH-14: a non-slot supervisor never polls or reports account quota.
+    expect(offFrames.some((f) => f.type === 'slot_quota_report')).toBe(false)
 
     process.env.REMO_ACCOUNT_SLOT = 'acct_main'
     process.env.CLAUDE_CODE_OAUTH_TOKEN = SENTINEL_TOKEN
@@ -95,6 +102,8 @@ describe('account slot (R4.1)', () => {
     const frames = await helloFrames()
     const on = frames.find((f) => f.type === 'supervisor.hello')
     expect(on.account_slot).toBe('acct_main')
+    // CORCH-14: the slot reports its own account's quota windows once on connect.
+    expect(frames.filter((f) => f.type === 'slot_quota_report')).toEqual([{ type: 'slot_quota_report', ...QUOTA_REPORT }])
     // R4.3 frame test: nothing the supervisor emitted (hello, commands_sync, logs, ...) carries an env value.
     const wire = JSON.stringify(frames)
     for (const secret of [SENTINEL_TOKEN, SENTINEL_API, 'ghp_SENTINEL_GIT']) expect(wire.includes(secret)).toBe(false)

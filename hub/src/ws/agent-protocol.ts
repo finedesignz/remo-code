@@ -177,6 +177,20 @@ export const AgentUsageReport = z.object({
 })
 export type AgentUsageReportT = z.infer<typeof AgentUsageReport>
 
+// CORCH-14: a slot supervisor's own account quota windows (parsed percentages and reset instants only; never a
+// credential). Accepted only from the connection registered with the same account_slot (corch/slot-quota.ts).
+const SlotQuotaInstant = z.string().datetime({ offset: true })
+export const SupervisorSlotQuotaReport = z.object({
+  type: z.literal('slot_quota_report'),
+  account_slot: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+  five_h_pct: z.number().finite().min(0).max(100),
+  seven_d_pct: z.number().finite().min(0).max(100),
+  resets_5h: SlotQuotaInstant.nullable(),
+  resets_7d: SlotQuotaInstant.nullable(),
+  fetched_at: SlotQuotaInstant,
+})
+export type SupervisorSlotQuotaReportT = z.infer<typeof SupervisorSlotQuotaReport>
+
 // P2 usage ledger — one event per assistant turn from the supervisor bridge.
 // Carries the four token buckets, the model, and the authoritative SDK cost
 // (`cost_source='sdk'`) or a flag for the hub to estimate (`'estimated'`).
@@ -218,6 +232,7 @@ export const AgentInbound = z.discriminatedUnion('type', [
   AgentUserQuestion,
   AgentLog,
   AgentUsageReport,
+  SupervisorSlotQuotaReport,
   AgentUsageEvent,
   z.object({ type: z.literal('pong') }),
   SupervisorHello,

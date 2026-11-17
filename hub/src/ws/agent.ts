@@ -1025,6 +1025,24 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
 
   await heartbeatSupervisor(supervisorId)
 
+  // CORCH-14: a slot supervisor's own account quota reading. Only the connection registered with that slot may
+  // write it (corch/slot-quota.ts).
+  if (msg.type === 'slot_quota_report') {
+    try {
+      const { handleSlotQuotaReport } = await import('../corch/slot-quota.ts')
+      const { quotaStore } = await import('../corch/quota-store.ts')
+      const { defaultQuotaEvaluate } = await import('../api/quota.ts')
+      const outcome = await handleSlotQuotaReport(
+        { upsertSnapshot: quotaStore.upsertSnapshot, evaluate: defaultQuotaEvaluate, now: () => new Date() },
+        { userId, registeredSlot: getSupervisor(supervisorId)?.accountSlot, msg },
+      )
+      if (outcome !== 'stored') console.warn(`[corch] slot_quota_report rejected: ${outcome} supervisor=${supervisorId}`)
+    } catch (err: any) {
+      console.error(`[corch] slot_quota_report handler failed: ${err?.name ?? 'error'}`)
+    }
+    return
+  }
+
   if (msg.type === 'supervisor.state') {
     // Plan 04-003 belt-and-suspenders: when the supervisor announces a new
     // running session, the corresponding session_runs row should already exist
