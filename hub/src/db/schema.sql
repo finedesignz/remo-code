@@ -225,6 +225,9 @@ ALTER TABLE scheduled_tasks ADD CONSTRAINT scheduled_tasks_task_type_check
     -- (/api/ext/work) is enqueued as a one-time 'work' task. Its sender calls the
     -- existing dispatchWork; work_runs remains the typed result/audit record.
     'work',
+    -- PTYCAP-08: the per-user task-quality auditor. One row per user (see
+    -- idx_scheduled_tasks_task_qc_unique); seeded at boot, never user-created.
+    'task_qc',
     -- Internal: synthesized by Coolify webhook
     'triage'
   ));
@@ -293,6 +296,12 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_next_fire
 CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_tasks_orchestrator_unique
   ON scheduled_tasks(session_id)
   WHERE task_type = 'orchestrator';
+
+-- PTYCAP-08: at most ONE task_qc (task-quality auditor) row per user. Partial
+-- unique index, same style as the orchestrator one above.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_tasks_task_qc_unique
+  ON scheduled_tasks(user_id)
+  WHERE task_type = 'task_qc';
 
 -- D10: manual lifecycle stage with per-stage frequency presets. Default
 -- 'development'. Constrained to the three stages. Named CHECK added guardedly
@@ -1711,6 +1720,44 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_token_cap_alarms_user_date
 -- Dedupe key shared by the rate union (routine_run_log inject rows vs ledger
 -- reserve rows): nullable, written by the inject path, never backfilled.
 ALTER TABLE routine_run_log ADD COLUMN IF NOT EXISTS inject_token TEXT;
+
+-- PTYCAP-08: audit trail for the task-quality auditor. No foreign key on task_id
+-- because audited tasks can be deleted. evidence_sig + day make a re-run of an
+-- unchanged condition idempotent (unique index below; writers use ON CONFLICT
+-- DO NOTHING).
+CREATE TABLE IF NOT EXISTS task_qc_findings (
+  id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  task_id      TEXT NOT NULL,
+  detector     TEXT NOT NULL
+    CHECK (detector IN ('FAILING','SKIP_FOREVER','NEVER_FIRED','MISCONFIGURED','DEAD_SESSION','OPTIMIZE','ENGINE')),
+  severity     TEXT NOT NULL DEFAULT 'info'
+    CHECK (severity IN ('info','warn','high')),
+  disposition  TEXT NOT NULL
+    CHECK (disposition IN ('auto_fixed','proposed','skipped_in_flight')),
+  fix_kind     TEXT,
+  before_json  JSONB,
+  after_json   JSONB,
+  rollback_sql TEXT,
+  evidence     JSONB NOT NULL DEFAULT '{}'::jsonb,
+  evidence_sig TEXT NOT NULL,
+  day          DATE NOT NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_task_qc_findings_user_created
+  ON task_qc_findings(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_qc_findings_task
+  ON task_qc_findings(user_id, task_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_qc_findings_dedupe
+  ON task_qc_findings(user_id, task_id, detector, evidence_sig, day);
+
+-- PTYCAP-08 QC round 2: the round-1 BEFORE INSERT trigger on scheduled_task_runs was
+-- removed before this phase merged, so the merged schema never creates it. The safe-fix
+-- writer takes its own row locks (the task row and the target session row, FOR UPDATE).
+
+-- PTYCAP-08 QC round 1: a digest marks the proposal rows it contained as delivered, so a
+-- failed send (or a same-day re-run) re-reports them instead of losing them. Additive.
+ALTER TABLE task_qc_findings ADD COLUMN IF NOT EXISTS digest_sent_at TIMESTAMPTZ;
 
 -- PTYCAP-07 self-heal event ledger. One row per heal claim; the atomic claim
 -- (tx advisory lock + real time-window check) lives in heal-events-dal.ts, the
