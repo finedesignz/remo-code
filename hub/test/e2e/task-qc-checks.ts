@@ -71,13 +71,15 @@ interface TaskSeed {
 
 /** Distinct prompt per task (prompt = name) so the OPTIMIZE duplicate arm never fires on the seed. */
 const mkTask = async (sql: Sql, t: TaskSeed): Promise<string> => {
+  // Pass the object. JSON.stringify here makes bun's ::jsonb bind a jsonb STRING,
+  // so payload->>'application_uuid' and the resolver both miss the sibling uuid.
   const rows = await sql<{ id: string }[]>`
     INSERT INTO scheduled_tasks (
       user_id, session_id, name, cron_expression, cron_expr, prompt, enabled, task_type,
       target_kind, target_id, payload, timezone, schedule_kind, created_at, next_fire_at
     ) VALUES (
       ${t.userId}, ${t.sessionId}, ${t.name}, '0 9 * * *', '0 9 * * *', ${t.name}, ${t.enabled ?? true}, ${t.type},
-      'session', ${t.targetId ?? null}, ${JSON.stringify(t.payload ?? {})}::jsonb, ${t.timezone ?? 'UTC'}, 'cron',
+      'session', ${t.targetId ?? null}, ${t.payload ?? {}}::jsonb, ${t.timezone ?? 'UTC'}, 'cron',
       now() - make_interval(days => ${t.ageDays ?? 0}::int),
       ${t.armed === false ? sql`NULL::timestamptz` : sql`now() + interval '1 hour'`}
     ) RETURNING id`
