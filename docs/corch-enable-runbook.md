@@ -17,14 +17,24 @@ Rules for every step:
 Gate classes used below: **OWNER** = an owner action, **12b-4** = credential that exists nowhere until created
 (browser-only or account creation), **CUTOVER** = live cutover for real users (rule 12).
 
-## Hard prerequisite found in CORCH-12: hub to memlog transport (BLOCKED-ON-MCP)
+## Hard prerequisite: hub to memlog transport (CORCH-15)
 
 The per-item memlog claim (CORCH-R3.8) uses the `MemlogClient` seam in `hub/src/corch/memlog.ts`, which defaults to
-refusing `memlog_unavailable`. memlog is a gateway-only MCP Factory server and the hub has no MCP client, so no real
-transport exists (7e request already filed to `mcp-servers`, see `docs/corch.md` "Memlog claim"). Until a verified
-transport is injected, flipping item 9 would leave every item waiting `memlog_unavailable`. **The live proof (below)
-cannot pass before this is resolved.** This is a code prerequisite, not an owner action, and it is not part of items
-1-10.
+refusing `memlog_unavailable`. Since CORCH-15 the hub has a real transport over memlog's REST claims API
+(`hub/src/corch/memlog-rest.ts`, see `docs/corch.md` "Memlog claim"). It is used only when configured; until then
+flipping item 9 leaves every item waiting `memlog_unavailable`, and **the live proof (below) cannot pass.** Do this
+before item 9:
+
+- Mint a dedicated `mcp_` user token for the hub in the MCP gateway (a NEW token; never reuse or rotate another
+  agent's). Store it in the owner secret store, never printed.
+- Add that token's username to memlog's `MEMLOG_AGENT_PRINCIPALS` env map with its `cli` and `host`
+  (for example `{"cli": "claude", "host": "remo-hub"}`) and redeploy memlog.
+- Hub env: `REMO_CORCH_MEMLOG_URL` (memlog origin), `REMO_CORCH_MEMLOG_TOKEN`, and `REMO_CORCH_MEMLOG_CLI` when the
+  principal's cli is not `claude`. Redeploy the hub.
+- Verify: with the token, `POST /v1/claims` for a throwaway session on the throwaway repo answers 200 and the claim
+  appears in `GET /v1/claims?repo=<repo>`; then `POST /v1/claims/release` removes it. A 403 means the principal map
+  or the cli does not match.
+- Rollback: unset `REMO_CORCH_MEMLOG_TOKEN` on the hub (items wait again; nothing dispatches).
 
 ## Order of operations
 

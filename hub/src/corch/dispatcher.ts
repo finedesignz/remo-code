@@ -943,10 +943,14 @@ export async function realCorchDeps(): Promise<CorchDeps> {
     ceilingPct: corchQuotaCeilingPct,
     markDeath: (a) => quotaStore.markDeath(a),
   })
-  // CORCH-09: the real Workspace + PrLookup (only ever built when the flag is ON, via getCorch). The memlog client is
-  // the refusing default until a verified hub->memlog transport exists (R3.8 BLOCKED-ON-MCP): items wait.
+  // CORCH-09: the real Workspace + PrLookup (only ever built when the flag is ON, via getCorch). CORCH-15: the memlog
+  // client is the REST transport when REMO_CORCH_MEMLOG_URL + _TOKEN are set, else the refusing default (items wait).
   const { createWorkspace, createPrLookup, realWorkspaceDeps } = await import('./workspace.ts')
-  const wsDeps = await realWorkspaceDeps(quota)
+  const { memlogRestConfig } = await import('./flag.ts')
+  const memlogCfg = memlogRestConfig()
+  const wsDeps = memlogCfg
+    ? await realWorkspaceDeps(quota, (await import('./memlog-rest.ts')).createRestMemlog(memlogCfg))
+    : await realWorkspaceDeps(quota)
   return {
     store: corchStore,
     workspace: createWorkspace(wsDeps),
