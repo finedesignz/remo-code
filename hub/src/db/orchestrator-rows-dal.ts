@@ -176,6 +176,8 @@ export interface OrchestratorTask {
   lifecycle_stage_explicit: boolean;
   /** Milestone TMAC: dev|maintenance|security|brainstorming (macro prompt key). */
   macro_task_type: MacroTaskType;
+  /** PTYCAP-05 (QC r1): this task has been armed as a proof task; it must never run the dev macro outside a live proof. */
+  proof_owned?: boolean;
   enabled: boolean;
   created_at: string;
   updated_at: string;
@@ -194,7 +196,7 @@ export async function getOrchestratorTaskForSession(
   sessionId: string,
 ): Promise<OrchestratorTask | null> {
   const rows = await sql<OrchestratorTask[]>`
-    SELECT id, user_id, session_id, name, lifecycle_stage, lifecycle_stage_explicit, macro_task_type, enabled, created_at, updated_at FROM scheduled_tasks
+    SELECT id, user_id, session_id, name, lifecycle_stage, lifecycle_stage_explicit, macro_task_type, enabled, proof_owned, created_at, updated_at FROM scheduled_tasks
     WHERE user_id = ${userId} AND session_id = ${sessionId}
       AND task_type = 'orchestrator'
     LIMIT 1

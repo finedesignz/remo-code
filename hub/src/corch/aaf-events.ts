@@ -153,7 +153,10 @@ export function createAafEventRoutes(deps: AafEventDeps = REAL_DEPS): Hono {
         const claim = await deps.store.claimAafNotify(parsed.event_id)
         if (claim.kind === 'busy') {
           // Another delivery holds a fresh claim and has not finished: "not delivered yet", never a success.
-          notifyFailed = true
+          // The delivery that committed the transition still answers applied. A duplicate often wins this
+          // claim under concurrency; answering 503 for the transitioner makes every caller look like
+          // nobody applied the event.
+          notifyFailed = result.kind !== 'transitioned'
         } else if (claim.kind === 'claimed') {
           let delivered = false
           try {

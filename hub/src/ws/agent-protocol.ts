@@ -119,6 +119,8 @@ export const AgentAssistantMessage = z.object({
   type: z.literal('assistant_message'),
   session_id: z.string(),
   content: z.string().min(1).max(65536),
+  // PTYCAP-05: per-turn id shared with this turn's usage_event (proof budget attribution).
+  turn_id: z.string().min(1).max(128).optional(),
 })
 
 export const AgentPermissionRequest = z.object({
@@ -190,6 +192,8 @@ export const AgentUsageEvent = z.object({
   cost_usd: z.number().nonnegative().default(0),
   cost_source: z.enum(['sdk', 'estimated']).default('sdk'),
   request_id: z.string().optional(),
+  // PTYCAP-05: same id as this turn's assistant_message.turn_id.
+  turn_id: z.string().min(1).max(128).optional(),
   ts: z.string().optional(),
   // PTYCAP Phase 1 — which runner produced this event. Omitted ⇒ 'stream-json'
   // (every pre-existing sender). 'pty-interactive' is the new PtyUsageEmitter

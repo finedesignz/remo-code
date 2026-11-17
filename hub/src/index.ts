@@ -44,6 +44,7 @@ import { wellKnown } from './api/well-known'
 import { clientConfig } from './api/client-config'
 import { orchestrator as orchestratorApi } from './api/orchestrator'
 import { automationApi } from './api/automation'
+import { orchestratorProofApi } from './api/orchestrator-proof'
 import { orchestratorTasks as orchestratorTasksApi } from './api/orchestrator-tasks'
 import { requireActiveLicense } from './license-gate'
 import { openapi as openapiApp } from './api/_openapi'
@@ -487,6 +488,8 @@ app.route('/api/error-setup', errorSetupApi)
 // Phase 08: JWT-authed revanote sub-routes (mappings + annotations).
 // The public webhook route lives at /api/revanote/webhook/* (mounted above).
 app.route('/api/orchestrator', orchestratorApi)
+// PTYCAP-05-04: read-only proof status (GET only; covered by the /api/orchestrator/* step-up + auth catch-all).
+app.route('/api/orchestrator/proof', orchestratorProofApi)
 app.route('/api/automation', automationApi)
 // CORCH-01: cookie enrollment + enqueue routes (flag OFF = store/list only). API keys get 403 from authMiddleware.
 app.route('/api/corch', corchRoutes)

@@ -508,6 +508,58 @@ openapi.openapi(dismissLocalRoute, async (c) => {
     },
   });
 }
+// ── Throwaway-repo proof status (PTYCAP-05-04) ──────────────────────────────
+// Spec-only registration. The plain-Hono router in `./orchestrator-proof.ts` serves traffic.
+// Read-only and tenant-scoped; arm / disarm / enable are an operator script, never HTTP.
+{
+  const Err = z.object({ error: z.string() });
+  const json = (schema: any) => ({ content: { "application/json": { schema } } });
+  const register = (r: any) => openapi.openAPIRegistry.registerPath(r);
+  const ProofRunView = z.object({
+    id: z.string(),
+    status: z.enum(["armed", "running", "succeeded", "nothing", "terminated", "disarmed"]),
+    outcome: z.string().nullable(),
+    outcome_detail: z.string().nullable(),
+    repo_ident: z.string(),
+    branch: z.string(),
+    base_sha: z.string(),
+    default_branch: z.string(),
+    pr_url: z.string().nullable(),
+    pr_number: z.number().int().nullable(),
+    last_ci_state: z.string().nullable(),
+    last_inject_outcome: z.string().nullable(),
+    protection_shape: z.string(),
+    ruleset_digest: z.string().openapi({ description: "First 12 characters of the frozen ruleset digest" }),
+    budgets: z.object({
+      max_injects: z.number().int(),
+      max_tokens: z.number(),
+      max_wall_ms: z.number(),
+    }),
+    usage: z.object({
+      injects: z.number().int().nullable().openapi({ description: "Live injects since start; null when the count could not be read" }),
+      tokens_hwm: z.number(),
+    }),
+    bypass_verification: z.enum(["verified", "unverified"]),
+    armed_at: z.string(),
+    started_at: z.string().nullable(),
+    terminal_at: z.string().nullable(),
+  });
+  register({
+    method: "get",
+    path: "/api/orchestrator/proof",
+    summary: "Read the caller's throwaway-repo proof run (latest plus up to 5 earlier runs)",
+    tags: ["orchestrator"],
+    security: [{ bearerAuth: [] }],
+    responses: {
+      200: {
+        description: "Latest proof run (null when none) and earlier runs, newest first. Read-only; no credentials.",
+        ...json(z.object({ run: ProofRunView.nullable(), history: z.array(ProofRunView).max(5) })),
+      },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      500: { description: "Internal error (no detail leaked)", ...json(Err) },
+    },
+  });
+}
 // ── Self-heal launch (PTYCAP-04-07) ─────────────────────────────────────────
 // Spec-only registration; the plain-Hono router in `./sessions.ts` serves traffic. The route
 // is a MACHINE surface: the kill switch is checked first and one lifetime reservation
