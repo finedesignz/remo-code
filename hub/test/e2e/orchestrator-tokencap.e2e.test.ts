@@ -179,6 +179,13 @@ maybe('fix/stop-the-bleed e2e — the daily TOKEN cap fires on the real inject p
       inject: injectMod,
       pipeline: pipelineMod,
     })
+
+    // PTYCAP-08: the real-Postgres proof of the task-quality auditor (report-only snapshot,
+    // the three allowlisted fixes + executed rollback SQL, writer row locks, in-flight refusal,
+    // atomic run claim) also runs HERE, in the body of this existing test. Adds zero tests and
+    // zero skips; executes only in Woodpecker (postgres:16). See ./task-qc-checks.ts.
+    const { runTaskQcEngineChecks } = await import('./task-qc-checks.ts')
+    await runTaskQcEngineChecks({ sql: h.sql })
   }, 120_000)
 
   test('the pre-#342 accounting (input+output only) would NOT have fired — regression pin', async () => {

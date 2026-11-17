@@ -43,6 +43,14 @@ describe('scheduler/workflows — dev workflow fan-out smoke', () => {
       },
     }))
 
+    // executeChain refuses a task_qc child (PTYCAP-08) by reading the child row through the
+    // DAL; stub that single read so this stays a DB-free smoke.
+    const realDal = await import('../src/db/scheduled-tasks-dal.ts')
+    mock.module('../src/db/scheduled-tasks-dal.ts', () => ({
+      ...realDal,
+      getTaskById: async (id: string) => ({ id, task_type: 'dev' }),
+    }))
+
     const { executeChain } = await import('../src/scheduler/post-run/chain.ts')
 
     // Edge 1: dev_plan run finished, post-run chain_task → dev_execute task id.

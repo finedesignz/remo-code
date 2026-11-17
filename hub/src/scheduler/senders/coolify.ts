@@ -30,7 +30,7 @@ const MAX_LINES = 200
  * does: session → `repo_key` → `coolify_app_repo` map (user-scoped).
  * Best-effort + non-throwing; returns null when unresolvable.
  */
-async function resolveAppUuid(task: ScheduledTask, userId: string): Promise<string | null> {
+export async function resolveAppUuid(task: ScheduledTask, userId: string): Promise<string | null> {
   const payload = task.payload as any
   const fromPayload: string | undefined = payload?.application_uuid || payload?.app_uuid
   if (fromPayload) return fromPayload
