@@ -76,18 +76,15 @@ describe('PTYCAP-08 task_qc schema', () => {
     expect(line!).toMatch(/ON DELETE SET NULL/)
   })
 
-  test('round 2 (codex new MAJOR 1): no trigger on scheduled_task_runs survives; existing DBs lose the round-1 trigger on boot', () => {
-    // flag-OFF true no-op: nothing in the schema may add work to a run insert
+  test('round 2 (codex new MAJOR 1): no trigger on scheduled_task_runs is created or dropped', () => {
+    // The round-1 session lock never shipped (this phase is unmerged), so the merged
+    // schema must not create it and must not DROP it: heal-schema.test.ts requires the
+    // diff against main to add no DROP/UPDATE and to remove nothing.
     expect(FLAT).not.toMatch(/CREATE (OR REPLACE )?TRIGGER[^;]*scheduled_task_runs/i)
     expect(FLAT).not.toMatch(/CREATE (OR REPLACE )?FUNCTION scheduled_task_runs_session_lock/i)
     expect(FLAT).not.toContain('taskqc-session')
-    // the retired trigger and function are dropped idempotently, trigger first, only if present
-    const drop = FLAT.slice(FLAT.indexOf('trg_scheduled_task_runs_session_lock'))
-    expect(drop).toContain('DROP TRIGGER trg_scheduled_task_runs_session_lock ON scheduled_task_runs')
-    expect(drop).toContain('DROP FUNCTION IF EXISTS scheduled_task_runs_session_lock()')
-    expect(drop.indexOf('DROP TRIGGER')).toBeLessThan(drop.indexOf('DROP FUNCTION'))
-    expect(FLAT).toMatch(/IF EXISTS \(SELECT 1 FROM pg_trigger WHERE tgname = 'trg_scheduled_task_runs_session_lock'/)
-    // the writer no longer spells the retired advisory key
+    expect(FLAT).not.toContain('trg_scheduled_task_runs_session_lock')
+    expect(FLAT).not.toContain('scheduled_task_runs_session_lock')
     const writer = readFileSync(join(import.meta.dir, '..', 'src', 'task-qc', 'safe-fixes.ts'), 'utf8')
     expect(writer).not.toContain('taskqc-session')
     expect(writer).not.toContain('pg_advisory')

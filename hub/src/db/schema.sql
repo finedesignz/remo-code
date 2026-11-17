@@ -225,11 +225,11 @@ ALTER TABLE scheduled_tasks ADD CONSTRAINT scheduled_tasks_task_type_check
     -- (/api/ext/work) is enqueued as a one-time 'work' task. Its sender calls the
     -- existing dispatchWork; work_runs remains the typed result/audit record.
     'work',
-    -- Internal: synthesized by Coolify webhook
-    'triage',
     -- PTYCAP-08: the per-user task-quality auditor. One row per user (see
     -- idx_scheduled_tasks_task_qc_unique); seeded at boot, never user-created.
-    'task_qc'
+    'task_qc',
+    -- Internal: synthesized by Coolify webhook
+    'triage'
   ));
 ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS target_kind TEXT NOT NULL DEFAULT 'session'
   CHECK (target_kind IN ('session','supervisor','all_agents','all_supervisors'));
@@ -1751,20 +1751,9 @@ CREATE INDEX IF NOT EXISTS idx_task_qc_findings_task
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_qc_findings_dedupe
   ON task_qc_findings(user_id, task_id, detector, evidence_sig, day);
 
--- PTYCAP-08 QC round 2: the round-1 BEFORE INSERT trigger on scheduled_task_runs (a
--- per-session advisory lock taken on every session-bound run insert) is REMOVED. It put
--- work on the hot run-insert path even with Task QC off. The safe-fix writer now gets the
--- same atomicity from row locks it takes itself (the task row and the target session row,
--- FOR UPDATE, which the FK key-share of a run insert conflicts with), so run insertion is
--- byte-for-byte the pre-feature statement. The existence check keeps a converged boot from
--- taking any lock on scheduled_task_runs. Idempotent; no data touched.
--- schema-lint: allow idempotent DDL - drops a retired trigger and function only if present; no rows touched
-DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_scheduled_task_runs_session_lock' AND NOT tgisinternal) THEN
-    DROP TRIGGER trg_scheduled_task_runs_session_lock ON scheduled_task_runs;
-  END IF;
-  DROP FUNCTION IF EXISTS scheduled_task_runs_session_lock();
-END $$;
+-- PTYCAP-08 QC round 2: the round-1 BEFORE INSERT trigger on scheduled_task_runs was
+-- removed before this phase merged, so the merged schema never creates it. The safe-fix
+-- writer takes its own row locks (the task row and the target session row, FOR UPDATE).
 
 -- PTYCAP-08 QC round 1: a digest marks the proposal rows it contained as delivered, so a
 -- failed send (or a same-day re-run) re-reports them instead of losing them. Additive.
