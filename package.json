@@ -16,7 +16,7 @@
     "check-baseline": "bun run tools/check-baseline.ts",
     "migration-verify": "bun run tools/migration-verify.ts",
     "schema-lint": "bun run tools/schema-sql-lint.ts",
-    "orchestrator:e2e": "bun test hub/test/e2e/*.e2e.test.ts"
+    "orchestrator:e2e": "bun test --max-concurrency=1 hub/test/e2e/*.e2e.test.ts"
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "^20.10.6",

@@ -717,7 +717,7 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       if (st.flushTimer) { clearTimeout(st.flushTimer); st.flushTimer = null }
       st.buffer = ''
       if (st.flushing) { try { await st.flushing } catch {} }
-      const message = await finalizeMessage(st.id, msg.content)
+      const message = await finalizeMessage(st.id, msg.content, msg.turn_id ?? null)
       streamingBySession.delete(sessionId)
       if (message) {
         finalEventMessageId = (message as any).id
@@ -730,7 +730,7 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     } else {
       // No prior text_delta (e.g. agent reconnect between Claude's response
       // and the result event). Fall back to a one-shot insert.
-      const message = await insertMessage(sessionId, 'assistant', msg.content)
+      const message = await insertMessage(sessionId, 'assistant', msg.content, msg.turn_id ?? null)
       finalEventMessageId = (message as any)?.id
       broadcastToSubscribers(sessionId, {
         type: 'message',
@@ -833,9 +833,19 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
         // PTYCAP Phase 1 — tag the ledger row by which runner produced it.
         // Absent on an older supervisor build ⇒ defaults to 'stream-json'.
         runnerType: msg.runner_type ?? 'stream-json',
+        turnId: msg.turn_id ?? null,
       })
     } catch (err: any) {
       console.error('[agent] usage_event handler failed', err?.message)
+      // PTYCAP-05 (codex #4): an unrecorded turn under-counts every token budget. Record the loss
+      // so a proof run fails closed (budget_attribution_lost) instead of trusting the short sum.
+      try {
+        const { markUsageAttributionLost } = await import('../usage/attribution-loss.ts')
+        markUsageAttributionLost(ws.data.sessionId)
+        markUsageAttributionLost((msg as { session_id?: string }).session_id)
+      } catch {
+        /* the mark is in-process memory; nothing here can fail meaningfully */
+      }
     }
     return
   }
@@ -1014,6 +1024,24 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
   const supervisorId = ws.data.supervisorId
 
   await heartbeatSupervisor(supervisorId)
+
+  // CORCH-14: a slot supervisor's own account quota reading. Only the connection registered with that slot may
+  // write it (corch/slot-quota.ts).
+  if (msg.type === 'slot_quota_report') {
+    try {
+      const { handleSlotQuotaReport } = await import('../corch/slot-quota.ts')
+      const { quotaStore } = await import('../corch/quota-store.ts')
+      const { defaultQuotaEvaluate } = await import('../api/quota.ts')
+      const outcome = await handleSlotQuotaReport(
+        { upsertSnapshot: quotaStore.upsertSnapshot, evaluate: defaultQuotaEvaluate, now: () => new Date() },
+        { userId, registeredSlot: getSupervisor(supervisorId)?.accountSlot, msg },
+      )
+      if (outcome !== 'stored') console.warn(`[corch] slot_quota_report rejected: ${outcome} supervisor=${supervisorId}`)
+    } catch (err: any) {
+      console.error(`[corch] slot_quota_report handler failed: ${err?.name ?? 'error'}`)
+    }
+    return
+  }
 
   if (msg.type === 'supervisor.state') {
     // Plan 04-003 belt-and-suspenders: when the supervisor announces a new

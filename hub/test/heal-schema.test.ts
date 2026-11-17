@@ -55,14 +55,36 @@ describe('heal_events DDL', () => {
 
   test('diff adds no UPDATE/INSERT/DELETE/DROP/TRUNCATE line and removes nothing', () => {
     const base = process.env.HEAL_PLAN_BASE ?? 'origin/main'
-    let diff = ''
+    const repo = resolve(import.meta.dir, '../..')
+    let baseSchema = ''
     try {
-      diff = execFileSync('git', ['diff', base, '--', 'hub/src/db/schema.sql'], {
-        cwd: resolve(import.meta.dir, '../..'),
+      baseSchema = execFileSync('git', ['show', `${base}:hub/src/db/schema.sql`], {
+        cwd: repo,
         encoding: 'utf-8',
       })
     } catch {
       return // base unavailable (shallow clone): lint test above still guards
+    }
+    const healStart = '-- PTYCAP-07 self-heal event ledger'
+    // Once the ledger is on the base, this check guards THAT section (byte-for-byte)
+    // rather than forbidding every later phase from editing other DDL. A pragma'd
+    // DROP INDEX elsewhere (PTYCAP-05's owner-tagged session halt) is schema-lint's job.
+    if (baseSchema.includes('CREATE TABLE IF NOT EXISTS heal_events')) {
+      const section = (sql: string) => {
+        const i = sql.indexOf(healStart)
+        return i < 0 ? '' : sql.slice(i)
+      }
+      expect(section(schema)).toBe(section(baseSchema))
+      return
+    }
+    let diff = ''
+    try {
+      diff = execFileSync('git', ['diff', base, '--', 'hub/src/db/schema.sql'], {
+        cwd: repo,
+        encoding: 'utf-8',
+      })
+    } catch {
+      return
     }
     const added = diff.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++'))
     const removed = diff.split('\n').filter((l) => l.startsWith('-') && !l.startsWith('---'))

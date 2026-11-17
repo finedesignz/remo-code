@@ -119,6 +119,8 @@ export const AgentAssistantMessage = z.object({
   type: z.literal('assistant_message'),
   session_id: z.string(),
   content: z.string().min(1).max(65536),
+  // PTYCAP-05: per-turn id shared with this turn's usage_event (proof budget attribution).
+  turn_id: z.string().min(1).max(128).optional(),
 })
 
 export const AgentPermissionRequest = z.object({
@@ -175,6 +177,21 @@ export const AgentUsageReport = z.object({
 })
 export type AgentUsageReportT = z.infer<typeof AgentUsageReport>
 
+// CORCH-14: a slot supervisor's own account quota windows (parsed percentages and reset instants only; never a
+// credential). Accepted only from the connection registered with the same account_slot (corch/slot-quota.ts).
+const SlotQuotaInstant = z.string().datetime({ offset: true })
+export const SupervisorSlotQuotaReport = z.object({
+  type: z.literal('slot_quota_report'),
+  account_slot: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+  // null = the account reported no open 5h window (unknown, never 0): the eligibility rules cap it at one run.
+  five_h_pct: z.number().finite().min(0).max(100).nullable(),
+  seven_d_pct: z.number().finite().min(0).max(100),
+  resets_5h: SlotQuotaInstant.nullable(),
+  resets_7d: SlotQuotaInstant.nullable(),
+  fetched_at: SlotQuotaInstant,
+})
+export type SupervisorSlotQuotaReportT = z.infer<typeof SupervisorSlotQuotaReport>
+
 // P2 usage ledger — one event per assistant turn from the supervisor bridge.
 // Carries the four token buckets, the model, and the authoritative SDK cost
 // (`cost_source='sdk'`) or a flag for the hub to estimate (`'estimated'`).
@@ -190,6 +207,8 @@ export const AgentUsageEvent = z.object({
   cost_usd: z.number().nonnegative().default(0),
   cost_source: z.enum(['sdk', 'estimated']).default('sdk'),
   request_id: z.string().optional(),
+  // PTYCAP-05: same id as this turn's assistant_message.turn_id.
+  turn_id: z.string().min(1).max(128).optional(),
   ts: z.string().optional(),
   // PTYCAP Phase 1 — which runner produced this event. Omitted ⇒ 'stream-json'
   // (every pre-existing sender). 'pty-interactive' is the new PtyUsageEmitter
@@ -214,6 +233,7 @@ export const AgentInbound = z.discriminatedUnion('type', [
   AgentUserQuestion,
   AgentLog,
   AgentUsageReport,
+  SupervisorSlotQuotaReport,
   AgentUsageEvent,
   z.object({ type: z.literal('pong') }),
   SupervisorHello,
