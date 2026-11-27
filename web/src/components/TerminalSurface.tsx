@@ -620,7 +620,7 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
       // 10k lines: a long agent reply on a phone (~40 cols) wraps hard, and 5k
       // lines was cutting the top off. xterm allocates buffer lines lazily, so
       // the cost is only paid for lines actually emitted.
-      scrollback: 10000,
+      scrollback: 50000,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
       fontSize: 13,
       theme: {
@@ -637,6 +637,13 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     try { fit.fit() } catch {}
     termRef.current = term
     fitRef.current = fit
+
+    // KEEP SCROLLBACK ON REDRAW. The claude/codex TUI repaints with ED3 (`ESC[3J`,
+    // "erase saved lines") on resize/redraw; a phone's keyboard/viewport resize storm
+    // fires it repeatedly, so xterm wiped its whole scrollback and the owner could only
+    // scroll a few lines. The replay ring is raw bytes, so a reattach re-applied it too.
+    // Swallow only ED3 (param 3); ED0/1/2 still run normally.
+    term.parser?.registerCsiHandler({ final: 'J' }, (params) => params[0] === 3)
 
     // MOBILE INPUT HARDENING (iOS Safari / Android Chrome).
     // xterm renders a hidden helper <textarea> that receives keystrokes. On
